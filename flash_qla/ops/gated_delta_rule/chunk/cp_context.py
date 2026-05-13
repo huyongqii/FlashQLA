@@ -8,10 +8,12 @@ import tilelang
 
 from flash_qla.utils import tensor_cache
 
-if tilelang.contrib.nvcc.get_target_compute_version() == "9.0":
+_compute_version = tilelang.contrib.nvcc.get_target_compute_version()
+_compute_major = int(_compute_version.split(".")[0])
+if _compute_major >= 9:
     from .hopper import get_warmup_chunks, fused_gdr_h, correct_initial_states
 else:
-    raise ValueError("FlashQLA now support sm90 only.")
+    raise ValueError(f"FlashQLA requires sm90 (Hopper) or newer, got compute version {_compute_version}.")
 
 
 MULTI_PROCESSOR_COUNT = torch.cuda.get_device_properties().multi_processor_count

@@ -17,6 +17,8 @@ TARGET_NUM_CTAS = int(MULTI_PROCESSOR_COUNT * 0.7)
     pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
         # tilelang.PassConfigKey.TL_DISABLE_THREAD_STORAGE_SYNC: True,
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
     },
 )
 def tilelang_fused_chunk_gdr_fwd(

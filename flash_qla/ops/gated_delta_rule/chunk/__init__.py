@@ -7,10 +7,12 @@ import tilelang
 from flash_qla.utils import l2norm
 from flash_qla.ops.utils import chunk_local_cumsum, group_reduce_vector
 
-if tilelang.contrib.nvcc.get_target_compute_version() == "9.0":
+_compute_version = tilelang.contrib.nvcc.get_target_compute_version()
+_compute_major = int(_compute_version.split(".")[0])
+if _compute_major >= 9:
     from .hopper import fused_gdr_fwd, fused_gdr_bwd, fused_gdr_h, kkt_solve
 else:
-    raise ValueError("FlashQLA now support sm90 only.")
+    raise ValueError(f"FlashQLA requires sm90 (Hopper) or newer, got compute version {_compute_version}.")
 from .cp_context import intra_card_cp_preprocess
 
 

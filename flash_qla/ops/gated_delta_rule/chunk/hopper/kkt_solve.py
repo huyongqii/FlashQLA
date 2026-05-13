@@ -14,8 +14,8 @@ from flash_qla.utils import prepare_chunk_indices
     # out_idx=[-1],
     pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-        # tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        # tilelang.PassConfigKey.TL_ENABLE_ASYNC_COPY: True,
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
     },
 )
 def tilelang_kkt_solve(
