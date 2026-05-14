@@ -347,6 +347,9 @@ def fused_gdr_fwd(
     o = torch.empty_like(v)
 
     block_DV = int(os.environ.get("FLASHQLA_BLACKWELL_BLOCK_DV", "64"))
+    max_iters = int(os.environ.get("FLASHQLA_BLACKWELL_FWD_MAX_ITERS", "0"))
+    if max_iters > 0:
+        _debug(f"debug max_iters={max_iters}; output is partial and benchmark is invalid")
     tilelang_fused_chunk_gdr_fwd_kernel = tilelang_fused_chunk_gdr_fwd_blackwell_native(
         H,
         Hg,
@@ -364,7 +367,7 @@ def fused_gdr_fwd(
         use_initial_state=use_initial_state,
         store_final_state=output_final_state,
         store_o=output_o,
-        max_iters=int(os.environ.get("FLASHQLA_BLACKWELL_FWD_MAX_ITERS", "0")),
+        max_iters=max_iters,
         block_DV=block_DV,
     )
     tilelang_fused_chunk_gdr_fwd_kernel(

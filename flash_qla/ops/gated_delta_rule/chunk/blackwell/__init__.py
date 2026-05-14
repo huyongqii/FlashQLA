@@ -52,6 +52,7 @@ else:
 HAS_NATIVE_BLACKWELL_KERNELS = _USE_EXPERIMENTAL_NATIVE
 _WARNING_EMITTED = False
 _DEBUG_EMITTED = False
+_DEBUG_MESSAGES = set()
 
 
 def _debug_enabled() -> bool:
@@ -60,6 +61,10 @@ def _debug_enabled() -> bool:
 
 def _debug_dispatch(message: str):
     if _debug_enabled():
+        if os.environ.get("FLASHQLA_DEBUG_BLACKWELL_DISPATCH_REPEAT", "") != "1":
+            if message in _DEBUG_MESSAGES:
+                return
+            _DEBUG_MESSAGES.add(message)
         print(f"[FlashQLA Blackwell dispatch] {message}", flush=True)
 
 
