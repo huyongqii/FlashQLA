@@ -19,9 +19,10 @@ Blackwell performance path.
   compatibility path.
 - `FLASHQLA_BLACKWELL_NATIVE=1`: enable the experimental forward/kkt path that
   explicitly calls `T.tcgen05_gemm` and should fail instead of lowering to HMMA.
-- `FLASHQLA_BLACKWELL_NATIVE_KERNELS=kkt,fwd`: choose which experimental kernels
-  to enable. Use `kkt` to validate the TCGEN05 KKT solve while the fused forward
-  kernel falls back to the compatibility path.
+- `FLASHQLA_BLACKWELL_NATIVE_KERNELS=kkt`: choose which experimental kernels to
+  enable. The default is `kkt` only. Use `kkt,fwd` only for debugging the
+  mechanical TCGEN05 fused-forward port, which currently compiles but can hang
+  at runtime.
 - `scripts/inspect_blackwell_mma.py --all`: verify whether generated artifacts
   contain `tcgen05`, `TMEM`, `WGMMA`, or `HMMA`.
 
@@ -52,17 +53,17 @@ matrix products in the triangular inverse. TileLang 0.1.9 does not accept
 explicit CUDA-core accumulation loops. This avoids accidental HMMA/TF32 fallback
 while keeping the main BF16 product on TCGEN05.
 
-Run the first compile probe with:
+Run the first compile probe with KKT isolated:
 
 ```bash
 FLASHQLA_BLACKWELL_NATIVE=1 python tests/test_gdr.py --set profile --skip-bwd --hide-lat
 python scripts/inspect_blackwell_mma.py --no-run --all
 ```
 
-If the fused forward kernel hangs, isolate KKT first:
+To debug the mechanical fused-forward TCGEN05 port:
 
 ```bash
-FLASHQLA_BLACKWELL_NATIVE=1 FLASHQLA_BLACKWELL_NATIVE_KERNELS=kkt \
+FLASHQLA_BLACKWELL_NATIVE=1 FLASHQLA_BLACKWELL_NATIVE_KERNELS=kkt,fwd \
   python tests/test_gdr.py --set profile --skip-bwd --hide-lat
 python scripts/inspect_blackwell_mma.py --no-run --all
 ```
@@ -123,6 +124,32 @@ compatibility path until the fixed-length forward kernel is validated.
   - large head count / TP1
 - Avoid a single `grid_size -> block_DV` heuristic. Blackwell should have a
   per-shape policy table or generated autotune table.
+
+## Forward Rewrite Strategy
+
+The mechanical `fused_fwd.py` port proves that TCGEN05 lowering is reachable,
+but it is not a viable performance or correctness base because the Hopper
+512-thread producer/three-consumer warp-specialized pipeline can deadlock after
+TCGEN05/TMEM substitution.
+
+The native forward rewrite should proceed as a new kernel, not as more patches
+to the mechanical port:
+
+1. Build a fixed-length, single-CTA, single-consumer-warpgroup baseline for
+   `output_h=False` and `output_final_state=True`.
+2. Use one TCGEN05 GEMM at a time with immediate `mbarrier_wait_parity`.
+3. Keep `S` and `O` accumulators in TMEM across the operations that naturally
+   consume them; avoid fragment->TMEM->fragment round trips in the final design.
+4. Add the producer warpgroup and double-buffered shared loads only after the
+   single-consumer version passes correctness.
+5. Split policies by shape class:
+   - TP8/small head: prioritize low overhead and enough CTAs.
+   - TP2/TP1/large head: prioritize persistent TMEM state and high tensor-core
+     utilization.
+6. Reintroduce CP/varlen only after fixed-length paths are stable.
+
+This is the route toward best performance. The mechanical port remains useful
+only as a compiler probe for TileLang 0.1.9 TCGEN05 constraints.
 
 ## Difficulty
 

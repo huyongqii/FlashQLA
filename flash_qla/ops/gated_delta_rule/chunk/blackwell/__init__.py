@@ -31,7 +31,7 @@ _USE_EXPERIMENTAL_NATIVE = (
 )
 _NATIVE_KERNELS = {
     item.strip().lower()
-    for item in os.environ.get("FLASHQLA_BLACKWELL_NATIVE_KERNELS", "kkt,fwd").split(",")
+    for item in os.environ.get("FLASHQLA_BLACKWELL_NATIVE_KERNELS", "kkt").split(",")
     if item.strip()
 }
 
