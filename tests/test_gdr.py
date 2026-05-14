@@ -343,6 +343,7 @@ def test_gated_delta_rule(
                 prof_qla,
                 "[fwd] FlashQLA gdr",
                 "tilelang_fused_chunk_gdr_fwd_kernel_kernel",
+                "tilelang_fused_chunk_gdr_fwd_blackwell_native_kernel_kernel",
             ),
         }
         if "tilelang_get_warmup_chunks_kernel_kernel" in prof_qla.keys():

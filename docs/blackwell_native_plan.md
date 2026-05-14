@@ -216,6 +216,17 @@ FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE=1 FLASHQLA_BLACKWELL_NATIVE=1 \
   python tests/test_gdr.py --set profile --skip-bwd --no-cp --hide-acc
 ```
 
+If `MAX_ITERS=1` works but full length hangs, test the looped barrier path:
+
+```bash
+FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE=1 FLASHQLA_BLACKWELL_NATIVE=1 \
+  FLASHQLA_BLACKWELL_NATIVE_KERNELS=fwd FLASHQLA_BLACKWELL_FWD_MAX_ITERS=2 \
+  python tests/test_gdr.py --set profile --skip-bwd --no-cp --hide-acc
+```
+
+Any benchmark collected with `FLASHQLA_BLACKWELL_FWD_MAX_ITERS>0` is a runtime
+debug probe only and is not a valid full-sequence performance result.
+
 Before debugging that kernel, run the minimal TCGEN05 smoke test:
 
 ```bash
