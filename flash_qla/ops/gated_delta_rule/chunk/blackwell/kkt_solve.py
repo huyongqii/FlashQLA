@@ -194,22 +194,14 @@ def tilelang_kkt_solve(
                     a32i0_shared[k_s, k_t] = a32i_fragment[j_s, k_s, k_t]
                 else:
                     a32i1_shared[k_s, k_t] = a32i_fragment[j_s, k_s, k_t]
-            # FP32 x FP32 is not a supported TCGEN05 operand pattern in
-            # TileLang 0.1.9. Use CUDA-core accumulation here instead of
-            # falling back to HMMA/TF32.
-            T.clear(a32o_fragment)
-            for k_r in T.unroll(32):
-                for k_s, k_t in T.Parallel(32, 32):
-                    a32o_fragment[k_s, k_t] += (
-                        a32i1_shared[k_s, k_r] * a32o_shared[k_r, k_t]
-                    )
+            # The small FP32 32x32 solves are not a supported TCGEN05 operand
+            # pattern in TileLang 0.1.9, but hand-unrolled CUDA-core loops are
+            # much slower on B200. Let TileLang choose its fastest lowering for
+            # these two tiny GEMMs, while the dominant K@K^T path above remains
+            # explicit TCGEN05/TMEM.
+            T.gemm(a32i1_shared, a32o_shared, a32o_fragment, clear_accum=True)
             T.copy(a32o_fragment, a32o_shared)
-            T.clear(a32o_fragment)
-            for k_r in T.unroll(32):
-                for k_s, k_t in T.Parallel(32, 32):
-                    a32o_fragment[k_s, k_t] += (
-                        a32o_shared[k_s, k_r] * a32i0_shared[k_r, k_t]
-                    )
+            T.gemm(a32o_shared, a32i0_shared, a32o_fragment, clear_accum=True)
 
             # Combine inversion output
             for j_s, k_s, k_t in T.Parallel(2, 32, 32):
