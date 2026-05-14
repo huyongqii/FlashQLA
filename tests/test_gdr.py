@@ -23,6 +23,9 @@ from ref_gdr import chunk_gated_delta_rule_fwd as chunk_gated_delta_rule_fwd_ref
 from ref_gdr import chunk_gated_delta_rule_bwd as chunk_gated_delta_rule_bwd_ref
 
 
+_PRINTED_PROF_KEYS: set = set()
+
+
 def _find(prof: dict, *needles: str):
     """Look up a kernel time in `profile()`'s return dict by substring match.
 
@@ -31,6 +34,9 @@ def _find(prof: dict, *needles: str):
     after upgrading TileLang 0.1.8 -> 0.1.9 / FLA 0.5.x. Substring matching
     is good enough for benchmark display and returns None when nothing
     matches so callers can degrade gracefully.
+
+    The first time we fail to find a kernel, we dump the available keys so
+    the user can see exactly what `torch.profiler` returned in this build.
     """
     for k in prof.keys():
         if k == "total":
@@ -38,6 +44,15 @@ def _find(prof: dict, *needles: str):
         lname = k.lower()
         if all(n.lower() in lname for n in needles):
             return prof[k]
+
+    sig = (id(prof), needles)
+    if sig not in _PRINTED_PROF_KEYS:
+        _PRINTED_PROF_KEYS.add(sig)
+        keys_preview = sorted(k for k in prof.keys() if k != "total")[:30]
+        print(
+            f"[profile] no kernel matched needles={needles}; "
+            f"available keys ({len(prof) - 1} total, first 30): {keys_preview}"
+        )
     return None
 
 

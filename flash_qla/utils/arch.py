@@ -74,7 +74,12 @@ def is_blackwell(cc: str | None = None) -> bool:
     return cc in _BLACKWELL_LIKE_CCS
 
 
+_BLACKWELL_WARNING_EMITTED = False
+
+
 def assert_supported(cc: str | None = None) -> str:
+    global _BLACKWELL_WARNING_EMITTED
+
     cc = cc or get_compute_capability()
     if cc not in _SUPPORTED_CCS:
         raise ValueError(
@@ -82,9 +87,11 @@ def assert_supported(cc: str | None = None) -> str:
             f"Supported: sm_90 (Hopper), sm_100 / sm_100a (Blackwell). "
             f"Set FLASHQLA_FORCE_ARCH=sm90|sm100 to override."
         )
-    if cc in _BLACKWELL_LIKE_CCS:
-        # Tier-1: reuse hopper kernels on Blackwell. Warn so users know perf
-        # may be sub-optimal until Tier-3 specialized kernels are in place.
+    if cc in _BLACKWELL_LIKE_CCS and not _BLACKWELL_WARNING_EMITTED:
+        # Tier-1: reuse hopper kernels on Blackwell. Warn ONCE per process so
+        # users know perf may be sub-optimal until Tier-3 specialized kernels
+        # are in place.
+        _BLACKWELL_WARNING_EMITTED = True
         if os.environ.get("FLASHQLA_SUPPRESS_BLACKWELL_WARNING", "") != "1":
             warnings.warn(
                 "FlashQLA is running on sm_100 (Blackwell) using the Hopper "
