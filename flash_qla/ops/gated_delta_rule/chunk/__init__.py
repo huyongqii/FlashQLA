@@ -61,6 +61,12 @@ def chunk_gated_delta_rule_fwd(
         and not output_h
         and not auto_cp
     )
+    if precompute_p_enabled:
+        raise RuntimeError(
+            "FLASHQLA_BLACKWELL_PRECOMPUTE_P=1 is disabled: the first prototype "
+            "corrupted final_state on B200. Use the default pretransform-A path "
+            "while the P-reuse design is reworked."
+        )
     P = precompute_p(q, k, beta.shape[-1]) if precompute_p_enabled else None
     if auto_cp:
         initial_state, cu_seqlens, cp_seq_map, raw_cu_seqlens = (

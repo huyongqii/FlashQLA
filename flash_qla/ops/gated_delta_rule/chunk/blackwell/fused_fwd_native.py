@@ -18,6 +18,7 @@ def _debug_enabled() -> bool:
 
 _DEBUG_MESSAGES = set()
 _DEFAULT_SYNC_BARRIERS = frozenset(("load", "h"))
+_VALID_SYNC_BARRIERS = frozenset(("load", "h", "ag", "o", "hscale"))
 
 
 def _debug(message: str):
@@ -49,11 +50,11 @@ def _sync_barriers() -> set[str]:
         item = aliases.get(item.strip(), item.strip())
         if item:
             barriers.add(item)
-    unknown = barriers - _DEFAULT_SYNC_BARRIERS
+    unknown = barriers - _VALID_SYNC_BARRIERS
     if unknown:
         raise ValueError(
             "Unknown FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS entries: "
-            f"{sorted(unknown)}. Valid entries are {sorted(_DEFAULT_SYNC_BARRIERS)}"
+            f"{sorted(unknown)}. Valid entries are {sorted(_VALID_SYNC_BARRIERS)}"
         )
     return barriers
 
@@ -134,9 +135,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
             h_shared = T.alloc_shared((DK, block_DV), dtype=qkva_dtype)
             vd_shared = T.alloc_shared((block_S, block_DV), dtype=qkva_dtype)
             vn_shared = T.alloc_shared((block_S, block_DV), dtype=qkva_dtype)
-            p_shared = T.alloc_shared((block_S, block_S), dtype=qkva_dtype)
             g_shared = T.alloc_shared((block_S), dtype=accum_dtype, scope="shared")
-            b_shared = T.alloc_shared((block_S), dtype=accum_dtype, scope="shared")
             g_exp_shared = T.alloc_shared(
                 (block_S), dtype=accum_dtype, scope="shared"
             )
@@ -150,8 +149,14 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
             v_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
             p_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
             g_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
-            a_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
             g_last_local = T.alloc_local((1), dtype=accum_dtype)
+            if not input_a_is_ag:
+                b_shared = T.alloc_shared(
+                    (block_S), dtype=accum_dtype, scope="shared"
+                )
+                a_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
+            if not use_precomputed_p:
+                p_shared = T.alloc_shared((block_S, block_S), dtype=qkva_dtype)
 
             # Keep TMEM allocations small and reusable. This first native kernel
             # is sequential by design; later versions should keep S/O live in
@@ -193,7 +198,9 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
                 T.copy(a[bb, left:right, bh, 0:block_S], a_shared)
                 for j_s in T.Parallel(block_S):
                     g_shared[j_s] = g[bb, left + j_s, bh]
-                    b_shared[j_s] = b[bb, left + j_s, bh]
+                if not input_a_is_ag:
+                    for j_s in T.Parallel(block_S):
+                        b_shared[j_s] = b[bb, left + j_s, bh]
 
                 for j_s in T.Parallel(block_S):
                     g_exp_shared[j_s] = T.exp2(g_shared[j_s] * 1.442695)
@@ -269,8 +276,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
                 # P = Q @ K^T. Optionally reuse a precomputed P buffer to
                 # avoid calculating the same P in both DV tiles.
                 if use_precomputed_p:
-                    T.copy(p_pre[bb, left:right, bh, 0:block_S], p_shared)
-                    T.copy(p_shared, p_fragment)
+                    T.copy(p_pre[bb, left:right, bh, 0:block_S], p_fragment)
                 else:
                     T.tcgen05_gemm(
                         q_shared,
@@ -297,20 +303,31 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
                 # Pg = scale * G * P; O = scale * g * O + Pg @ Vd
                 for j_s, j_t in T.Parallel(block_S, block_S):
                     p_fragment[j_s, j_t] *= scale * g_fragment[j_s, j_t]
-                    p_shared[j_s, j_t] = p_fragment[j_s, j_t]
+                if not use_precomputed_p:
+                    T.copy(p_fragment, p_shared)
                 for j_s, j_v in T.Parallel(block_S, block_DV):
                     o_fragment[j_s, j_v] *= scale * g_exp_shared[j_s]
                 T.copy(o_fragment, tmp_tmem[:, 0:block_DV])
                 if use_bar_o:
                     T.barrier_arrive(bar_o)
                     T.barrier_wait(bar_o, i_s % 2)
-                T.tcgen05_gemm(
-                    p_shared,
-                    vd_shared,
-                    tmp_tmem[:, 0:block_DV],
-                    clear_accum=False,
-                    mbar=mbar_o1[mbar_slot],
-                )
+                if use_precomputed_p:
+                    T.copy(p_fragment, p_tmem)
+                    T.tcgen05_gemm(
+                        p_tmem,
+                        vd_shared,
+                        tmp_tmem[:, 0:block_DV],
+                        clear_accum=False,
+                        mbar=mbar_o1[mbar_slot],
+                    )
+                else:
+                    T.tcgen05_gemm(
+                        p_shared,
+                        vd_shared,
+                        tmp_tmem[:, 0:block_DV],
+                        clear_accum=False,
+                        mbar=mbar_o1[mbar_slot],
+                    )
                 T.mbarrier_wait_parity(mbar_o1[mbar_slot], mbar_phase)
                 T.copy(tmp_tmem[:, 0:block_DV], o_fragment)
 
