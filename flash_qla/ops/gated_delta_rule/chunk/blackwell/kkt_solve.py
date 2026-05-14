@@ -325,13 +325,202 @@ def tilelang_kkt_solve(
     return tilelang_kkt_solve_kernel
 
 
+@tilelang.jit(
+    pass_configs={
+        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
+    },
+)
+def tilelang_kkt_solve_fixed_fast(
+    H,
+    Hg,
+    DK,
+    chunk_size,
+    accum_dtype,
+    qkva_dtype,
+    b_dtype,
+):
+    data_batch_size = T.dynamic("data_batch_size")
+    num_tokens = T.dynamic("num_tokens")
+    num_chunks = T.dynamic("num_chunks")
+    block_S = chunk_size
+
+    k_shape = (data_batch_size, num_tokens, Hg, DK)
+    a_shape = (data_batch_size, num_tokens, H, chunk_size)
+    b_shape = (data_batch_size, num_tokens, H)
+
+    @T.prim_func
+    def tilelang_kkt_solve_fixed_fast_kernel(
+        k: T.Tensor(k_shape, dtype=qkva_dtype),
+        b: T.Tensor(b_shape, dtype=b_dtype),
+        a: T.Tensor(a_shape, dtype=qkva_dtype),
+        num_chunks: T.int32,
+    ):
+        with T.Kernel(num_chunks * H, threads=128) as (bch,):
+            bc, bh = bch // H, bch % H
+            bhg = bh // (H // Hg)
+            bb = bc % data_batch_size
+            chunk_idx = bc // data_batch_size
+            left = chunk_idx * block_S
+            right = left + block_S
+
+            k_shared = T.alloc_shared((block_S, DK), dtype=qkva_dtype)
+            b_shared = T.alloc_shared((block_S), dtype=accum_dtype, scope="shared")
+            a64_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
+
+            a16i_row = T.alloc_fragment((4, 16), dtype=accum_dtype)
+            a16i_sum = T.alloc_fragment((4, 16), dtype=accum_dtype)
+
+            a16i_shared = T.alloc_shared((4, 17, 16), dtype=accum_dtype)
+            a16o_shared = T.alloc_shared((2, 17, 16), dtype=accum_dtype)
+            a16o_fragment = T.alloc_fragment((2, 16, 16), dtype=accum_dtype)
+
+            a32i_fragment = T.alloc_fragment((2, 32, 32), dtype=accum_dtype)
+            a32i0_shared = T.alloc_shared((32, 32), dtype=accum_dtype)
+            a32i1_shared = T.alloc_shared((32, 32), dtype=accum_dtype)
+            a32o_shared = T.alloc_shared((32, 32), dtype=accum_dtype)
+            a32o_fragment = T.alloc_fragment((32, 32), dtype=accum_dtype)
+
+            a64_shared = T.alloc_shared((block_S, block_S), dtype=qkva_dtype)
+
+            T.annotate_layout(
+                {
+                    a16i_shared: tilelang.layout.make_linear_layout(a16i_shared),
+                    a16o_shared: tilelang.layout.make_linear_layout(a16o_shared),
+                }
+            )
+
+            bar_load = T.alloc_barrier(arrive_count=128)
+            bar_a32 = T.alloc_barrier(arrive_count=128)
+            bar_store = T.alloc_barrier(arrive_count=128)
+
+            T.copy(k[bb, left:right, bhg, 0:DK], k_shared)
+            for j_s in T.Parallel(block_S):
+                b_shared[j_s] = b[bb, left + j_s, bh]
+            T.barrier_arrive(bar_load)
+            T.barrier_wait(bar_load, 0)
+
+            # A = I + StrictLower(beta * K @ K^T)
+            T.gemm(k_shared, k_shared, a64_fragment, transpose_B=True, clear_accum=True)
+            for j_s, j_t in T.Parallel(block_S, block_S):
+                a64_fragment[j_s, j_t] *= b_shared[j_s]
+            for j_s, j_t in T.Parallel(block_S, block_S):
+                if j_s < j_t:
+                    a64_fragment[j_s, j_t] = 0
+                elif j_s == j_t:
+                    a64_fragment[j_s, j_t] = 1
+
+            for j_s, j_t in T.Parallel(block_S, block_S):
+                if j_s >= 32 and j_t < 32:
+                    a32o_shared[j_s - 32, j_t] = -a64_fragment[j_s, j_t]
+                elif (j_s // 16) == (j_t // 16) + 1:
+                    a16o_shared[j_s // 32, j_s % 16, j_t % 16] = -a64_fragment[
+                        j_s, j_t
+                    ]
+                elif (j_s // 16) == (j_t // 16):
+                    a16i_shared[j_s // 16, j_s % 16, j_t % 16] = a64_fragment[
+                        j_s, j_t
+                    ]
+
+            T.clear(a16i_row)
+            for k_s in T.unroll(1, 16):
+                for j_s, k_t in T.Parallel(4, 16):
+                    if k_t < k_s:
+                        a16i_row[j_s, k_t] = a16i_shared[j_s, k_s, k_t]
+                T.clear(a16i_sum)
+                for k_r in T.unroll(k_s):
+                    for j_s, k_t in T.Parallel(4, 16):
+                        a16i_sum[j_s, k_t] -= (
+                            a16i_shared[j_s, k_r, k_t] * a16i_row[j_s, k_r]
+                        )
+                for j_s, k_t in T.Parallel(4, 16):
+                    if k_t < k_s:
+                        a16i_shared[j_s, k_s, k_t] = a16i_sum[j_s, k_t]
+
+            T.clear(a16o_fragment)
+            for k_r in T.unroll(16):
+                for j_s, k_s, k_t in T.Parallel(2, 16, 16):
+                    a16o_fragment[j_s, k_s, k_t] += (
+                        a16i_shared[j_s * 2 + 1, k_s, k_r]
+                        * a16o_shared[j_s, k_r, k_t]
+                    )
+            for j_s, k_s, k_t in T.Parallel(2, 16, 16):
+                a16o_shared[j_s, k_t, k_s] = a16o_fragment[j_s, k_s, k_t]
+            T.clear(a16o_fragment)
+            for k_r in T.unroll(16):
+                for j_s, k_s, k_t in T.Parallel(2, 16, 16):
+                    a16o_fragment[j_s, k_s, k_t] += (
+                        a16o_shared[j_s, k_r, k_s]
+                        * a16i_shared[j_s * 2, k_r, k_t]
+                    )
+            T.copy(a16o_fragment, a16o_shared[:, 0:16, 0:16])
+
+            for j_s, k_s, k_t in T.Parallel(2, 32, 32):
+                if k_s < 16 and k_t >= 16:
+                    a32i_fragment[j_s, k_s, k_t] = 0
+            for j_s, k_s, k_t in T.Parallel(2, 32, 32):
+                if k_s >= 16 and k_t < 16:
+                    a32i_fragment[j_s, k_s, k_t] = a16o_shared[j_s, k_s - 16, k_t]
+            for j_s, k_s, k_t in T.Parallel(2, 32, 32):
+                if k_s // 16 == k_t // 16:
+                    a32i_fragment[j_s, k_s, k_t] = a16i_shared[
+                        j_s * 2 + k_s // 16, k_s % 16, k_t % 16
+                    ]
+            for j_s, k_s, k_t in T.Parallel(2, 32, 32):
+                if j_s == 0:
+                    a32i0_shared[k_s, k_t] = a32i_fragment[j_s, k_s, k_t]
+                else:
+                    a32i1_shared[k_s, k_t] = a32i_fragment[j_s, k_s, k_t]
+            T.barrier_arrive(bar_a32)
+            T.barrier_wait(bar_a32, 0)
+
+            T.gemm(a32i1_shared, a32o_shared, a32o_fragment, clear_accum=True)
+            T.copy(a32o_fragment, a32o_shared)
+            T.gemm(a32o_shared, a32i0_shared, a32o_fragment, clear_accum=True)
+
+            for j_s, k_s, k_t in T.Parallel(2, 32, 32):
+                a64_shared[j_s * 32 + k_s, j_s * 32 + k_t] = a32i_fragment[
+                    j_s, k_s, k_t
+                ]
+            for k_s, k_t in T.Parallel(32, 32):
+                a64_shared[32 + k_s, k_t] = a32o_fragment[k_s, k_t]
+            for k_s, k_t in T.Parallel(32, 32):
+                a64_shared[k_s, 32 + k_t] = 0
+            T.barrier_arrive(bar_store)
+            T.barrier_wait(bar_store, 0)
+
+            T.copy(a64_shared, a[bb, left:right, bh, 0:block_S])
+
+    return tilelang_kkt_solve_fixed_fast_kernel
+
+
 def kkt_solve(
     k: torch.Tensor,
     b: torch.Tensor,
     chunk_size: int = 64,
     cu_seqlens: Optional[torch.LongTensor] = None,
 ):
-    if os.environ.get("FLASHQLA_BLACKWELL_KKT_EXPERIMENT", "") != "tcgen05":
+    experiment = os.environ.get("FLASHQLA_BLACKWELL_KKT_EXPERIMENT", "")
+    if experiment == "fast" and cu_seqlens is None:
+        batch_size, num_tokens, Hg, K = k.shape
+        _, _, H = b.shape
+        assert K == 128
+        assert chunk_size == 64
+        num_chunks = batch_size * tilelang.cdiv(num_tokens, chunk_size)
+        a = torch.empty(
+            (batch_size, num_tokens, H, chunk_size), dtype=k.dtype, device=k.device
+        )
+        tilelang_kkt_solve_kernel = tilelang_kkt_solve_fixed_fast(
+            H,
+            Hg,
+            K,
+            chunk_size,
+            qkva_dtype=k.dtype,
+            b_dtype=b.dtype,
+            accum_dtype="float32",
+        )
+        tilelang_kkt_solve_kernel(k, b, a, num_chunks)
+        return a
+    if experiment != "tcgen05":
         return hopper_kkt_solve(k, b, chunk_size, cu_seqlens)
 
     batch_size, num_tokens, Hg, K = k.shape

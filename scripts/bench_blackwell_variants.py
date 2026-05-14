@@ -33,7 +33,19 @@ def _run_variant(name: str, args: argparse.Namespace) -> int:
     env = os.environ.copy()
     env.pop("FLASHQLA_BLACKWELL_NATIVE", None)
     env.pop("FLASHQLA_BLACKWELL_NATIVE_KERNELS", None)
+    env.pop("FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE", None)
+    env.pop("FLASHQLA_BLACKWELL_BLOCK_DV", None)
+    env.pop("FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS", None)
+    env.pop("FLASHQLA_CORRECTNESS_REPEATS", None)
     env.update(VARIANTS[name])
+    if "fwd" in env.get("FLASHQLA_BLACKWELL_NATIVE_KERNELS", ""):
+        env["FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE"] = "1"
+    if args.block_dv is not None:
+        env["FLASHQLA_BLACKWELL_BLOCK_DV"] = str(args.block_dv)
+    if args.sync_barriers is not None:
+        env["FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS"] = args.sync_barriers
+    if args.correctness_repeats is not None:
+        env["FLASHQLA_CORRECTNESS_REPEATS"] = str(args.correctness_repeats)
 
     cmd = [
         sys.executable,
@@ -42,6 +54,8 @@ def _run_variant(name: str, args: argparse.Namespace) -> int:
         args.set,
         "--skip-bwd",
     ]
+    if args.no_cp:
+        cmd.append("--no-cp")
     if args.hide_acc:
         cmd.append("--hide-acc")
     if args.hide_lat:
@@ -54,7 +68,19 @@ def _run_variant(name: str, args: argparse.Namespace) -> int:
         cmd.extend(["--nvh", str(args.nvh)])
 
     print("=" * 80, flush=True)
-    print(f"variant={name} env={VARIANTS[name]}", flush=True)
+    variant_env = {
+        key: env[key]
+        for key in (
+            "FLASHQLA_BLACKWELL_NATIVE",
+            "FLASHQLA_BLACKWELL_NATIVE_KERNELS",
+            "FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE",
+            "FLASHQLA_BLACKWELL_BLOCK_DV",
+            "FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS",
+            "FLASHQLA_CORRECTNESS_REPEATS",
+        )
+        if key in env
+    }
+    print(f"variant={name} env={variant_env}", flush=True)
     print("cmd=" + " ".join(cmd), flush=True)
     proc = subprocess.run(cmd, env=env, check=False)
     print(f"variant={name} returncode={proc.returncode}", flush=True)
@@ -72,6 +98,10 @@ def main() -> int:
     parser.add_argument("--seqlen", type=int, default=None)
     parser.add_argument("--nkh", type=int, default=None)
     parser.add_argument("--nvh", type=int, default=None)
+    parser.add_argument("--block-dv", type=int, default=None)
+    parser.add_argument("--sync-barriers", default=None)
+    parser.add_argument("--correctness-repeats", type=int, default=None)
+    parser.add_argument("--no-cp", action="store_true")
     parser.add_argument("--hide-acc", action="store_true")
     parser.add_argument("--hide-lat", action="store_true")
     args = parser.parse_args()
