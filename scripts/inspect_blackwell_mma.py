@@ -178,7 +178,11 @@ def main() -> int:
         _trigger_flashqla_compile(args)
 
     roots = _artifact_roots(args.root)
-    artifacts = _iter_artifacts(roots, None if args.all or args.no_run else start_time)
+    since = None if args.all or args.no_run else start_time
+    artifacts = _iter_artifacts(roots, since)
+    if not artifacts and since is not None:
+        print("no recent artifacts found; falling back to full artifact scan")
+        artifacts = _iter_artifacts(roots, None)
     print(f"scanned_roots={':'.join(str(root) for root in roots)}")
     print(f"candidate_artifacts={len(artifacts)}")
 
@@ -216,7 +220,9 @@ def main() -> int:
 
     print(
         "RESULT: inconclusive. Ensure cuobjdump/nvdisasm is installed and rerun with "
-        "--all or --root pointing at the TileLang cache directory."
+        "--all or --root pointing at the TileLang/TVM cache directory. If TVM "
+        "debug artifacts are created and removed too quickly, run the benchmark "
+        "once, then rerun this script with --no-run --all."
     )
     return 1
 
