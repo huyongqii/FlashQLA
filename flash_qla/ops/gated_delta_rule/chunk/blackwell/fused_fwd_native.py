@@ -413,7 +413,7 @@ def fused_gdr_fwd(
     max_iters = int(os.environ.get("FLASHQLA_BLACKWELL_FWD_MAX_ITERS", "0"))
     if max_iters > 0:
         _debug(f"debug max_iters={max_iters}; output is partial and benchmark is invalid")
-    num_threads = int(os.environ.get("FLASHQLA_BLACKWELL_FWD_THREADS", "128"))
+    num_threads = int(os.environ.get("FLASHQLA_BLACKWELL_FWD_THREADS", "256"))
     if num_threads not in (128, 256):
         raise ValueError(
             "FLASHQLA_BLACKWELL_FWD_THREADS must be 128 or 256 for the current "
