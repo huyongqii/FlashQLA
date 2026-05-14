@@ -47,9 +47,9 @@ export FLASHQLA_AUTOCP=0
 export FLASHQLA_SUPPRESS_BLACKWELL_WARNING=1
 # fail if sm_100 would fall back to non-native HMMA/Hopper-compatible kernels
 export FLASHQLA_REQUIRE_BLACKWELL_NATIVE=1
-# enable the experimental Blackwell native path (currently kkt only by default)
+# enable experimental Blackwell native kernels
 export FLASHQLA_BLACKWELL_NATIVE=1
-# explicitly select experimental kernels; `fwd` currently compiles but may hang
+# explicitly select experimental kernels; current kkt prototype is correctness-only
 export FLASHQLA_BLACKWELL_NATIVE_KERNELS=kkt
 ```
 

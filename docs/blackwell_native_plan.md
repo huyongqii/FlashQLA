@@ -20,9 +20,11 @@ Blackwell performance path.
 - `FLASHQLA_BLACKWELL_NATIVE=1`: enable the experimental forward/kkt path that
   explicitly calls `T.tcgen05_gemm` and should fail instead of lowering to HMMA.
 - `FLASHQLA_BLACKWELL_NATIVE_KERNELS=kkt`: choose which experimental kernels to
-  enable. The default is `kkt` only. Use `kkt,fwd` only for debugging the
-  mechanical TCGEN05 fused-forward port, which currently compiles but can hang
-  at runtime.
+  enable. The default is empty, which keeps all kernels on the compatibility
+  path even when `FLASHQLA_BLACKWELL_NATIVE=1` is set. Use `kkt` only for
+  correctness/codegen experiments; the current KKT prototype is slower than the
+  compatibility path. Use `kkt,fwd` only for debugging the mechanical TCGEN05
+  fused-forward port, which currently compiles but can hang at runtime.
 - `scripts/inspect_blackwell_mma.py --all`: verify whether generated artifacts
   contain `tcgen05`, `TMEM`, `WGMMA`, or `HMMA`.
 
@@ -56,7 +58,8 @@ while keeping the main BF16 product on TCGEN05.
 Run the first compile probe with KKT isolated:
 
 ```bash
-FLASHQLA_BLACKWELL_NATIVE=1 python tests/test_gdr.py --set profile --skip-bwd --hide-lat
+FLASHQLA_BLACKWELL_NATIVE=1 FLASHQLA_BLACKWELL_NATIVE_KERNELS=kkt \
+  python tests/test_gdr.py --set profile --skip-bwd --hide-lat
 python scripts/inspect_blackwell_mma.py --no-run --all
 ```
 
@@ -76,6 +79,10 @@ FLASHQLA_BLACKWELL_NATIVE=1 FLASHQLA_BLACKWELL_NATIVE_KERNELS=kkt,fwd \
   python tests/test_gdr.py --set profile --skip-bwd --hide-lat
 python scripts/inspect_blackwell_mma.py --no-run --all
 ```
+
+The active `fwd` experiment is `chunk/blackwell/fused_fwd_native.py`, a
+fixed-length single-consumer TCGEN05 baseline. The older mechanical port remains
+in `chunk/blackwell/fused_fwd.py` as a compiler probe only.
 
 If this fails with a TCGEN05 operand/layout error, the next implementation step
 is to move the failing accumulator to `T.alloc_tmem` and annotate the matching
@@ -159,6 +166,28 @@ to the mechanical port:
 
 This is the route toward best performance. The mechanical port remains useful
 only as a compiler probe for TileLang 0.1.9 TCGEN05 constraints.
+
+## Current B200 Finding
+
+For `B=1, Hk=64, Hv=64`, the KKT-only TCGEN05 prototype is currently slower than
+the compatibility path. Example `T=32768`:
+
+- FLA total: ~3.23 ms
+- FlashQLA total with KKT prototype + compatibility fused GDR: ~12.85 ms
+- FlashQLA `kkt_solve`: ~5.45 ms
+- FlashQLA `fused_chunk_gdr_fwd`: ~7.40 ms
+
+Therefore the current KKT prototype should not be enabled for performance runs
+or SGLang experiments. It is a proof that TileLang 0.1.9 can emit TCGEN05/TMEM
+for this operator family. The performance path must focus on a new native fused
+forward kernel and a redesigned KKT solve that avoids TMEM copy-back and slow
+FP32 helper loops.
+
+Use the variant runner to compare clean subprocesses:
+
+```bash
+python scripts/bench_blackwell_variants.py --variants compat,kkt --set profile
+```
 
 ## Difficulty
 

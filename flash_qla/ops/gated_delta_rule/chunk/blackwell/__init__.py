@@ -31,13 +31,13 @@ _USE_EXPERIMENTAL_NATIVE = (
 )
 _NATIVE_KERNELS = {
     item.strip().lower()
-    for item in os.environ.get("FLASHQLA_BLACKWELL_NATIVE_KERNELS", "kkt").split(",")
+    for item in os.environ.get("FLASHQLA_BLACKWELL_NATIVE_KERNELS", "").split(",")
     if item.strip()
 }
 
 if _USE_EXPERIMENTAL_NATIVE:
     if "fwd" in _NATIVE_KERNELS or "all" in _NATIVE_KERNELS:
-        from .fused_fwd import fused_gdr_fwd as _native_fused_gdr_fwd
+        from .fused_fwd_native import fused_gdr_fwd as _native_fused_gdr_fwd
     else:
         _native_fused_gdr_fwd = None
     if "kkt" in _NATIVE_KERNELS or "all" in _NATIVE_KERNELS:
