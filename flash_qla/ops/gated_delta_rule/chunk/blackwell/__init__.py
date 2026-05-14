@@ -29,10 +29,21 @@ _USE_EXPERIMENTAL_NATIVE = (
     os.environ.get("FLASHQLA_BLACKWELL_NATIVE", "") == "1"
     or os.environ.get("FLASHQLA_REQUIRE_BLACKWELL_NATIVE", "") == "1"
 )
+_NATIVE_KERNELS = {
+    item.strip().lower()
+    for item in os.environ.get("FLASHQLA_BLACKWELL_NATIVE_KERNELS", "kkt,fwd").split(",")
+    if item.strip()
+}
 
 if _USE_EXPERIMENTAL_NATIVE:
-    from .fused_fwd import fused_gdr_fwd as _native_fused_gdr_fwd
-    from .kkt_solve import kkt_solve as _native_kkt_solve
+    if "fwd" in _NATIVE_KERNELS or "all" in _NATIVE_KERNELS:
+        from .fused_fwd import fused_gdr_fwd as _native_fused_gdr_fwd
+    else:
+        _native_fused_gdr_fwd = None
+    if "kkt" in _NATIVE_KERNELS or "all" in _NATIVE_KERNELS:
+        from .kkt_solve import kkt_solve as _native_kkt_solve
+    else:
+        _native_kkt_solve = None
 else:
     _native_fused_gdr_fwd = None
     _native_kkt_solve = None
@@ -66,6 +77,8 @@ def _require_or_warn(kernel_name: str):
 def kkt_solve(*args, **kwargs):
     if _native_kkt_solve is not None:
         return _native_kkt_solve(*args, **kwargs)
+    if _USE_EXPERIMENTAL_NATIVE:
+        return _hopper_kkt_solve(*args, **kwargs)
     _require_or_warn("kkt_solve")
     return _hopper_kkt_solve(*args, **kwargs)
 
@@ -73,6 +86,8 @@ def kkt_solve(*args, **kwargs):
 def fused_gdr_fwd(*args, **kwargs):
     if _native_fused_gdr_fwd is not None:
         return _native_fused_gdr_fwd(*args, **kwargs)
+    if _USE_EXPERIMENTAL_NATIVE:
+        return _hopper_fused_gdr_fwd(*args, **kwargs)
     _require_or_warn("fused_gdr_fwd")
     return _hopper_fused_gdr_fwd(*args, **kwargs)
 

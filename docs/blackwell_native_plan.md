@@ -19,6 +19,9 @@ Blackwell performance path.
   compatibility path.
 - `FLASHQLA_BLACKWELL_NATIVE=1`: enable the experimental forward/kkt path that
   explicitly calls `T.tcgen05_gemm` and should fail instead of lowering to HMMA.
+- `FLASHQLA_BLACKWELL_NATIVE_KERNELS=kkt,fwd`: choose which experimental kernels
+  to enable. Use `kkt` to validate the TCGEN05 KKT solve while the fused forward
+  kernel falls back to the compatibility path.
 - `scripts/inspect_blackwell_mma.py --all`: verify whether generated artifacts
   contain `tcgen05`, `TMEM`, `WGMMA`, or `HMMA`.
 
@@ -53,6 +56,14 @@ Run the first compile probe with:
 
 ```bash
 FLASHQLA_BLACKWELL_NATIVE=1 python tests/test_gdr.py --set profile --skip-bwd --hide-lat
+python scripts/inspect_blackwell_mma.py --no-run --all
+```
+
+If the fused forward kernel hangs, isolate KKT first:
+
+```bash
+FLASHQLA_BLACKWELL_NATIVE=1 FLASHQLA_BLACKWELL_NATIVE_KERNELS=kkt \
+  python tests/test_gdr.py --set profile --skip-bwd --hide-lat
 python scripts/inspect_blackwell_mma.py --no-run --all
 ```
 
