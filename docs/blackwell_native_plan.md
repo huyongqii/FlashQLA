@@ -141,6 +141,17 @@ compatibility path until the fixed-length forward kernel is validated.
 - Avoid a single `grid_size -> block_DV` heuristic. Blackwell should have a
   per-shape policy table or generated autotune table.
 
+TCGEN05 mbarrier reuse note: the native fwd prototype uses 4 mbarrier slots per
+GEMM site and flips wait parity by reuse round:
+
+```text
+slot = chunk_idx % 4
+phase = (chunk_idx // 4) % 2
+```
+
+This was introduced after `MAX_ITERS=4` passed but `MAX_ITERS=8` hung with fixed
+phase 0, indicating that barrier reuse needs explicit phase progression.
+
 ## Forward Rewrite Strategy
 
 The mechanical `fused_fwd.py` port proves that TCGEN05 lowering is reachable,

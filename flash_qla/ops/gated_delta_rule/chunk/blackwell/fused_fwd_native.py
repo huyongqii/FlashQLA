@@ -138,6 +138,8 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
             for i_s in T.serial(num_iters):
                 left = i_s * block_S
                 right = left + block_S
+                mbar_slot = i_s % 4
+                mbar_phase = (i_s // 4) % 2
 
                 T.copy(q[bb, left:right, bhg, 0:DK], q_shared)
                 T.copy(k[bb, left:right, bhg, 0:DK], k_shared)
@@ -162,9 +164,9 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
                     h_shared,
                     tmp_tmem[:, 0:block_DV],
                     clear_accum=True,
-                    mbar=mbar_u[i_s % 4],
+                    mbar=mbar_u[mbar_slot],
                 )
-                T.mbarrier_wait_parity(mbar_u[i_s % 4], 0)
+                T.mbarrier_wait_parity(mbar_u[mbar_slot], mbar_phase)
                 T.copy(tmp_tmem[:, 0:block_DV], u_fragment)
 
                 # W = V - g * U
@@ -195,9 +197,9 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
                     v_shared,
                     tmp_tmem[:, 0:block_DV],
                     clear_accum=True,
-                    mbar=mbar_v[i_s % 4],
+                    mbar=mbar_v[mbar_slot],
                 )
-                T.mbarrier_wait_parity(mbar_v[i_s % 4], 0)
+                T.mbarrier_wait_parity(mbar_v[mbar_slot], mbar_phase)
                 T.copy(tmp_tmem[:, 0:block_DV], v_fragment)
                 T.copy(v_fragment, vd_shared)
 
@@ -213,9 +215,9 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
                     p_tmem,
                     transpose_B=True,
                     clear_accum=True,
-                    mbar=mbar_p[i_s % 4],
+                    mbar=mbar_p[mbar_slot],
                 )
-                T.mbarrier_wait_parity(mbar_p[i_s % 4], 0)
+                T.mbarrier_wait_parity(mbar_p[mbar_slot], mbar_phase)
                 T.copy(p_tmem, p_fragment)
 
                 # O = Q @ S
@@ -224,9 +226,9 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
                     h_shared,
                     tmp_tmem[:, 0:block_DV],
                     clear_accum=True,
-                    mbar=mbar_o0[i_s % 4],
+                    mbar=mbar_o0[mbar_slot],
                 )
-                T.mbarrier_wait_parity(mbar_o0[i_s % 4], 0)
+                T.mbarrier_wait_parity(mbar_o0[mbar_slot], mbar_phase)
                 T.copy(tmp_tmem[:, 0:block_DV], o_fragment)
 
                 # Pg = scale * G * P; O = scale * g * O + Pg @ Vd
@@ -241,9 +243,9 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
                     vd_shared,
                     tmp_tmem[:, 0:block_DV],
                     clear_accum=False,
-                    mbar=mbar_o1[i_s % 4],
+                    mbar=mbar_o1[mbar_slot],
                 )
-                T.mbarrier_wait_parity(mbar_o1[i_s % 4], 0)
+                T.mbarrier_wait_parity(mbar_o1[mbar_slot], mbar_phase)
                 T.copy(tmp_tmem[:, 0:block_DV], o_fragment)
 
                 if store_o:
@@ -260,9 +262,9 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
                     h_tmem[:, 0:block_DV],
                     transpose_A=True,
                     clear_accum=False,
-                    mbar=mbar_h[i_s % 4],
+                    mbar=mbar_h[mbar_slot],
                 )
-                T.mbarrier_wait_parity(mbar_h[i_s % 4], 0)
+                T.mbarrier_wait_parity(mbar_h[mbar_slot], mbar_phase)
                 T.copy(h_tmem[:, 0:block_DV], h_fragment)
 
             if store_final_state:
