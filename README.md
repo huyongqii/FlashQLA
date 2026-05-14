@@ -57,10 +57,11 @@ python scripts/inspect_blackwell_mma.py
 python scripts/inspect_blackwell_mma.py --q-heads 16 --v-heads 64 --tokens 2048
 ```
 
-The script reports whether the generated code contains Blackwell `tcgen05`
-instructions or Hopper `wgmma` instructions. If it reports WGMMA, FlashQLA is
-still effectively running Hopper-style tensor core code on Blackwell and needs
-a dedicated Blackwell kernel path before serious B200/B300 performance tuning.
+The script reports whether the generated code contains Blackwell `tcgen05` /
+`TMEM`, Hopper `wgmma`, or older `HMMA` instructions. If it reports WGMMA or
+HMMA, FlashQLA is still effectively running a non-Blackwell-native tensor-core
+path and needs a dedicated Blackwell kernel path before serious B200/B300
+performance tuning.
 
 ## Usage
 

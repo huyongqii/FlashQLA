@@ -23,7 +23,9 @@ import time
 
 TCGEN_PATTERNS = ("tcgen05", "tcgen")
 WGMMA_PATTERNS = ("wgmma", "wgmma.mma_async")
-ARTIFACT_SUFFIXES = (".cubin", ".so", ".ptx", ".sass")
+HMMA_PATTERNS = ("hmma", "hmma.16816", "hmma.1688")
+TMEM_PATTERNS = ("tmem", "tcgen05.alloc", "tcgen05.commit")
+ARTIFACT_SUFFIXES = (".cubin", ".so", ".ptx", ".sass", ".cu", ".ll")
 
 
 def _run(cmd: list[str], timeout: int = 120) -> str:
@@ -47,6 +49,7 @@ def _artifact_roots(extra_roots: list[str]) -> list[Path]:
         os.environ.get("CUDA_CACHE_PATH"),
         "~/.cache",
         "/tmp",
+        "/tmp/tvm-debug-mode-tempdirs",
         "/var/tmp",
         str(Path.cwd()),
     ]
@@ -92,11 +95,13 @@ def _artifact_text(path: Path) -> str:
     return ""
 
 
-def _classify(text: str) -> tuple[bool, bool]:
+def _classify(text: str) -> tuple[bool, bool, bool, bool]:
     lower = text.lower()
     has_tcgen = any(pattern in lower for pattern in TCGEN_PATTERNS)
     has_wgmma = any(pattern in lower for pattern in WGMMA_PATTERNS)
-    return has_tcgen, has_wgmma
+    has_hmma = any(pattern in lower for pattern in HMMA_PATTERNS)
+    has_tmem = any(pattern in lower for pattern in TMEM_PATTERNS)
+    return has_tcgen, has_wgmma, has_hmma, has_tmem
 
 
 def _trigger_flashqla_compile(args: argparse.Namespace) -> None:
@@ -180,24 +185,34 @@ def main() -> int:
     hits = []
     for path in artifacts:
         text = _artifact_text(path)
-        has_tcgen, has_wgmma = _classify(text)
-        if has_tcgen or has_wgmma:
-            hits.append((path, has_tcgen, has_wgmma))
+        has_tcgen, has_wgmma, has_hmma, has_tmem = _classify(text)
+        if has_tcgen or has_wgmma or has_hmma or has_tmem:
+            hits.append((path, has_tcgen, has_wgmma, has_hmma, has_tmem))
 
-    for path, has_tcgen, has_wgmma in hits:
+    for path, has_tcgen, has_wgmma, has_hmma, has_tmem in hits:
         flags = []
         if has_tcgen:
             flags.append("tcgen05/tcgen")
         if has_wgmma:
             flags.append("wgmma")
+        if has_hmma:
+            flags.append("hmma")
+        if has_tmem:
+            flags.append("tmem")
         print(f"HIT {'+'.join(flags)} {path}")
 
-    if any(has_tcgen for _, has_tcgen, _ in hits):
+    if any(has_tcgen for _, has_tcgen, _, _, _ in hits):
         print("RESULT: Blackwell tensor core instructions detected.")
         return 0
-    if any(has_wgmma for _, _, has_wgmma in hits):
+    if any(has_wgmma for _, _, has_wgmma, _, _ in hits):
         print("RESULT: Hopper WGMMA instructions detected; Blackwell-native path is missing.")
         return 2
+    if any(has_hmma for _, _, _, has_hmma, _ in hits):
+        print(
+            "RESULT: legacy HMMA instructions detected; Blackwell-native "
+            "tcgen05/TMEM path is missing."
+        )
+        return 3
 
     print(
         "RESULT: inconclusive. Ensure cuobjdump/nvdisasm is installed and rerun with "
