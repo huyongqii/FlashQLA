@@ -125,6 +125,15 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
             mbar_o0 = T.alloc_barrier(arrive_count=[1] * 8)
             mbar_o1 = T.alloc_barrier(arrive_count=[1] * 8)
             mbar_h = T.alloc_barrier(arrive_count=[1] * 8)
+            bar_load = T.alloc_barrier(arrive_count=128)
+            bar_h_shared = T.alloc_barrier(arrive_count=128)
+            bar_w = T.alloc_barrier(arrive_count=128)
+            bar_ag = T.alloc_barrier(arrive_count=128)
+            bar_vd = T.alloc_barrier(arrive_count=128)
+            bar_vn = T.alloc_barrier(arrive_count=128)
+            bar_p = T.alloc_barrier(arrive_count=128)
+            bar_o = T.alloc_barrier(arrive_count=128)
+            bar_h_scaled = T.alloc_barrier(arrive_count=128)
 
             num_iters = T.ceildiv(num_tokens, block_S)
             if max_iters > 0 and num_iters > max_iters:
@@ -139,6 +148,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
                 left = i_s * block_S
                 right = left + block_S
                 mbar_slot = i_s % 8
+                mbar_phase = (i_s // 8) % 2
 
                 T.copy(q[bb, left:right, bhg, 0:DK], q_shared)
                 T.copy(k[bb, left:right, bhg, 0:DK], k_shared)
@@ -153,18 +163,23 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
                     g_rev_exp_shared[j_s] = T.exp2(
                         (g_shared[block_S - 1] - g_shared[j_s]) * 1.442695
                     )
+                T.barrier_arrive(bar_load)
+                T.barrier_wait(bar_load, i_s % 2)
 
                 # h_shared holds the previous recurrent state for this chunk.
                 T.copy(h_fragment, h_shared)
+                T.barrier_arrive(bar_h_shared)
+                T.barrier_wait(bar_h_shared, i_s % 2)
 
                 # U = K @ S
-                T.gemm(
+                T.tcgen05_gemm(
                     k_shared,
                     h_shared,
                     tmp_tmem[:, 0:block_DV],
                     clear_accum=True,
                     mbar=mbar_u[mbar_slot],
                 )
+                T.mbarrier_wait_parity(mbar_u[mbar_slot], mbar_phase)
                 T.copy(tmp_tmem[:, 0:block_DV], u_fragment)
 
                 # W = V - g * U
@@ -172,6 +187,8 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
                     u_fragment[j_s, j_v] *= -g_exp_shared[j_s]
                     u_fragment[j_s, j_v] += v_shared[j_s, j_v]
                     v_shared[j_s, j_v] = u_fragment[j_s, j_v]
+                T.barrier_arrive(bar_w)
+                T.barrier_wait(bar_w, i_s % 2)
 
                 # Ag = G * A * beta
                 for j_s, j_t in T.Parallel(block_S, block_S):
@@ -188,25 +205,32 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
                     a_fragment[j_s, j_t] *= g_fragment[j_s, j_t]
                     a_fragment[j_s, j_t] *= b_shared[j_t]
                     a_shared[j_s, j_t] = a_fragment[j_s, j_t]
+                T.barrier_arrive(bar_ag)
+                T.barrier_wait(bar_ag, i_s % 2)
 
                 # Vd = Ag @ W
-                T.gemm(
+                T.tcgen05_gemm(
                     a_shared,
                     v_shared,
                     tmp_tmem[:, 0:block_DV],
                     clear_accum=True,
                     mbar=mbar_v[mbar_slot],
                 )
+                T.mbarrier_wait_parity(mbar_v[mbar_slot], mbar_phase)
                 T.copy(tmp_tmem[:, 0:block_DV], v_fragment)
                 T.copy(v_fragment, vd_shared)
+                T.barrier_arrive(bar_vd)
+                T.barrier_wait(bar_vd, i_s % 2)
 
                 # V' = g_last / g * Vd
                 for j_s, j_v in T.Parallel(block_S, block_DV):
                     v_fragment[j_s, j_v] *= g_rev_exp_shared[j_s]
                     vn_shared[j_s, j_v] = v_fragment[j_s, j_v]
+                T.barrier_arrive(bar_vn)
+                T.barrier_wait(bar_vn, i_s % 2)
 
                 # P = Q @ K^T
-                T.gemm(
+                T.tcgen05_gemm(
                     q_shared,
                     k_shared,
                     p_tmem,
@@ -214,16 +238,20 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
                     clear_accum=True,
                     mbar=mbar_p[mbar_slot],
                 )
+                T.mbarrier_wait_parity(mbar_p[mbar_slot], mbar_phase)
                 T.copy(p_tmem, p_fragment)
+                T.barrier_arrive(bar_p)
+                T.barrier_wait(bar_p, i_s % 2)
 
                 # O = Q @ S
-                T.gemm(
+                T.tcgen05_gemm(
                     q_shared,
                     h_shared,
                     tmp_tmem[:, 0:block_DV],
                     clear_accum=True,
                     mbar=mbar_o0[mbar_slot],
                 )
+                T.mbarrier_wait_parity(mbar_o0[mbar_slot], mbar_phase)
                 T.copy(tmp_tmem[:, 0:block_DV], o_fragment)
 
                 # Pg = scale * G * P; O = scale * g * O + Pg @ Vd
@@ -233,13 +261,16 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
                 for j_s, j_v in T.Parallel(block_S, block_DV):
                     o_fragment[j_s, j_v] *= scale * g_exp_shared[j_s]
                 T.copy(o_fragment, tmp_tmem[:, 0:block_DV])
-                T.gemm(
+                T.barrier_arrive(bar_o)
+                T.barrier_wait(bar_o, i_s % 2)
+                T.tcgen05_gemm(
                     p_shared,
                     vd_shared,
                     tmp_tmem[:, 0:block_DV],
                     clear_accum=False,
                     mbar=mbar_o1[mbar_slot],
                 )
+                T.mbarrier_wait_parity(mbar_o1[mbar_slot], mbar_phase)
                 T.copy(tmp_tmem[:, 0:block_DV], o_fragment)
 
                 if store_o:
@@ -250,7 +281,9 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
                 for j_k, j_v in T.Parallel(DK, block_DV):
                     h_fragment[j_k, j_v] *= g_last_local[0]
                 T.copy(h_fragment, h_tmem[:, 0:block_DV])
-                T.gemm(
+                T.barrier_arrive(bar_h_scaled)
+                T.barrier_wait(bar_h_scaled, i_s % 2)
+                T.tcgen05_gemm(
                     k_shared,
                     vn_shared,
                     h_tmem[:, 0:block_DV],
@@ -258,6 +291,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
                     clear_accum=False,
                     mbar=mbar_h[mbar_slot],
                 )
+                T.mbarrier_wait_parity(mbar_h[mbar_slot], mbar_phase)
                 T.copy(h_tmem[:, 0:block_DV], h_fragment)
 
             if store_final_state:
