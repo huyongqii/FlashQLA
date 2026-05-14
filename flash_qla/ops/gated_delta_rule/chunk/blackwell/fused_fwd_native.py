@@ -119,12 +119,12 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
             tmp_tmem = T.alloc_tmem((block_S, 128), dtype=accum_dtype)
             p_tmem = T.alloc_tmem((block_S, block_S), dtype=accum_dtype)
 
-            mbar_u = T.alloc_barrier(arrive_count=[1] * 4)
-            mbar_v = T.alloc_barrier(arrive_count=[1] * 4)
-            mbar_p = T.alloc_barrier(arrive_count=[1] * 4)
-            mbar_o0 = T.alloc_barrier(arrive_count=[1] * 4)
-            mbar_o1 = T.alloc_barrier(arrive_count=[1] * 4)
-            mbar_h = T.alloc_barrier(arrive_count=[1] * 4)
+            mbar_u = T.alloc_barrier(arrive_count=[1] * 8)
+            mbar_v = T.alloc_barrier(arrive_count=[1] * 8)
+            mbar_p = T.alloc_barrier(arrive_count=[1] * 8)
+            mbar_o0 = T.alloc_barrier(arrive_count=[1] * 8)
+            mbar_o1 = T.alloc_barrier(arrive_count=[1] * 8)
+            mbar_h = T.alloc_barrier(arrive_count=[1] * 8)
 
             num_iters = T.ceildiv(num_tokens, block_S)
             if max_iters > 0 and num_iters > max_iters:
@@ -138,8 +138,8 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
             for i_s in T.serial(num_iters):
                 left = i_s * block_S
                 right = left + block_S
-                mbar_slot = i_s % 4
-                mbar_phase = (i_s // 4) % 2
+                mbar_slot = i_s % 8
+                mbar_phase = (i_s // 8) % 2
 
                 T.copy(q[bb, left:right, bhg, 0:DK], q_shared)
                 T.copy(k[bb, left:right, bhg, 0:DK], k_shared)

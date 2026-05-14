@@ -84,6 +84,16 @@ def _skip_fla_bwd_by_default(device: torch.device | str) -> bool:
     return major >= 10
 
 
+def _env_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
 def test_gated_delta_rule(
     batch_size: int,
     num_tokens: int,
@@ -108,6 +118,7 @@ def test_gated_delta_rule(
 ):
     data_dtype = getattr(torch, data_dtype)
     ref_dtype = getattr(torch, ref_dtype)
+    correctness_repeats = max(1, _env_int("FLASHQLA_CORRECTNESS_REPEATS", 1000))
     torch.manual_seed(random_seed)
     q = l2norm(
         torch.randn(
@@ -262,7 +273,7 @@ def test_gated_delta_rule(
             f"o_qla: {(o_qla - o_ref).abs().max().item():.4f} / {o_ref.abs().max().item():.4f}"
         )
 
-        for _ in range(1000):
+        for _ in range(correctness_repeats):
             g_qla, A_qla, o_qla, h_qla, s_qla = chunk_gated_delta_rule_fwd_qla(
                 q,
                 k,
@@ -473,7 +484,7 @@ def test_gated_delta_rule(
             f"dg_qla: {(dg_qla - dg_ref).abs().max().item():.4f} / {dg_ref.abs().max().item():.4f}"
         )
 
-        for _ in range(1000):
+        for _ in range(correctness_repeats):
             dq_qla, dk_qla, dv_qla, db_qla, dg_qla, dh0_qla = (
                 chunk_gated_delta_rule_bwd_qla(
                     q,
