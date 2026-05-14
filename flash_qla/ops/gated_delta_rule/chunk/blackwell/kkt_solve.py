@@ -77,7 +77,6 @@ def tilelang_kkt_solve(
         a32i1_shared = T.alloc_shared((32, 32), dtype=accum_dtype)
         a32o_shared = T.alloc_shared((32, 32), dtype=accum_dtype)
         a32o_fragment = T.alloc_fragment((32, 32), dtype=accum_dtype)
-        a32o_tmem = T.alloc_tmem((32, 32), dtype=accum_dtype)
 
         a64_shared = T.alloc_shared((block_S, block_S), dtype=qkva_dtype)
 
@@ -195,25 +194,22 @@ def tilelang_kkt_solve(
                     a32i0_shared[k_s, k_t] = a32i_fragment[j_s, k_s, k_t]
                 else:
                     a32i1_shared[k_s, k_t] = a32i_fragment[j_s, k_s, k_t]
-            T.tcgen05_gemm(
-                a32i1_shared,
-                a32o_shared,
-                a32o_tmem,
-                clear_accum=True,
-                mbar=mma_mbar,
-            )
-            T.mbarrier_wait_parity(mma_mbar, 0)
-            T.copy(a32o_tmem, a32o_fragment)
+            # FP32 x FP32 is not a supported TCGEN05 operand pattern in
+            # TileLang 0.1.9. Use CUDA-core accumulation here instead of
+            # falling back to HMMA/TF32.
+            T.clear(a32o_fragment)
+            for k_r in T.unroll(32):
+                for k_s, k_t in T.Parallel(32, 32):
+                    a32o_fragment[k_s, k_t] += (
+                        a32i1_shared[k_s, k_r] * a32o_shared[k_r, k_t]
+                    )
             T.copy(a32o_fragment, a32o_shared)
-            T.tcgen05_gemm(
-                a32o_shared,
-                a32i0_shared,
-                a32o_tmem,
-                clear_accum=True,
-                mbar=mma_mbar,
-            )
-            T.mbarrier_wait_parity(mma_mbar, 0)
-            T.copy(a32o_tmem, a32o_fragment)
+            T.clear(a32o_fragment)
+            for k_r in T.unroll(32):
+                for k_s, k_t in T.Parallel(32, 32):
+                    a32o_fragment[k_s, k_t] += (
+                        a32o_shared[k_s, k_r] * a32i0_shared[k_r, k_t]
+                    )
 
             # Combine inversion output
             for j_s, k_s, k_t in T.Parallel(2, 32, 32):

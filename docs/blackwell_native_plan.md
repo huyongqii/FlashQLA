@@ -43,6 +43,12 @@ existing elementwise epilogue. This is not the final high-performance design.
 Its purpose is to force TileLang 0.1.9 to either emit TCGEN05 or fail at the
 exact operand/layout that still needs deeper TMEM and layout work.
 
+`kkt_solve` has one BF16 tensor-core GEMM (`K @ K^T`) and two FP32 32x32 helper
+matrix products in the triangular inverse. TileLang 0.1.9 does not accept
+`float32` shared/shared inputs for TCGEN05, so those helper products are kept as
+explicit CUDA-core accumulation loops. This avoids accidental HMMA/TF32 fallback
+while keeping the main BF16 product on TCGEN05.
+
 Run the first compile probe with:
 
 ```bash
