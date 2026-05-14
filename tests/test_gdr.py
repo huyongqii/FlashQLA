@@ -273,7 +273,7 @@ def test_gated_delta_rule(
             f"o_qla: {(o_qla - o_ref).abs().max().item():.4f} / {o_ref.abs().max().item():.4f}"
         )
 
-        for _ in range(correctness_repeats):
+        for repeat_idx in range(correctness_repeats):
             g_qla, A_qla, o_qla, h_qla, s_qla = chunk_gated_delta_rule_fwd_qla(
                 q,
                 k,
@@ -297,6 +297,7 @@ def test_gated_delta_rule(
                 ).abs().max().item() <= o_ref.abs().max().item() * 0.02
             except AssertionError as e:
                 print("********** ERROR **********")
+                print(f"fwd correctness repeat: {repeat_idx + 1}/{correctness_repeats}")
                 if h0 is not None:
                     print(
                         f"s_qla: {(s_qla - s_ref).abs().max().item():.4f} / {s_ref.abs().max().item():.4f}"
@@ -484,7 +485,7 @@ def test_gated_delta_rule(
             f"dg_qla: {(dg_qla - dg_ref).abs().max().item():.4f} / {dg_ref.abs().max().item():.4f}"
         )
 
-        for _ in range(correctness_repeats):
+        for repeat_idx in range(correctness_repeats):
             dq_qla, dk_qla, dv_qla, db_qla, dg_qla, dh0_qla = (
                 chunk_gated_delta_rule_bwd_qla(
                     q,
@@ -522,6 +523,7 @@ def test_gated_delta_rule(
                     ).abs().max().item() <= dh0_ref.abs().max().item() * 0.02
             except AssertionError as e:
                 print("********** ERROR **********")
+                print(f"bwd correctness repeat: {repeat_idx + 1}/{correctness_repeats}")
                 print(
                     f"dq_qla: {(dq_qla - dq_ref).abs().max().item():.4f} / {dq_ref.abs().max().item():.4f}"
                 )

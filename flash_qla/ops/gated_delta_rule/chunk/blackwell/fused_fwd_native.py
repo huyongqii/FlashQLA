@@ -139,7 +139,6 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
                 left = i_s * block_S
                 right = left + block_S
                 mbar_slot = i_s % 8
-                mbar_phase = (i_s // 8) % 2
 
                 T.copy(q[bb, left:right, bhg, 0:DK], q_shared)
                 T.copy(k[bb, left:right, bhg, 0:DK], k_shared)
@@ -159,14 +158,13 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
                 T.copy(h_fragment, h_shared)
 
                 # U = K @ S
-                T.tcgen05_gemm(
+                T.gemm(
                     k_shared,
                     h_shared,
                     tmp_tmem[:, 0:block_DV],
                     clear_accum=True,
                     mbar=mbar_u[mbar_slot],
                 )
-                T.mbarrier_wait_parity(mbar_u[mbar_slot], mbar_phase)
                 T.copy(tmp_tmem[:, 0:block_DV], u_fragment)
 
                 # W = V - g * U
@@ -192,14 +190,13 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
                     a_shared[j_s, j_t] = a_fragment[j_s, j_t]
 
                 # Vd = Ag @ W
-                T.tcgen05_gemm(
+                T.gemm(
                     a_shared,
                     v_shared,
                     tmp_tmem[:, 0:block_DV],
                     clear_accum=True,
                     mbar=mbar_v[mbar_slot],
                 )
-                T.mbarrier_wait_parity(mbar_v[mbar_slot], mbar_phase)
                 T.copy(tmp_tmem[:, 0:block_DV], v_fragment)
                 T.copy(v_fragment, vd_shared)
 
@@ -209,7 +206,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
                     vn_shared[j_s, j_v] = v_fragment[j_s, j_v]
 
                 # P = Q @ K^T
-                T.tcgen05_gemm(
+                T.gemm(
                     q_shared,
                     k_shared,
                     p_tmem,
@@ -217,18 +214,16 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
                     clear_accum=True,
                     mbar=mbar_p[mbar_slot],
                 )
-                T.mbarrier_wait_parity(mbar_p[mbar_slot], mbar_phase)
                 T.copy(p_tmem, p_fragment)
 
                 # O = Q @ S
-                T.tcgen05_gemm(
+                T.gemm(
                     q_shared,
                     h_shared,
                     tmp_tmem[:, 0:block_DV],
                     clear_accum=True,
                     mbar=mbar_o0[mbar_slot],
                 )
-                T.mbarrier_wait_parity(mbar_o0[mbar_slot], mbar_phase)
                 T.copy(tmp_tmem[:, 0:block_DV], o_fragment)
 
                 # Pg = scale * G * P; O = scale * g * O + Pg @ Vd
@@ -238,14 +233,13 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
                 for j_s, j_v in T.Parallel(block_S, block_DV):
                     o_fragment[j_s, j_v] *= scale * g_exp_shared[j_s]
                 T.copy(o_fragment, tmp_tmem[:, 0:block_DV])
-                T.tcgen05_gemm(
+                T.gemm(
                     p_shared,
                     vd_shared,
                     tmp_tmem[:, 0:block_DV],
                     clear_accum=False,
                     mbar=mbar_o1[mbar_slot],
                 )
-                T.mbarrier_wait_parity(mbar_o1[mbar_slot], mbar_phase)
                 T.copy(tmp_tmem[:, 0:block_DV], o_fragment)
 
                 if store_o:
@@ -256,7 +250,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
                 for j_k, j_v in T.Parallel(DK, block_DV):
                     h_fragment[j_k, j_v] *= g_last_local[0]
                 T.copy(h_fragment, h_tmem[:, 0:block_DV])
-                T.tcgen05_gemm(
+                T.gemm(
                     k_shared,
                     vn_shared,
                     h_tmem[:, 0:block_DV],
@@ -264,7 +258,6 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
                     clear_accum=False,
                     mbar=mbar_h[mbar_slot],
                 )
-                T.mbarrier_wait_parity(mbar_h[mbar_slot], mbar_phase)
                 T.copy(h_tmem[:, 0:block_DV], h_fragment)
 
             if store_final_state:
