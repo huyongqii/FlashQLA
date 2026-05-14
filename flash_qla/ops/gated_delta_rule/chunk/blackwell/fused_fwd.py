@@ -162,6 +162,11 @@ def tilelang_fused_chunk_gdr_fwd(
             p_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
             a_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
             g_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
+            h_tmem = T.alloc_tmem((DK, 128), dtype=accum_dtype)
+            o_tmem = T.alloc_tmem((block_S, 128), dtype=accum_dtype)
+            v_tmem = T.alloc_tmem((block_S, 128), dtype=accum_dtype)
+            u_tmem = T.alloc_tmem((block_S, 128), dtype=accum_dtype)
+            p_tmem = T.alloc_tmem((block_S, block_S), dtype=accum_dtype)
             g_last_local = T.alloc_local((1), dtype=accum_dtype)
 
             data_is_ready = T.alloc_barrier(arrive_count=[96] * 2)
@@ -220,15 +225,17 @@ def tilelang_fused_chunk_gdr_fwd(
                     # [STAGE 0] 5
                     T.barrier_wait(bar_5, i_s % 2)
                     # S += K^T @ V'
+                    T.copy(h_fragment, h_tmem[:, 0:block_DV])
                     T.tcgen05_gemm(
                         k_shared[i_s % 2, :, :],
                         vn_shared,
-                        h_fragment,
+                        h_tmem[:, 0:block_DV],
                         transpose_A=True,
                         clear_accum=False,
                         mbar=mma_mbar,
                     )
                     T.mbarrier_wait_parity(mma_mbar, i_s % 2)
+                    T.copy(h_tmem[:, 0:block_DV], h_fragment)
 
                     T.barrier_arrive(data_is_free[i_s % 2])
 
@@ -275,11 +282,12 @@ def tilelang_fused_chunk_gdr_fwd(
                     T.tcgen05_gemm(
                         k_shared[i_s % 2, :, :],
                         h_shared,
-                        u_fragment,
+                        u_tmem[:, 0:block_DV],
                         clear_accum=True,
                         mbar=mma_mbar,
                     )
                     T.mbarrier_wait_parity(mma_mbar, i_s % 2)
+                    T.copy(u_tmem[:, 0:block_DV], u_fragment)
 
                     # [STAGE 0] 2
                     # W = V - g * U
@@ -297,11 +305,12 @@ def tilelang_fused_chunk_gdr_fwd(
                     T.tcgen05_gemm(
                         a_shared[i_s % 2, :, :],
                         v_shared[i_s % 2, :, :],
-                        v_fragment,
+                        v_tmem[:, 0:block_DV],
                         clear_accum=True,
                         mbar=mma_mbar,
                     )
                     T.mbarrier_wait_parity(mma_mbar, i_s % 2)
+                    T.copy(v_tmem[:, 0:block_DV], v_fragment)
                     # S2[2] Vd
                     T.copy(v_fragment, vd_shared)
                     T.barrier_arrive(bar_4)
@@ -333,12 +342,13 @@ def tilelang_fused_chunk_gdr_fwd(
                     T.tcgen05_gemm(
                         q_shared[i_s % 2, :, :],
                         k_shared[i_s % 2, :, :],
-                        p_fragment,
+                        p_tmem,
                         transpose_B=True,
                         clear_accum=True,
                         mbar=mma_mbar,
                     )
                     T.mbarrier_wait_parity(mma_mbar, i_s % 2)
+                    T.copy(p_tmem, p_fragment)
 
                     # [STAGE 0] 1
                     # G = Lower(diag(g) @ I @ diag(1/g))
@@ -369,11 +379,12 @@ def tilelang_fused_chunk_gdr_fwd(
                     T.tcgen05_gemm(
                         q_shared[i_s % 2, :, :],
                         h_shared,
-                        o_fragment,
+                        o_tmem[:, 0:block_DV],
                         clear_accum=True,
                         mbar=mma_mbar,
                     )
                     T.mbarrier_wait_parity(mma_mbar, i_s % 2)
+                    T.copy(o_tmem[:, 0:block_DV], o_fragment)
 
                     # [STAGE 0] 3
                     # Pg = s * G * P
@@ -389,14 +400,16 @@ def tilelang_fused_chunk_gdr_fwd(
                     # [STAGE 0] 4
                     T.barrier_wait(bar_4, i_s % 2)
                     # O += Pg @ Vd
+                    T.copy(o_fragment, o_tmem[:, 0:block_DV])
                     T.tcgen05_gemm(
                         p_shared,
                         vd_shared,
-                        o_fragment,
+                        o_tmem[:, 0:block_DV],
                         clear_accum=False,
                         mbar=mma_mbar,
                     )
                     T.mbarrier_wait_parity(mma_mbar, i_s % 2)
+                    T.copy(o_tmem[:, 0:block_DV], o_fragment)
                     T.barrier_arrive(bar_5)
 
                     # [STAGE 0] 5

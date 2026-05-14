@@ -63,6 +63,7 @@ def tilelang_kkt_solve(
         k_shared = T.alloc_shared((block_S, DK), dtype=qkva_dtype)
         b_shared = T.alloc_shared((block_S), dtype=accum_dtype, scope="shared")
         a64_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
+        a64_tmem = T.alloc_tmem((block_S, block_S), dtype=accum_dtype)
 
         a16i_row = T.alloc_fragment((4, 16), dtype=accum_dtype)
         a16i_sum = T.alloc_fragment((4, 16), dtype=accum_dtype)
@@ -76,6 +77,7 @@ def tilelang_kkt_solve(
         a32i1_shared = T.alloc_shared((32, 32), dtype=accum_dtype)
         a32o_shared = T.alloc_shared((32, 32), dtype=accum_dtype)
         a32o_fragment = T.alloc_fragment((32, 32), dtype=accum_dtype)
+        a32o_tmem = T.alloc_tmem((32, 32), dtype=accum_dtype)
 
         a64_shared = T.alloc_shared((block_S, block_S), dtype=qkva_dtype)
 
@@ -115,12 +117,13 @@ def tilelang_kkt_solve(
             T.tcgen05_gemm(
                 k_shared,
                 k_shared,
-                a64_fragment,
+                a64_tmem,
                 transpose_B=True,
                 clear_accum=True,
                 mbar=mma_mbar,
             )
             T.mbarrier_wait_parity(mma_mbar, 0)
+            T.copy(a64_tmem, a64_fragment)
 
             # A = b * A
             for j_s, j_t in T.Parallel(block_S, block_S):
@@ -195,20 +198,22 @@ def tilelang_kkt_solve(
             T.tcgen05_gemm(
                 a32i1_shared,
                 a32o_shared,
-                a32o_fragment,
+                a32o_tmem,
                 clear_accum=True,
                 mbar=mma_mbar,
             )
             T.mbarrier_wait_parity(mma_mbar, 0)
+            T.copy(a32o_tmem, a32o_fragment)
             T.copy(a32o_fragment, a32o_shared)
             T.tcgen05_gemm(
                 a32o_shared,
                 a32i0_shared,
-                a32o_fragment,
+                a32o_tmem,
                 clear_accum=True,
                 mbar=mma_mbar,
             )
             T.mbarrier_wait_parity(mma_mbar, 0)
+            T.copy(a32o_tmem, a32o_fragment)
 
             # Combine inversion output
             for j_s, k_s, k_t in T.Parallel(2, 32, 32):

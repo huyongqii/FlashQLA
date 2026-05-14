@@ -36,10 +36,12 @@ integration.
 
 `chunk/blackwell/fused_fwd.py` and `chunk/blackwell/kkt_solve.py` currently copy
 the Hopper dataflow but replace each tensor-core `T.gemm` with explicit
-`T.tcgen05_gemm(..., mbar=...)` plus `T.mbarrier_wait_parity(...)`. This is not
-the final high-performance design. Its purpose is to force TileLang 0.1.9 to
-either emit TCGEN05 or fail at the exact operand/layout that still needs TMEM
-and layout work.
+`T.tcgen05_gemm(..., mbar=...)` plus `T.mbarrier_wait_parity(...)`. TCGEN05 does
+not accept `local.fragment` accumulators, so the experimental path uses TMEM
+scratch accumulators and copies results back to fragments/shared buffers for the
+existing elementwise epilogue. This is not the final high-performance design.
+Its purpose is to force TileLang 0.1.9 to either emit TCGEN05 or fail at the
+exact operand/layout that still needs deeper TMEM and layout work.
 
 Run the first compile probe with:
 
