@@ -22,7 +22,7 @@ Key features:
   Tier-1 mode (correctness only; performance is not yet specially tuned).
 - CUDA 12.8 or above (CUDA 12.6+ is required for sm_100a codegen)
 - PyTorch 2.8 or above
-- TileLang >= 0.1.10 (required for sm_100 codegen; older 0.1.8 only supports sm_90)
+- TileLang >= 0.1.9 (verified on sm_90 Hopper and sm_100 Blackwell)
 
 ## Installation
 
