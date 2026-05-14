@@ -207,6 +207,15 @@ FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE=1 FLASHQLA_BLACKWELL_NATIVE=1 \
   python tests/test_gdr.py --set profile --skip-bwd --no-cp --hide-acc
 ```
 
+To isolate native fused-forward runtime hangs, limit the number of chunks per
+CTA:
+
+```bash
+FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE=1 FLASHQLA_BLACKWELL_NATIVE=1 \
+  FLASHQLA_BLACKWELL_NATIVE_KERNELS=fwd FLASHQLA_BLACKWELL_FWD_MAX_ITERS=1 \
+  python tests/test_gdr.py --set profile --skip-bwd --no-cp --hide-acc
+```
+
 Before debugging that kernel, run the minimal TCGEN05 smoke test:
 
 ```bash

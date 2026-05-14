@@ -43,6 +43,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
     use_initial_state,
     store_final_state,
     store_o,
+    max_iters,
     block_DV=64,
 ):
     batch_size = T.dynamic("batch_size")
@@ -118,6 +119,8 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
             mbar_h = T.alloc_barrier(arrive_count=1)
 
             num_iters = T.ceildiv(num_tokens, block_S)
+            if max_iters > 0 and num_iters > max_iters:
+                num_iters = max_iters
 
             if use_initial_state:
                 T.copy(h0[bb, bh, 0:DK, bv * block_DV : (bv + 1) * block_DV], h_fragment)
@@ -353,6 +356,7 @@ def fused_gdr_fwd(
         use_initial_state=use_initial_state,
         store_final_state=output_final_state,
         store_o=output_o,
+        max_iters=int(os.environ.get("FLASHQLA_BLACKWELL_FWD_MAX_ITERS", "0")),
         block_DV=block_DV,
     )
     tilelang_fused_chunk_gdr_fwd_kernel(
