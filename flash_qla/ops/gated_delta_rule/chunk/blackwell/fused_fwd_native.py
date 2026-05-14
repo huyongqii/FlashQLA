@@ -129,9 +129,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
             bar_h_shared = T.alloc_barrier(arrive_count=128)
             bar_w = T.alloc_barrier(arrive_count=128)
             bar_ag = T.alloc_barrier(arrive_count=128)
-            bar_vd = T.alloc_barrier(arrive_count=128)
             bar_vn = T.alloc_barrier(arrive_count=128)
-            bar_p = T.alloc_barrier(arrive_count=128)
             bar_o = T.alloc_barrier(arrive_count=128)
             bar_h_scaled = T.alloc_barrier(arrive_count=128)
 
@@ -219,8 +217,6 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
                 T.mbarrier_wait_parity(mbar_v[mbar_slot], mbar_phase)
                 T.copy(tmp_tmem[:, 0:block_DV], v_fragment)
                 T.copy(v_fragment, vd_shared)
-                T.barrier_arrive(bar_vd)
-                T.barrier_wait(bar_vd, i_s % 2)
 
                 # V' = g_last / g * Vd
                 for j_s, j_v in T.Parallel(block_S, block_DV):
@@ -240,8 +236,6 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
                 )
                 T.mbarrier_wait_parity(mbar_p[mbar_slot], mbar_phase)
                 T.copy(p_tmem, p_fragment)
-                T.barrier_arrive(bar_p)
-                T.barrier_wait(bar_p, i_s % 2)
 
                 # O = Q @ S
                 T.tcgen05_gemm(
@@ -376,6 +370,11 @@ def fused_gdr_fwd(
     o = torch.empty_like(v)
 
     block_DV = int(os.environ.get("FLASHQLA_BLACKWELL_BLOCK_DV", "64"))
+    if block_DV not in (64, 128):
+        raise ValueError(
+            "FLASHQLA_BLACKWELL_BLOCK_DV must be 64 or 128 for the current "
+            f"TileLang 0.1.9 TCGEN05 path, got {block_DV}"
+        )
     max_iters = int(os.environ.get("FLASHQLA_BLACKWELL_FWD_MAX_ITERS", "0"))
     if max_iters > 0:
         _debug(f"debug max_iters={max_iters}; output is partial and benchmark is invalid")
