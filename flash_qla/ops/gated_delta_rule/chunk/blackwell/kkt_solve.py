@@ -3,10 +3,15 @@
 
 from typing import Optional
 
+import os
+
 import torch
 import tilelang
 import tilelang.language as T
 
+from flash_qla.ops.gated_delta_rule.chunk.hopper.kkt_solve import (
+    kkt_solve as hopper_kkt_solve,
+)
 from flash_qla.utils import prepare_chunk_indices
 
 
@@ -326,6 +331,9 @@ def kkt_solve(
     chunk_size: int = 64,
     cu_seqlens: Optional[torch.LongTensor] = None,
 ):
+    if os.environ.get("FLASHQLA_BLACKWELL_KKT_EXPERIMENT", "") != "tcgen05":
+        return hopper_kkt_solve(k, b, chunk_size, cu_seqlens)
+
     batch_size, num_tokens, Hg, K = k.shape
     _, _, H = b.shape
     assert K == 128
