@@ -434,7 +434,8 @@ def fused_gdr_fwd(
     )
     h = torch.empty((batch_size, 0, H, K, V), dtype=k.dtype, device=k.device)
     o = torch.empty_like(v)
-    if p is None:
+    use_precomputed_p = p is not None
+    if not use_precomputed_p:
         p = torch.empty((batch_size, 0, H, chunk_size), dtype=q.dtype, device=q.device)
 
     block_DV = int(os.environ.get("FLASHQLA_BLACKWELL_BLOCK_DV", "64"))
@@ -480,7 +481,7 @@ def fused_gdr_fwd(
         use_bar_o="o" in sync_barriers,
         use_bar_h_scaled="hscale" in sync_barriers,
         input_a_is_ag=input_a_is_ag,
-        use_precomputed_p=p.numel() > 0,
+        use_precomputed_p=use_precomputed_p,
         num_threads=num_threads,
         block_DV=block_DV,
     )
