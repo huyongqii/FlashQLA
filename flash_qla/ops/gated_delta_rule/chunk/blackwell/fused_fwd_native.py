@@ -17,6 +17,7 @@ def _debug_enabled() -> bool:
 
 
 _DEBUG_MESSAGES = set()
+_DEFAULT_SYNC_BARRIERS = frozenset(("load", "h", "ag", "o", "hscale"))
 
 
 def _debug(message: str):
@@ -26,6 +27,35 @@ def _debug(message: str):
                 return
             _DEBUG_MESSAGES.add(message)
         print(f"[FlashQLA Blackwell fwd native] {message}", flush=True)
+
+
+def _sync_barriers() -> set[str]:
+    value = os.environ.get("FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS")
+    if value is None:
+        return set(_DEFAULT_SYNC_BARRIERS)
+    value = value.strip().lower()
+    if value in ("", "none", "0", "off"):
+        return set()
+    if value in ("default", "safe", "all", "1", "on"):
+        return set(_DEFAULT_SYNC_BARRIERS)
+    aliases = {
+        "h_shared": "h",
+        "hshared": "h",
+        "h_scaled": "hscale",
+        "hscaled": "hscale",
+    }
+    barriers = set()
+    for item in value.split(","):
+        item = aliases.get(item.strip(), item.strip())
+        if item:
+            barriers.add(item)
+    unknown = barriers - _DEFAULT_SYNC_BARRIERS
+    if unknown:
+        raise ValueError(
+            "Unknown FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS entries: "
+            f"{sorted(unknown)}. Valid entries are {sorted(_DEFAULT_SYNC_BARRIERS)}"
+        )
+    return barriers
 
 
 @tilelang.jit(
@@ -51,6 +81,11 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
     store_final_state,
     store_o,
     max_iters,
+    use_bar_load,
+    use_bar_h_shared,
+    use_bar_ag,
+    use_bar_o,
+    use_bar_h_scaled,
     block_DV=64,
 ):
     batch_size = T.dynamic("batch_size")
@@ -159,13 +194,15 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
                     g_rev_exp_shared[j_s] = T.exp2(
                         (g_shared[block_S - 1] - g_shared[j_s]) * 1.442695
                     )
-                T.barrier_arrive(bar_load)
-                T.barrier_wait(bar_load, i_s % 2)
+                if use_bar_load:
+                    T.barrier_arrive(bar_load)
+                    T.barrier_wait(bar_load, i_s % 2)
 
                 # h_shared holds the previous recurrent state for this chunk.
                 T.copy(h_fragment, h_shared)
-                T.barrier_arrive(bar_h_shared)
-                T.barrier_wait(bar_h_shared, i_s % 2)
+                if use_bar_h_shared:
+                    T.barrier_arrive(bar_h_shared)
+                    T.barrier_wait(bar_h_shared, i_s % 2)
 
                 # U = K @ S
                 T.tcgen05_gemm(
@@ -199,8 +236,9 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
                     a_fragment[j_s, j_t] *= g_fragment[j_s, j_t]
                     a_fragment[j_s, j_t] *= b_shared[j_t]
                     a_shared[j_s, j_t] = a_fragment[j_s, j_t]
-                T.barrier_arrive(bar_ag)
-                T.barrier_wait(bar_ag, i_s % 2)
+                if use_bar_ag:
+                    T.barrier_arrive(bar_ag)
+                    T.barrier_wait(bar_ag, i_s % 2)
 
                 # Vd = Ag @ W
                 T.tcgen05_gemm(
@@ -249,8 +287,9 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
                 for j_s, j_v in T.Parallel(block_S, block_DV):
                     o_fragment[j_s, j_v] *= scale * g_exp_shared[j_s]
                 T.copy(o_fragment, tmp_tmem[:, 0:block_DV])
-                T.barrier_arrive(bar_o)
-                T.barrier_wait(bar_o, i_s % 2)
+                if use_bar_o:
+                    T.barrier_arrive(bar_o)
+                    T.barrier_wait(bar_o, i_s % 2)
                 T.tcgen05_gemm(
                     p_shared,
                     vd_shared,
@@ -269,8 +308,9 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
                 for j_k, j_v in T.Parallel(DK, block_DV):
                     h_fragment[j_k, j_v] *= g_last_local[0]
                 T.copy(h_fragment, h_tmem[:, 0:block_DV])
-                T.barrier_arrive(bar_h_scaled)
-                T.barrier_wait(bar_h_scaled, i_s % 2)
+                if use_bar_h_scaled:
+                    T.barrier_arrive(bar_h_scaled)
+                    T.barrier_wait(bar_h_scaled, i_s % 2)
                 T.tcgen05_gemm(
                     k_shared,
                     vn_shared,
@@ -372,6 +412,8 @@ def fused_gdr_fwd(
     max_iters = int(os.environ.get("FLASHQLA_BLACKWELL_FWD_MAX_ITERS", "0"))
     if max_iters > 0:
         _debug(f"debug max_iters={max_iters}; output is partial and benchmark is invalid")
+    sync_barriers = _sync_barriers()
+    _debug("sync_barriers=" + ",".join(sorted(sync_barriers)))
     tilelang_fused_chunk_gdr_fwd_kernel = tilelang_fused_chunk_gdr_fwd_blackwell_native(
         H,
         Hg,
@@ -390,6 +432,11 @@ def fused_gdr_fwd(
         store_final_state=output_final_state,
         store_o=output_o,
         max_iters=max_iters,
+        use_bar_load="load" in sync_barriers,
+        use_bar_h_shared="h" in sync_barriers,
+        use_bar_ag="ag" in sync_barriers,
+        use_bar_o="o" in sync_barriers,
+        use_bar_h_scaled="hscale" in sync_barriers,
         block_DV=block_DV,
     )
     tilelang_fused_chunk_gdr_fwd_kernel(
