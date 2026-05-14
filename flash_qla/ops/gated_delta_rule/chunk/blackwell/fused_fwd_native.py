@@ -282,6 +282,8 @@ def fused_gdr_fwd(
     scale = scale or K ** (-0.5)
 
     fallback_reasons = []
+    if os.environ.get("FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE", "") != "1":
+        fallback_reasons.append("native_fwd_disabled")
     if output_h:
         fallback_reasons.append("output_h")
     if cu_seqlens is not None:

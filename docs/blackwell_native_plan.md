@@ -197,6 +197,22 @@ FLASHQLA_DEBUG_BLACKWELL_DISPATCH=1 FLASHQLA_BLACKWELL_NATIVE=1 \
   python tests/test_gdr.py --set profile --skip-bwd --hide-lat
 ```
 
+Native fused forward has a second guard because the first fixed-length
+single-consumer prototype can still hang while TCGEN05/TMEM usage is being
+isolated:
+
+```bash
+FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE=1 FLASHQLA_BLACKWELL_NATIVE=1 \
+  FLASHQLA_BLACKWELL_NATIVE_KERNELS=fwd \
+  python tests/test_gdr.py --set profile --skip-bwd --no-cp --hide-acc
+```
+
+Before debugging that kernel, run the minimal TCGEN05 smoke test:
+
+```bash
+python scripts/smoke_tcgen05.py
+```
+
 ## Difficulty
 
 High. Because current codegen emits HMMA, the work is not a simple autotune.
