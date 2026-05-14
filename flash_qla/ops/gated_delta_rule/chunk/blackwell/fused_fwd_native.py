@@ -127,9 +127,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
             mbar_h = T.alloc_barrier(arrive_count=[1] * 8)
             bar_load = T.alloc_barrier(arrive_count=128)
             bar_h_shared = T.alloc_barrier(arrive_count=128)
-            bar_w = T.alloc_barrier(arrive_count=128)
             bar_ag = T.alloc_barrier(arrive_count=128)
-            bar_vn = T.alloc_barrier(arrive_count=128)
             bar_o = T.alloc_barrier(arrive_count=128)
             bar_h_scaled = T.alloc_barrier(arrive_count=128)
 
@@ -185,8 +183,6 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
                     u_fragment[j_s, j_v] *= -g_exp_shared[j_s]
                     u_fragment[j_s, j_v] += v_shared[j_s, j_v]
                     v_shared[j_s, j_v] = u_fragment[j_s, j_v]
-                T.barrier_arrive(bar_w)
-                T.barrier_wait(bar_w, i_s % 2)
 
                 # Ag = G * A * beta
                 for j_s, j_t in T.Parallel(block_S, block_S):
@@ -222,8 +218,6 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
                 for j_s, j_v in T.Parallel(block_S, block_DV):
                     v_fragment[j_s, j_v] *= g_rev_exp_shared[j_s]
                     vn_shared[j_s, j_v] = v_fragment[j_s, j_v]
-                T.barrier_arrive(bar_vn)
-                T.barrier_wait(bar_vn, i_s % 2)
 
                 # P = Q @ K^T
                 T.tcgen05_gemm(
