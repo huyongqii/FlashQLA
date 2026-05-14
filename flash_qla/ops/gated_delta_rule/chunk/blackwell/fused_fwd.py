@@ -179,7 +179,9 @@ def tilelang_fused_chunk_gdr_fwd(
             bar_3 = T.alloc_barrier(arrive_count=128)
             bar_4 = T.alloc_barrier(arrive_count=128)
             bar_5 = T.alloc_barrier(arrive_count=416)
-            mma_mbar = T.alloc_barrier(arrive_count=1)
+            mma_mbar_s = T.alloc_barrier(arrive_count=1)
+            mma_mbar_v = T.alloc_barrier(arrive_count=1)
+            mma_mbar_o = T.alloc_barrier(arrive_count=1)
 
             T.use_swizzle(10)
 
@@ -232,9 +234,9 @@ def tilelang_fused_chunk_gdr_fwd(
                         h_tmem[:, 0:block_DV],
                         transpose_A=True,
                         clear_accum=False,
-                        mbar=mma_mbar,
+                        mbar=mma_mbar_s,
                     )
-                    T.mbarrier_wait_parity(mma_mbar, i_s % 2)
+                    T.mbarrier_wait_parity(mma_mbar_s, i_s % 2)
                     T.copy(h_tmem[:, 0:block_DV], h_fragment)
 
                     T.barrier_arrive(data_is_free[i_s % 2])
@@ -284,9 +286,9 @@ def tilelang_fused_chunk_gdr_fwd(
                         h_shared,
                         u_tmem[:, 0:block_DV],
                         clear_accum=True,
-                        mbar=mma_mbar,
+                        mbar=mma_mbar_v,
                     )
-                    T.mbarrier_wait_parity(mma_mbar, i_s % 2)
+                    T.mbarrier_wait_parity(mma_mbar_v, i_s % 2)
                     T.copy(u_tmem[:, 0:block_DV], u_fragment)
 
                     # [STAGE 0] 2
@@ -307,9 +309,9 @@ def tilelang_fused_chunk_gdr_fwd(
                         v_shared[i_s % 2, :, :],
                         v_tmem[:, 0:block_DV],
                         clear_accum=True,
-                        mbar=mma_mbar,
+                        mbar=mma_mbar_v,
                     )
-                    T.mbarrier_wait_parity(mma_mbar, i_s % 2)
+                    T.mbarrier_wait_parity(mma_mbar_v, i_s % 2)
                     T.copy(v_tmem[:, 0:block_DV], v_fragment)
                     # S2[2] Vd
                     T.copy(v_fragment, vd_shared)
@@ -345,9 +347,9 @@ def tilelang_fused_chunk_gdr_fwd(
                         p_tmem,
                         transpose_B=True,
                         clear_accum=True,
-                        mbar=mma_mbar,
+                        mbar=mma_mbar_o,
                     )
-                    T.mbarrier_wait_parity(mma_mbar, i_s % 2)
+                    T.mbarrier_wait_parity(mma_mbar_o, i_s % 2)
                     T.copy(p_tmem, p_fragment)
 
                     # [STAGE 0] 1
@@ -381,9 +383,9 @@ def tilelang_fused_chunk_gdr_fwd(
                         h_shared,
                         o_tmem[:, 0:block_DV],
                         clear_accum=True,
-                        mbar=mma_mbar,
+                        mbar=mma_mbar_o,
                     )
-                    T.mbarrier_wait_parity(mma_mbar, i_s % 2)
+                    T.mbarrier_wait_parity(mma_mbar_o, i_s % 2)
                     T.copy(o_tmem[:, 0:block_DV], o_fragment)
 
                     # [STAGE 0] 3
@@ -406,9 +408,9 @@ def tilelang_fused_chunk_gdr_fwd(
                         vd_shared,
                         o_tmem[:, 0:block_DV],
                         clear_accum=False,
-                        mbar=mma_mbar,
+                        mbar=mma_mbar_o,
                     )
-                    T.mbarrier_wait_parity(mma_mbar, i_s % 2)
+                    T.mbarrier_wait_parity(mma_mbar_o, i_s % 2)
                     T.copy(o_tmem[:, 0:block_DV], o_fragment)
                     T.barrier_arrive(bar_5)
 
