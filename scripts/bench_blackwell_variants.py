@@ -35,6 +35,7 @@ def _run_variant(name: str, args: argparse.Namespace) -> int:
     env.pop("FLASHQLA_BLACKWELL_NATIVE_KERNELS", None)
     env.pop("FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE", None)
     env.pop("FLASHQLA_BLACKWELL_BLOCK_DV", None)
+    env.pop("FLASHQLA_BLACKWELL_FWD_THREADS", None)
     env.pop("FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS", None)
     env.pop("FLASHQLA_CORRECTNESS_REPEATS", None)
     env.update(VARIANTS[name])
@@ -42,6 +43,8 @@ def _run_variant(name: str, args: argparse.Namespace) -> int:
         env["FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE"] = "1"
     if args.block_dv is not None:
         env["FLASHQLA_BLACKWELL_BLOCK_DV"] = str(args.block_dv)
+    if args.fwd_threads is not None:
+        env["FLASHQLA_BLACKWELL_FWD_THREADS"] = str(args.fwd_threads)
     if args.sync_barriers is not None:
         env["FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS"] = args.sync_barriers
     if args.correctness_repeats is not None:
@@ -75,6 +78,7 @@ def _run_variant(name: str, args: argparse.Namespace) -> int:
             "FLASHQLA_BLACKWELL_NATIVE_KERNELS",
             "FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE",
             "FLASHQLA_BLACKWELL_BLOCK_DV",
+            "FLASHQLA_BLACKWELL_FWD_THREADS",
             "FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS",
             "FLASHQLA_CORRECTNESS_REPEATS",
         )
@@ -99,6 +103,7 @@ def main() -> int:
     parser.add_argument("--nkh", type=int, default=None)
     parser.add_argument("--nvh", type=int, default=None)
     parser.add_argument("--block-dv", type=int, default=None)
+    parser.add_argument("--fwd-threads", type=int, default=None)
     parser.add_argument("--sync-barriers", default=None)
     parser.add_argument("--correctness-repeats", type=int, default=None)
     parser.add_argument("--no-cp", action="store_true")

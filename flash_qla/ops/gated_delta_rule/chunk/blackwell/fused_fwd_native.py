@@ -86,6 +86,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
     use_bar_ag,
     use_bar_o,
     use_bar_h_scaled,
+    num_threads=128,
     block_DV=64,
 ):
     batch_size = T.dynamic("batch_size")
@@ -114,7 +115,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
         o: T.Tensor(o_shape, dtype=o_dtype),
         ht: T.Tensor(ht_shape, dtype=ht_dtype),
     ):
-        with T.Kernel(T.ceildiv(DV, block_DV) * batch_size * H, threads=128) as (
+        with T.Kernel(T.ceildiv(DV, block_DV) * batch_size * H, threads=num_threads) as (
             bbhv,
         ):
             bbh, bv = bbhv // T.ceildiv(DV, block_DV), bbhv % T.ceildiv(DV, block_DV)
@@ -160,11 +161,11 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
             mbar_o0 = T.alloc_barrier(arrive_count=[1] * 8)
             mbar_o1 = T.alloc_barrier(arrive_count=[1] * 8)
             mbar_h = T.alloc_barrier(arrive_count=[1] * 8)
-            bar_load = T.alloc_barrier(arrive_count=128)
-            bar_h_shared = T.alloc_barrier(arrive_count=128)
-            bar_ag = T.alloc_barrier(arrive_count=128)
-            bar_o = T.alloc_barrier(arrive_count=128)
-            bar_h_scaled = T.alloc_barrier(arrive_count=128)
+            bar_load = T.alloc_barrier(arrive_count=num_threads)
+            bar_h_shared = T.alloc_barrier(arrive_count=num_threads)
+            bar_ag = T.alloc_barrier(arrive_count=num_threads)
+            bar_o = T.alloc_barrier(arrive_count=num_threads)
+            bar_h_scaled = T.alloc_barrier(arrive_count=num_threads)
 
             num_iters = T.ceildiv(num_tokens, block_S)
             if max_iters > 0 and num_iters > max_iters:
@@ -412,8 +413,14 @@ def fused_gdr_fwd(
     max_iters = int(os.environ.get("FLASHQLA_BLACKWELL_FWD_MAX_ITERS", "0"))
     if max_iters > 0:
         _debug(f"debug max_iters={max_iters}; output is partial and benchmark is invalid")
+    num_threads = int(os.environ.get("FLASHQLA_BLACKWELL_FWD_THREADS", "128"))
+    if num_threads not in (128, 256):
+        raise ValueError(
+            "FLASHQLA_BLACKWELL_FWD_THREADS must be 128 or 256 for the current "
+            f"native fwd path, got {num_threads}"
+        )
     sync_barriers = _sync_barriers()
-    _debug("sync_barriers=" + ",".join(sorted(sync_barriers)))
+    _debug(f"threads={num_threads} sync_barriers=" + ",".join(sorted(sync_barriers)))
     tilelang_fused_chunk_gdr_fwd_kernel = tilelang_fused_chunk_gdr_fwd_blackwell_native(
         H,
         Hg,
@@ -437,6 +444,7 @@ def fused_gdr_fwd(
         use_bar_ag="ag" in sync_barriers,
         use_bar_o="o" in sync_barriers,
         use_bar_h_scaled="hscale" in sync_barriers,
+        num_threads=num_threads,
         block_DV=block_DV,
     )
     tilelang_fused_chunk_gdr_fwd_kernel(

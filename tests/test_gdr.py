@@ -349,7 +349,10 @@ def test_gated_delta_rule(
             "[fwd] solve": _profile_value(
                 prof_qla,
                 "[fwd] FlashQLA solve",
-                "tilelang_kkt_solve_kernel_kernel",
+                (
+                    "tilelang_kkt_solve_kernel_kernel",
+                    "tilelang_kkt_solve_fixed_fast_kernel_kernel",
+                ),
             ),
             "[fwd] gdr": _profile_value(
                 prof_qla,

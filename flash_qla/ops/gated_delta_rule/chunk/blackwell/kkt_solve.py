@@ -500,7 +500,7 @@ def kkt_solve(
     cu_seqlens: Optional[torch.LongTensor] = None,
 ):
     experiment = os.environ.get("FLASHQLA_BLACKWELL_KKT_EXPERIMENT", "")
-    if experiment == "fast" and cu_seqlens is None:
+    if experiment != "tcgen05" and cu_seqlens is None:
         batch_size, num_tokens, Hg, K = k.shape
         _, _, H = b.shape
         assert K == 128
