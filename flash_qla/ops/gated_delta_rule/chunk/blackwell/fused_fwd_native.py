@@ -77,6 +77,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
     h0_dtype,
     ht_dtype,
     o_dtype,
+    p_dtype,
     use_initial_state,
     store_final_state,
     store_o,
@@ -87,6 +88,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
     use_bar_o,
     use_bar_h_scaled,
     input_a_is_ag,
+    use_precomputed_p,
     num_threads=128,
     block_DV=64,
 ):
@@ -103,6 +105,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
     h0_shape = (batch_size, H, DK, DV)
     ht_shape = (batch_size, H, DK, DV)
     o_shape = (batch_size, num_tokens, H, DV)
+    p_shape = (batch_size, num_tokens, H, chunk_size)
 
     @T.prim_func
     def tilelang_fused_chunk_gdr_fwd_blackwell_native_kernel(
@@ -115,6 +118,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
         h0: T.Tensor(h0_shape, dtype=h0_dtype),
         o: T.Tensor(o_shape, dtype=o_dtype),
         ht: T.Tensor(ht_shape, dtype=ht_dtype),
+        p_pre: T.Tensor(p_shape, dtype=p_dtype),
     ):
         with T.Kernel(T.ceildiv(DV, block_DV) * batch_size * H, threads=num_threads) as (
             bbhv,
@@ -262,17 +266,22 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
                     v_fragment[j_s, j_v] *= g_rev_exp_shared[j_s]
                     vn_shared[j_s, j_v] = v_fragment[j_s, j_v]
 
-                # P = Q @ K^T
-                T.tcgen05_gemm(
-                    q_shared,
-                    k_shared,
-                    p_tmem,
-                    transpose_B=True,
-                    clear_accum=True,
-                    mbar=mbar_p[mbar_slot],
-                )
-                T.mbarrier_wait_parity(mbar_p[mbar_slot], mbar_phase)
-                T.copy(p_tmem, p_fragment)
+                # P = Q @ K^T. Optionally reuse a precomputed P buffer to
+                # avoid calculating the same P in both DV tiles.
+                if use_precomputed_p:
+                    T.copy(p_pre[bb, left:right, bh, 0:block_S], p_shared)
+                    T.copy(p_shared, p_fragment)
+                else:
+                    T.tcgen05_gemm(
+                        q_shared,
+                        k_shared,
+                        p_tmem,
+                        transpose_B=True,
+                        clear_accum=True,
+                        mbar=mbar_p[mbar_slot],
+                    )
+                    T.mbarrier_wait_parity(mbar_p[mbar_slot], mbar_phase)
+                    T.copy(p_tmem, p_fragment)
 
                 # O = Q @ S
                 T.tcgen05_gemm(
@@ -349,6 +358,7 @@ def fused_gdr_fwd(
     cp_seq_map: torch.LongTensor | None = None,
     raw_cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
+    p: torch.Tensor | None = None,
 ):
     batch_size, num_tokens, Hg, K = k.shape
     _, _, H, V = v.shape
@@ -407,6 +417,8 @@ def fused_gdr_fwd(
     )
     h = torch.empty((batch_size, 0, H, K, V), dtype=k.dtype, device=k.device)
     o = torch.empty_like(v)
+    if p is None:
+        p = torch.empty((batch_size, 0, H, chunk_size), dtype=q.dtype, device=q.device)
 
     block_DV = int(os.environ.get("FLASHQLA_BLACKWELL_BLOCK_DV", "64"))
     if block_DV not in (64, 128):
@@ -439,6 +451,7 @@ def fused_gdr_fwd(
         h0_dtype=initial_state.dtype,
         ht_dtype=final_state.dtype,
         o_dtype=o.dtype,
+        p_dtype=p.dtype,
         accum_dtype="float32",
         use_initial_state=use_initial_state,
         store_final_state=output_final_state,
@@ -450,6 +463,7 @@ def fused_gdr_fwd(
         use_bar_o="o" in sync_barriers,
         use_bar_h_scaled="hscale" in sync_barriers,
         input_a_is_ag=input_a_is_ag,
+        use_precomputed_p=p.numel() > 0,
         num_threads=num_threads,
         block_DV=block_DV,
     )
@@ -463,6 +477,7 @@ def fused_gdr_fwd(
         initial_state,
         o,
         final_state,
+        p,
     )
 
     if not output_final_state:

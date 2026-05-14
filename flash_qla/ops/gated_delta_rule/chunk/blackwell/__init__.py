@@ -44,9 +44,14 @@ if _USE_EXPERIMENTAL_NATIVE:
         from .kkt_solve import kkt_solve as _native_kkt_solve
     else:
         _native_kkt_solve = None
+    if "fwd" in _NATIVE_KERNELS or "all" in _NATIVE_KERNELS:
+        from .precompute_p import precompute_p as _native_precompute_p
+    else:
+        _native_precompute_p = None
 else:
     _native_fused_gdr_fwd = None
     _native_kkt_solve = None
+    _native_precompute_p = None
 
 
 HAS_NATIVE_BLACKWELL_KERNELS = _USE_EXPERIMENTAL_NATIVE
@@ -114,6 +119,13 @@ def fused_gdr_fwd(*args, **kwargs):
     return _hopper_fused_gdr_fwd(*args, **kwargs)
 
 
+def precompute_p(*args, **kwargs):
+    if _native_precompute_p is None:
+        raise NotImplementedError("Blackwell-native precompute_p is unavailable")
+    _debug_dispatch("precompute_p=native")
+    return _native_precompute_p(*args, **kwargs)
+
+
 def fused_gdr_h(*args, **kwargs):
     _require_or_warn("fused_gdr_h")
     return _hopper_fused_gdr_h(*args, **kwargs)
@@ -130,6 +142,7 @@ __all__ = [
     "fused_gdr_bwd",
     "fused_gdr_h",
     "kkt_solve",
+    "precompute_p",
     "get_warmup_chunks",
     "correct_initial_states",
 ]

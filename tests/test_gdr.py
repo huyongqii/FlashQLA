@@ -362,6 +362,7 @@ def test_gated_delta_rule(
                     "tilelang_fused_chunk_gdr_fwd_blackwell_native_kernel_kernel",
                 ),
             ),
+            "[fwd] o": 0.0,
         }
         if "tilelang_get_warmup_chunks_kernel_kernel" in prof_qla.keys():
             result_fla["[fwd] cp-w"] = None

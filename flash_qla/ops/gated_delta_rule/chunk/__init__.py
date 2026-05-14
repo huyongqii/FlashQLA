@@ -17,7 +17,10 @@ if is_blackwell(_cc):
         fused_gdr_bwd,
         fused_gdr_h,
         kkt_solve,
+        precompute_p,
     )
+else:
+    precompute_p = None
 from .cp_context import intra_card_cp_preprocess
 
 
@@ -36,7 +39,7 @@ def chunk_gated_delta_rule_fwd(
 ):
     g = chunk_local_cumsum(g, chunk_size=64, cu_seqlens=cu_seqlens)
     pretransform_a = (
-        os.environ.get("FLASHQLA_BLACKWELL_PRETRANSFORM_A", "") == "1"
+        os.environ.get("FLASHQLA_BLACKWELL_PRETRANSFORM_A", "1") == "1"
         and is_blackwell(_cc)
         and cu_seqlens is None
         and not output_h
@@ -50,6 +53,15 @@ def chunk_gated_delta_rule_fwd(
     if pretransform_a:
         kkt_kwargs["g"] = g
     A = kkt_solve(**kkt_kwargs)
+    precompute_p_enabled = (
+        os.environ.get("FLASHQLA_BLACKWELL_PRECOMPUTE_P", "") == "1"
+        and is_blackwell(_cc)
+        and precompute_p is not None
+        and cu_seqlens is None
+        and not output_h
+        and not auto_cp
+    )
+    P = precompute_p(q, k, beta.shape[-1]) if precompute_p_enabled else None
     if auto_cp:
         initial_state, cu_seqlens, cp_seq_map, raw_cu_seqlens = (
             intra_card_cp_preprocess(
@@ -65,22 +77,25 @@ def chunk_gated_delta_rule_fwd(
     else:
         cp_seq_map = None
         raw_cu_seqlens = None
-    o, h, final_state = fused_gdr_fwd(
-        q=q,
-        k=k,
-        v=v,
-        a=A,
-        g=g,
-        b=beta,
-        scale=scale,
-        initial_state=initial_state,
-        output_final_state=output_final_state,
-        output_h=output_h,
-        output_o=True,
-        cu_seqlens=cu_seqlens,
-        cp_seq_map=cp_seq_map,
-        raw_cu_seqlens=raw_cu_seqlens,
-    )
+    fwd_kwargs = {
+        "q": q,
+        "k": k,
+        "v": v,
+        "a": A,
+        "g": g,
+        "b": beta,
+        "scale": scale,
+        "initial_state": initial_state,
+        "output_final_state": output_final_state,
+        "output_h": output_h,
+        "output_o": True,
+        "cu_seqlens": cu_seqlens,
+        "cp_seq_map": cp_seq_map,
+        "raw_cu_seqlens": raw_cu_seqlens,
+    }
+    if P is not None:
+        fwd_kwargs["p"] = P
+    o, h, final_state = fused_gdr_fwd(**fwd_kwargs)
     return g, A, o, h, final_state
 
 
