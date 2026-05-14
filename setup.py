@@ -24,8 +24,11 @@ setup(
     python_requires=">=3.10",
     install_requires=[
         "torch>=2.8",
-        "tilelang==0.1.8",
-        "apache-tvm-ffi==0.1.9",
+        # tilelang>=0.1.10 is required for sm_100 (Blackwell B200/B300) codegen.
+        # On Hopper sm_90 the older 0.1.8 also works; bumping the lower bound
+        # so a single wheel covers both archs.
+        "tilelang>=0.1.10",
+        "apache-tvm-ffi>=0.1.9",
     ],
     zip_safe=False,
 )

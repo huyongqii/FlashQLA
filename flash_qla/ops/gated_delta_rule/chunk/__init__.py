@@ -4,13 +4,24 @@
 import torch
 import tilelang
 
-from flash_qla.utils import l2norm
+from flash_qla.utils import l2norm, assert_supported, is_blackwell
 from flash_qla.ops.utils import chunk_local_cumsum, group_reduce_vector
 
-if tilelang.contrib.nvcc.get_target_compute_version() == "9.0":
-    from .hopper import fused_gdr_fwd, fused_gdr_bwd, fused_gdr_h, kkt_solve
-else:
-    raise ValueError("FlashQLA now support sm90 only.")
+_cc = assert_supported()
+# Tier-1: reuse hopper kernels on both sm_90 and sm_100. A dedicated
+# `.blackwell` package can override these symbols later.
+from .hopper import fused_gdr_fwd, fused_gdr_bwd, fused_gdr_h, kkt_solve
+if is_blackwell(_cc):
+    try:
+        from .blackwell import (  # type: ignore[no-redef]  # noqa: F401
+            fused_gdr_fwd,
+            fused_gdr_bwd,
+            fused_gdr_h,
+            kkt_solve,
+        )
+    except ImportError:
+        # No blackwell-specialized kernels yet -> keep hopper imports.
+        pass
 from .cp_context import intra_card_cp_preprocess
 
 

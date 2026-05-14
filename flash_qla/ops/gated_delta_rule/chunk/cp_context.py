@@ -2,16 +2,25 @@
 # Licensed under The MIT License [see LICENSE for details]
 
 import math
+import os
 
 import torch
 import tilelang
 
-from flash_qla.utils import tensor_cache
+from flash_qla.utils import tensor_cache, assert_supported, is_blackwell
 
-if tilelang.contrib.nvcc.get_target_compute_version() == "9.0":
-    from .hopper import get_warmup_chunks, fused_gdr_h, correct_initial_states
-else:
-    raise ValueError("FlashQLA now support sm90 only.")
+_cc = assert_supported()
+# Tier-1: reuse hopper CP kernels on Blackwell as well.
+from .hopper import get_warmup_chunks, fused_gdr_h, correct_initial_states
+if is_blackwell(_cc):
+    try:
+        from .blackwell import (  # type: ignore[no-redef]  # noqa: F401
+            get_warmup_chunks,
+            fused_gdr_h,
+            correct_initial_states,
+        )
+    except ImportError:
+        pass
 
 
 MULTI_PROCESSOR_COUNT = torch.cuda.get_device_properties().multi_processor_count
@@ -85,6 +94,13 @@ def _calc_cp_seqs(
 
     Be = sum(num_chunks) / max(num_chunks)
     use_cp = Be * H <= 40 or (Be * H <= 56 and max(num_chunks) >= 128)
+
+    # Allow forcibly disabling/enabling CP for benchmarking on new archs.
+    _cp_env = os.environ.get("FLASHQLA_AUTOCP", "").strip()
+    if _cp_env == "0":
+        use_cp = False
+    elif _cp_env == "1":
+        use_cp = True
 
     if use_cp:
         cp_cu_seqlens = torch.tensor(

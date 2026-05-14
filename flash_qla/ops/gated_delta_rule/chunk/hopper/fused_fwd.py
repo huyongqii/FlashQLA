@@ -1,6 +1,8 @@
 # Copyright (c) 2026 The Qwen team, Alibaba Group.
 # Licensed under The MIT License [see LICENSE for details]
 
+import os
+
 import torch
 import tilelang
 import tilelang.language as T
@@ -9,7 +11,19 @@ from flash_qla.utils import prepare_chunk_offsets
 
 
 MULTI_PROCESSOR_COUNT = torch.cuda.get_device_properties().multi_processor_count
-TARGET_NUM_CTAS = int(MULTI_PROCESSOR_COUNT * 0.7)
+# Empirical occupancy ratio. On Hopper (H200, 132 SMs) 0.7 is the sweet spot.
+# On Blackwell (B200 ~148 SMs / B300 ~256 SMs) the ratio can be lowered slightly
+# so that fewer CTAs are required to saturate the GPU and we can afford a larger
+# block_DV. Override via FLASHQLA_TARGET_CTA_RATIO if needed.
+_default_ratio = 0.7
+try:
+    _major, _minor = torch.cuda.get_device_capability()
+except Exception:
+    _major, _minor = (9, 0)
+if _major >= 10:
+    _default_ratio = 0.5
+_RATIO = float(os.environ.get("FLASHQLA_TARGET_CTA_RATIO", _default_ratio))
+TARGET_NUM_CTAS = int(MULTI_PROCESSOR_COUNT * _RATIO)
 
 
 @tilelang.jit(
@@ -606,6 +620,11 @@ def fused_gdr_fwd(
         block_DV = 64
     else:
         block_DV = 32
+
+    # Allow manual override for autotuning on new architectures (e.g. B200/B300).
+    _override = os.environ.get("FLASHQLA_BLOCK_DV", "")
+    if _override:
+        block_DV = int(_override)
 
     tilelang_fused_chunk_gdr_fwd_kernel = tilelang_fused_chunk_gdr_fwd(
         H,

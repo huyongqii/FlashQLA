@@ -5,6 +5,12 @@ from .profiler import profile
 from .pack import pad_and_reshape, pack, unpack, fill_last_chunk_of_g
 from .math import l2norm
 from .index import prepare_chunk_indices, prepare_chunk_offsets, tensor_cache
+from .arch import (
+    get_compute_capability,
+    is_hopper,
+    is_blackwell,
+    assert_supported,
+)
 
 
 __all__ = [
@@ -17,4 +23,8 @@ __all__ = [
     "prepare_chunk_indices",
     "prepare_chunk_offsets",
     "tensor_cache",
+    "get_compute_capability",
+    "is_hopper",
+    "is_blackwell",
+    "assert_supported",
 ]

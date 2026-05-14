@@ -18,9 +18,11 @@ Key features:
 
 ## Requirements
 
-- SM90 or above
-- CUDA 12.8 or above
+- SM90 (Hopper) or SM100 (Blackwell) — Blackwell B200/B300 is supported in
+  Tier-1 mode (correctness only; performance is not yet specially tuned).
+- CUDA 12.8 or above (CUDA 12.6+ is required for sm_100a codegen)
 - PyTorch 2.8 or above
+- TileLang >= 0.1.10 (required for sm_100 codegen; older 0.1.8 only supports sm_90)
 
 ## Installation
 
@@ -28,6 +30,21 @@ Key features:
 git clone https://github.com/QwenLM/FlashQLA.git
 cd FlashQLA
 pip install -v .
+```
+
+### Architecture override (debug only)
+
+```bash
+# force the hopper kernel path on a Blackwell card
+export FLASHQLA_FORCE_ARCH=sm100      # or sm90 / sm_100a
+# tune target SM occupancy ratio (default 0.7 on Hopper, 0.5 on Blackwell)
+export FLASHQLA_TARGET_CTA_RATIO=0.5
+# manual block_DV (overrides the auto rule {128/64/32})
+export FLASHQLA_BLOCK_DV=128
+# force CP on/off (auto by default)
+export FLASHQLA_AUTOCP=0
+# silence the "running hopper kernel on Blackwell" warning
+export FLASHQLA_SUPPRESS_BLACKWELL_WARNING=1
 ```
 
 ## Usage
