@@ -25,7 +25,7 @@ import tilelang
 # flash_qla.ops.gated_delta_rule.chunk.hopper.
 #
 # For Blackwell (sm_100 / sm_100a) we reuse the hopper kernels at Tier-1; the
-# TileLang backend is expected to lower T.gemm_v1 to tcgen05.mma automatically
+# TileLang backend is expected to lower T.gemm to tcgen05.mma automatically
 # when targeting sm_100a. A dedicated `blackwell/` directory may be added later
 # for Tier-3 specialization.
 _HOPPER_LIKE_CCS = {"9.0"}
