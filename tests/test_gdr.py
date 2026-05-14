@@ -23,6 +23,24 @@ from ref_gdr import chunk_gated_delta_rule_fwd as chunk_gated_delta_rule_fwd_ref
 from ref_gdr import chunk_gated_delta_rule_bwd as chunk_gated_delta_rule_bwd_ref
 
 
+def _find(prof: dict, *needles: str):
+    """Look up a kernel time in `profile()`'s return dict by substring match.
+
+    Both FLA (Triton) and FlashQLA (TileLang) rename their kernels across
+    releases. Hard-coding kernel names was the original source of brittleness
+    after upgrading TileLang 0.1.8 -> 0.1.9 / FLA 0.5.x. Substring matching
+    is good enough for benchmark display and returns None when nothing
+    matches so callers can degrade gracefully.
+    """
+    for k in prof.keys():
+        if k == "total":
+            continue
+        lname = k.lower()
+        if all(n.lower() in lname for n in needles):
+            return prof[k]
+    return None
+
+
 def test_gated_delta_rule(
     batch_size: int,
     num_tokens: int,
@@ -243,27 +261,26 @@ def test_gated_delta_rule(
             chunk_gated_delta_rule_fwd_qla,
             [q, k, v, g, beta, scale, h0, cu_seqlens, True, False, auto_cp],
         )
+
         result_fla = {
-            "[fwd] csum": prof_fla["chunk_local_cumsum_scalar_kernel"],
-            "[fwd] solve": prof_fla["chunk_gated_delta_rule_fwd_kkt_solve_kernel"],
-            "[fwd] wu": prof_fla["recompute_w_u_fwd_kernel"],
-            "[fwd] gdr": prof_fla["chunk_gated_delta_rule_fwd_kernel_h_blockdim64"],
-            "[fwd] o": prof_fla["chunk_fwd_kernel_o"],
+            "[fwd] csum": _find(prof_fla, "cumsum"),
+            "[fwd] solve": _find(prof_fla, "kkt_solve"),
+            "[fwd] wu": _find(prof_fla, "recompute_w_u"),
+            "[fwd] gdr": _find(prof_fla, "fwd_kernel_h"),
+            "[fwd] o": _find(prof_fla, "fwd_kernel_o"),
         }
         result_qla = {
-            "[fwd] csum": prof_qla["tilelang_chunk_local_cumsum_kernel_kernel"],
-            "[fwd] solve": prof_qla["tilelang_kkt_solve_kernel_kernel"],
-            "[fwd] gdr": prof_qla["tilelang_fused_chunk_gdr_fwd_kernel_kernel"],
+            "[fwd] csum": _find(prof_qla, "chunk_local_cumsum"),
+            "[fwd] solve": _find(prof_qla, "kkt_solve"),
+            "[fwd] gdr": _find(prof_qla, "fused_chunk_gdr_fwd"),
         }
-        if "tilelang_get_warmup_chunks_kernel_kernel" in prof_qla.keys():
+        if _find(prof_qla, "get_warmup_chunks") is not None:
             result_fla["[fwd] cp-w"] = None
             result_fla["[fwd] cp-h"] = None
             result_fla["[fwd] cp-c"] = None
-            result_qla["[fwd] cp-w"] = prof_qla[
-                "tilelang_get_warmup_chunks_kernel_kernel"
-            ]
-            result_qla["[fwd] cp-h"] = prof_qla["tilelang_prepare_h_kernel_kernel"]
-            result_qla["[fwd] cp-c"] = prof_qla["tilelang_correct_h0_kernel_kernel"]
+            result_qla["[fwd] cp-w"] = _find(prof_qla, "get_warmup_chunks")
+            result_qla["[fwd] cp-h"] = _find(prof_qla, "prepare_h")
+            result_qla["[fwd] cp-c"] = _find(prof_qla, "correct_h0")
         result_fla["total"] = prof_fla["total"]
         result_qla["total"] = prof_qla["total"]
         results = {
@@ -429,24 +446,23 @@ def test_gated_delta_rule(
             [q, k, v, g_qla, beta, A_qla, do, dht, scale, h0, cu_seqlens],
         )
         result_fla = {
-            "[bwd] csum": prof_fla["chunk_local_cumsum_scalar_kernel"],
-            "[bwd] recom": prof_fla["recompute_w_u_fwd_kernel"]
-            + prof_fla["chunk_gated_delta_rule_fwd_kernel_h_blockdim64"],
-            "[bwd] dv": prof_fla["chunk_bwd_kernel_dv_local"],
-            "[bwd] gdr": prof_fla["chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64"],
-            "[bwd] dqkwg": prof_fla["kernel_kernel"],
-            "[bwd] wy": prof_fla["prepare_wy_repr_bwd_kernel"],
+            "[bwd] csum": _find(prof_fla, "cumsum"),
+            "[bwd] recom": (_find(prof_fla, "recompute_w_u") or 0)
+            + (_find(prof_fla, "fwd_kernel_h") or 0),
+            "[bwd] dv": _find(prof_fla, "bwd_kernel_dv"),
+            "[bwd] gdr": _find(prof_fla, "bwd_kernel_dhu"),
+            "[bwd] dqkwg": _find(prof_fla, "kernel_kernel"),
+            "[bwd] wy": _find(prof_fla, "prepare_wy_repr_bwd"),
         }
         result_qla = {
-            "[bwd] csum": prof_qla["tilelang_chunk_local_cumsum_kernel_kernel"],
-            "[bwd] recom": prof_qla["tilelang_prepare_h_kernel_kernel"],
-            "[bwd] gdr": prof_qla["tilelang_fused_chunk_gdr_bwd_kernel_kernel"],
+            "[bwd] csum": _find(prof_qla, "chunk_local_cumsum"),
+            "[bwd] recom": _find(prof_qla, "prepare_h"),
+            "[bwd] gdr": _find(prof_qla, "fused_chunk_gdr_bwd"),
         }
         if num_k_heads < num_v_heads:
-            result_fla["[bwd] reduc"] = prof_fla["compress_heads_kernel"]
-            result_qla["[bwd] reduc"] = (
-                prof_qla["tilelang_group_reduce_vector_kernel_kernel"] * 2
-            )
+            result_fla["[bwd] reduc"] = _find(prof_fla, "compress_heads")
+            _gr = _find(prof_qla, "group_reduce_vector")
+            result_qla["[bwd] reduc"] = (_gr * 2) if _gr is not None else None
         result_fla["total"] = prof_fla["total"]
         result_qla["total"] = prof_qla["total"]
         results = {
