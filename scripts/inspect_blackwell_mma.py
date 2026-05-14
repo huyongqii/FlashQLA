@@ -26,6 +26,11 @@ WGMMA_PATTERNS = ("wgmma", "wgmma.mma_async")
 HMMA_PATTERNS = ("hmma", "hmma.16816", "hmma.1688")
 TMEM_PATTERNS = ("tmem", "tcgen05.alloc", "tcgen05.commit")
 ARTIFACT_SUFFIXES = (".cubin", ".so", ".ptx", ".sass", ".cu", ".ll")
+UNRELATED_PATH_PARTS = (
+    "flashinfer",
+    "gdrcopy",
+    "gdn_prefill",
+)
 
 
 def _run(cmd: list[str], timeout: int = 120) -> str:
@@ -77,6 +82,23 @@ def _iter_artifacts(roots: list[Path], since: float | None) -> list[Path]:
         except OSError:
             continue
     return sorted(set(artifacts), key=lambda p: p.stat().st_mtime, reverse=True)
+
+
+def _is_relevant_artifact(path: Path) -> bool:
+    lower = str(path).lower()
+    if any(part in lower for part in UNRELATED_PATH_PARTS):
+        return False
+    if "tvm-debug-mode-tempdirs" in lower:
+        return path.name in {
+            "tvm_kernels.cubin",
+            "tvm_kernels.ptx",
+            "tvm_kernels.cu",
+            "tvm_kernels.sass",
+            "tvm_kernels.ll",
+        }
+    if "tilelang" in lower or "flash_qla" in lower or "flashqla" in lower:
+        return True
+    return False
 
 
 def _artifact_text(path: Path) -> str:
@@ -165,6 +187,11 @@ def main() -> int:
     parser.add_argument("--no-run", action="store_true", help="Only inspect artifacts")
     parser.add_argument("--root", action="append", default=[], help="Extra scan root")
     parser.add_argument("--all", action="store_true", help="Scan all artifacts")
+    parser.add_argument(
+        "--include-unrelated",
+        action="store_true",
+        help="Also classify unrelated artifacts such as FlashInfer/GDRCopy",
+    )
     parser.add_argument("--batch", type=int, default=1)
     parser.add_argument("--tokens", type=int, default=2048)
     parser.add_argument("--q-heads", type=int, default=2)
@@ -183,6 +210,8 @@ def main() -> int:
     if not artifacts and since is not None:
         print("no recent artifacts found; falling back to full artifact scan")
         artifacts = _iter_artifacts(roots, None)
+    if not args.include_unrelated:
+        artifacts = [path for path in artifacts if _is_relevant_artifact(path)]
     print(f"scanned_roots={':'.join(str(root) for root in roots)}")
     print(f"candidate_artifacts={len(artifacts)}")
 

@@ -94,9 +94,10 @@ def assert_supported(cc: str | None = None) -> str:
         _BLACKWELL_WARNING_EMITTED = True
         if os.environ.get("FLASHQLA_SUPPRESS_BLACKWELL_WARNING", "") != "1":
             warnings.warn(
-                "FlashQLA is running on sm_100 (Blackwell) using the Hopper "
-                "kernel path. Performance is not yet tuned for B200/B300; "
-                "see plans for tcgen05.mma / TMEM specialization. "
+                "FlashQLA is running on sm_100 (Blackwell) using the "
+                "Hopper-compatible kernel path. Current TileLang/TVM lowering "
+                "has been observed to emit HMMA rather than tcgen05/TMEM on "
+                "B200, so performance is not yet tuned for B200/B300. "
                 "Set FLASHQLA_SUPPRESS_BLACKWELL_WARNING=1 to silence.",
                 stacklevel=2,
             )

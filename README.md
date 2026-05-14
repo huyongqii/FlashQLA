@@ -45,6 +45,10 @@ export FLASHQLA_BLOCK_DV=128
 export FLASHQLA_AUTOCP=0
 # silence the "running hopper kernel on Blackwell" warning
 export FLASHQLA_SUPPRESS_BLACKWELL_WARNING=1
+# fail if sm_100 would fall back to non-native HMMA/Hopper-compatible kernels
+export FLASHQLA_REQUIRE_BLACKWELL_NATIVE=1
+# enable the experimental Blackwell tcgen05-only forward/kkt path
+export FLASHQLA_BLACKWELL_NATIVE=1
 ```
 
 ### Blackwell codegen check
