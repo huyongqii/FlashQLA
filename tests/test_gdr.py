@@ -2,6 +2,7 @@
 # Licensed under The MIT License [see LICENSE for details]
 
 import argparse
+import fnmatch
 import math
 
 import torch
@@ -21,6 +22,51 @@ from flash_qla.utils import l2norm, pack, profile
 
 from ref_gdr import chunk_gated_delta_rule_fwd as chunk_gated_delta_rule_fwd_ref
 from ref_gdr import chunk_gated_delta_rule_bwd as chunk_gated_delta_rule_bwd_ref
+
+
+def _profile_value(prof: dict[str, float], label: str, *kernel_groups):
+    value = 0.0
+    missing = []
+    for kernel_group in kernel_groups:
+        if isinstance(kernel_group, str):
+            kernel_group = (kernel_group,)
+        matches = []
+        for kernel_name in kernel_group:
+            if "*" in kernel_name:
+                matches.extend(
+                    value
+                    for key, value in prof.items()
+                    if fnmatch.fnmatch(key, kernel_name)
+                )
+            elif kernel_name in prof:
+                matches.append(prof[kernel_name])
+        if matches:
+            value += sum(matches)
+        else:
+            missing.append(kernel_group[0])
+    if missing:
+        print(f"{label}: missing profiler kernel(s): {missing}")
+        return None
+    return value
+
+
+def _has_kernel_events(prof: dict[str, float]) -> bool:
+    ignored_prefixes = ("aten::", "cuda", "cu", "ProfilerStep")
+    return any(
+        key != "total" and not key.startswith(ignored_prefixes)
+        for key in prof.keys()
+    )
+
+
+def _print_profiler_note(label: str, prof: dict[str, float]):
+    if _has_kernel_events(prof):
+        return
+    print(
+        f"{label}: torch.profiler did not report GPU kernel events; "
+        "per-kernel rows are shown as NaN, but total latency still comes "
+        "from tilelang.profiler.do_bench(). This is commonly caused by CUPTI "
+        "subscriber conflicts or library/profiler incompatibility."
+    )
 
 
 def test_gated_delta_rule(
@@ -245,27 +291,59 @@ def test_gated_delta_rule(
         )
         print(f"[fwd] prof_fla keys ({len(prof_fla)}): {sorted(prof_fla.keys())}")
         print(f"[fwd] prof_qla keys ({len(prof_qla)}): {sorted(prof_qla.keys())}")
+        _print_profiler_note("[fwd] FLA", prof_fla)
+        _print_profiler_note("[fwd] FlashQLA", prof_qla)
         result_fla = {
-            "[fwd] csum": prof_fla["chunk_local_cumsum_scalar_kernel"],
-            "[fwd] solve": prof_fla["chunk_gated_delta_rule_fwd_kkt_solve_kernel"],
-            "[fwd] wu": prof_fla["recompute_w_u_fwd_kernel"],
-            "[fwd] gdr": prof_fla["chunk_gated_delta_rule_fwd_kernel_h_blockdim64"],
-            "[fwd] o": prof_fla["chunk_fwd_kernel_o"],
+            "[fwd] csum": _profile_value(
+                prof_fla, "[fwd] FLA csum", "chunk_local_cumsum_scalar_kernel"
+            ),
+            "[fwd] solve": _profile_value(
+                prof_fla,
+                "[fwd] FLA solve",
+                "chunk_gated_delta_rule_fwd_kkt_solve_kernel",
+            ),
+            "[fwd] wu": _profile_value(
+                prof_fla, "[fwd] FLA wu", "recompute_w_u_fwd_kernel"
+            ),
+            "[fwd] gdr": _profile_value(
+                prof_fla,
+                "[fwd] FLA gdr",
+                "chunk_gated_delta_rule_fwd_kernel_h_blockdim*",
+            ),
+            "[fwd] o": _profile_value(prof_fla, "[fwd] FLA o", "chunk_fwd_kernel_o"),
         }
         result_qla = {
-            "[fwd] csum": prof_qla["tilelang_chunk_local_cumsum_kernel_kernel"],
-            "[fwd] solve": prof_qla["tilelang_kkt_solve_kernel_kernel"],
-            "[fwd] gdr": prof_qla["tilelang_fused_chunk_gdr_fwd_kernel_kernel"],
+            "[fwd] csum": _profile_value(
+                prof_qla,
+                "[fwd] FlashQLA csum",
+                "tilelang_chunk_local_cumsum_kernel_kernel",
+            ),
+            "[fwd] solve": _profile_value(
+                prof_qla,
+                "[fwd] FlashQLA solve",
+                "tilelang_kkt_solve_kernel_kernel",
+            ),
+            "[fwd] gdr": _profile_value(
+                prof_qla,
+                "[fwd] FlashQLA gdr",
+                "tilelang_fused_chunk_gdr_fwd_kernel_kernel",
+            ),
         }
         if "tilelang_get_warmup_chunks_kernel_kernel" in prof_qla.keys():
             result_fla["[fwd] cp-w"] = None
             result_fla["[fwd] cp-h"] = None
             result_fla["[fwd] cp-c"] = None
-            result_qla["[fwd] cp-w"] = prof_qla[
-                "tilelang_get_warmup_chunks_kernel_kernel"
-            ]
-            result_qla["[fwd] cp-h"] = prof_qla["tilelang_prepare_h_kernel_kernel"]
-            result_qla["[fwd] cp-c"] = prof_qla["tilelang_correct_h0_kernel_kernel"]
+            result_qla["[fwd] cp-w"] = _profile_value(
+                prof_qla,
+                "[fwd] FlashQLA cp-w",
+                "tilelang_get_warmup_chunks_kernel_kernel",
+            )
+            result_qla["[fwd] cp-h"] = _profile_value(
+                prof_qla, "[fwd] FlashQLA cp-h", "tilelang_prepare_h_kernel_kernel"
+            )
+            result_qla["[fwd] cp-c"] = _profile_value(
+                prof_qla, "[fwd] FlashQLA cp-c", "tilelang_correct_h0_kernel_kernel"
+            )
         result_fla["total"] = prof_fla["total"]
         result_qla["total"] = prof_qla["total"]
         results = {
@@ -432,24 +510,59 @@ def test_gated_delta_rule(
         )
         print(f"[bwd] prof_fla keys ({len(prof_fla)}): {sorted(prof_fla.keys())}")
         print(f"[bwd] prof_qla keys ({len(prof_qla)}): {sorted(prof_qla.keys())}")
+        _print_profiler_note("[bwd] FLA", prof_fla)
+        _print_profiler_note("[bwd] FlashQLA", prof_qla)
         result_fla = {
-            "[bwd] csum": prof_fla["chunk_local_cumsum_scalar_kernel"],
-            "[bwd] recom": prof_fla["recompute_w_u_fwd_kernel"]
-            + prof_fla["chunk_gated_delta_rule_fwd_kernel_h_blockdim64"],
-            "[bwd] dv": prof_fla["chunk_bwd_kernel_dv_local"],
-            "[bwd] gdr": prof_fla["chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64"],
-            "[bwd] dqkwg": prof_fla["kernel_kernel"],
-            "[bwd] wy": prof_fla["prepare_wy_repr_bwd_kernel"],
+            "[bwd] csum": _profile_value(
+                prof_fla, "[bwd] FLA csum", "chunk_local_cumsum_scalar_kernel"
+            ),
+            "[bwd] recom": _profile_value(
+                prof_fla,
+                "[bwd] FLA recom",
+                "recompute_w_u_fwd_kernel",
+                "chunk_gated_delta_rule_fwd_kernel_h_blockdim*",
+            ),
+            "[bwd] dv": _profile_value(
+                prof_fla, "[bwd] FLA dv", "chunk_bwd_kernel_dv_local"
+            ),
+            "[bwd] gdr": _profile_value(
+                prof_fla,
+                "[bwd] FLA gdr",
+                "chunk_gated_delta_rule_bwd_kernel_dhu_blockdim*",
+            ),
+            "[bwd] dqkwg": _profile_value(
+                prof_fla, "[bwd] FLA dqkwg", "kernel_kernel"
+            ),
+            "[bwd] wy": _profile_value(
+                prof_fla, "[bwd] FLA wy", "prepare_wy_repr_bwd_kernel"
+            ),
         }
         result_qla = {
-            "[bwd] csum": prof_qla["tilelang_chunk_local_cumsum_kernel_kernel"],
-            "[bwd] recom": prof_qla["tilelang_prepare_h_kernel_kernel"],
-            "[bwd] gdr": prof_qla["tilelang_fused_chunk_gdr_bwd_kernel_kernel"],
+            "[bwd] csum": _profile_value(
+                prof_qla,
+                "[bwd] FlashQLA csum",
+                "tilelang_chunk_local_cumsum_kernel_kernel",
+            ),
+            "[bwd] recom": _profile_value(
+                prof_qla,
+                "[bwd] FlashQLA recom",
+                "tilelang_prepare_h_kernel_kernel",
+            ),
+            "[bwd] gdr": _profile_value(
+                prof_qla,
+                "[bwd] FlashQLA gdr",
+                "tilelang_fused_chunk_gdr_bwd_kernel_kernel",
+            ),
         }
         if num_k_heads < num_v_heads:
-            result_fla["[bwd] reduc"] = prof_fla["compress_heads_kernel"]
-            result_qla["[bwd] reduc"] = (
-                prof_qla["tilelang_group_reduce_vector_kernel_kernel"] * 2
+            result_fla["[bwd] reduc"] = _profile_value(
+                prof_fla, "[bwd] FLA reduc", "compress_heads_kernel"
+            )
+            result_qla["[bwd] reduc"] = _profile_value(
+                prof_qla,
+                "[bwd] FlashQLA reduc",
+                "tilelang_group_reduce_vector_kernel_kernel",
+                "tilelang_group_reduce_vector_kernel_kernel",
             )
         result_fla["total"] = prof_fla["total"]
         result_qla["total"] = prof_qla["total"]
