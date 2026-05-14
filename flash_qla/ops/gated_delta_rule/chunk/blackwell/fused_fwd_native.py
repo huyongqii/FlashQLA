@@ -86,6 +86,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
     use_bar_ag,
     use_bar_o,
     use_bar_h_scaled,
+    input_a_is_ag,
     num_threads=128,
     block_DV=64,
 ):
@@ -222,7 +223,9 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
                     u_fragment[j_s, j_v] += v_shared[j_s, j_v]
                     v_shared[j_s, j_v] = u_fragment[j_s, j_v]
 
-                # Ag = G * A * beta
+                # Ag = G * A * beta. Some fixed-length Blackwell experiments
+                # precompute this in fast KKT to avoid repeating the transform
+                # once per DV tile.
                 for j_s, j_t in T.Parallel(block_S, block_S):
                     g_fragment[j_s, j_t] = g_shared[j_s] - g_shared[j_t]
                 for j_s, j_t in T.Parallel(block_S, block_S):
@@ -232,14 +235,15 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
                         )
                     else:
                         g_fragment[j_s, j_t] = 0
-                for j_s, j_t in T.Parallel(block_S, block_S):
-                    a_fragment[j_s, j_t] = a_shared[j_s, j_t]
-                    a_fragment[j_s, j_t] *= g_fragment[j_s, j_t]
-                    a_fragment[j_s, j_t] *= b_shared[j_t]
-                    a_shared[j_s, j_t] = a_fragment[j_s, j_t]
-                if use_bar_ag:
-                    T.barrier_arrive(bar_ag)
-                    T.barrier_wait(bar_ag, i_s % 2)
+                if not input_a_is_ag:
+                    for j_s, j_t in T.Parallel(block_S, block_S):
+                        a_fragment[j_s, j_t] = a_shared[j_s, j_t]
+                        a_fragment[j_s, j_t] *= g_fragment[j_s, j_t]
+                        a_fragment[j_s, j_t] *= b_shared[j_t]
+                        a_shared[j_s, j_t] = a_fragment[j_s, j_t]
+                    if use_bar_ag:
+                        T.barrier_arrive(bar_ag)
+                        T.barrier_wait(bar_ag, i_s % 2)
 
                 # Vd = Ag @ W
                 T.tcgen05_gemm(
@@ -420,6 +424,7 @@ def fused_gdr_fwd(
             f"native fwd path, got {num_threads}"
         )
     sync_barriers = _sync_barriers()
+    input_a_is_ag = os.environ.get("FLASHQLA_BLACKWELL_PRETRANSFORM_A", "") == "1"
     _debug(f"threads={num_threads} sync_barriers=" + ",".join(sorted(sync_barriers)))
     tilelang_fused_chunk_gdr_fwd_kernel = tilelang_fused_chunk_gdr_fwd_blackwell_native(
         H,
@@ -444,6 +449,7 @@ def fused_gdr_fwd(
         use_bar_ag="ag" in sync_barriers,
         use_bar_o="o" in sync_barriers,
         use_bar_h_scaled="hscale" in sync_barriers,
+        input_a_is_ag=input_a_is_ag,
         num_threads=num_threads,
         block_DV=block_DV,
     )

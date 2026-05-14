@@ -338,6 +338,8 @@ def tilelang_kkt_solve_fixed_fast(
     accum_dtype,
     qkva_dtype,
     b_dtype,
+    g_dtype,
+    transform_a,
 ):
     data_batch_size = T.dynamic("data_batch_size")
     num_tokens = T.dynamic("num_tokens")
@@ -347,11 +349,13 @@ def tilelang_kkt_solve_fixed_fast(
     k_shape = (data_batch_size, num_tokens, Hg, DK)
     a_shape = (data_batch_size, num_tokens, H, chunk_size)
     b_shape = (data_batch_size, num_tokens, H)
+    g_shape = (data_batch_size, num_tokens, H)
 
     @T.prim_func
     def tilelang_kkt_solve_fixed_fast_kernel(
         k: T.Tensor(k_shape, dtype=qkva_dtype),
         b: T.Tensor(b_shape, dtype=b_dtype),
+        g: T.Tensor(g_shape, dtype=g_dtype),
         a: T.Tensor(a_shape, dtype=qkva_dtype),
         num_chunks: T.int32,
     ):
@@ -365,6 +369,7 @@ def tilelang_kkt_solve_fixed_fast(
 
             k_shared = T.alloc_shared((block_S, DK), dtype=qkva_dtype)
             b_shared = T.alloc_shared((block_S), dtype=accum_dtype, scope="shared")
+            g_shared = T.alloc_shared((block_S), dtype=accum_dtype, scope="shared")
             a64_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
 
             a16i_row = T.alloc_fragment((4, 16), dtype=accum_dtype)
@@ -396,6 +401,9 @@ def tilelang_kkt_solve_fixed_fast(
             T.copy(k[bb, left:right, bhg, 0:DK], k_shared)
             for j_s in T.Parallel(block_S):
                 b_shared[j_s] = b[bb, left + j_s, bh]
+            if transform_a:
+                for j_s in T.Parallel(block_S):
+                    g_shared[j_s] = g[bb, left + j_s, bh]
             T.barrier_arrive(bar_load)
             T.barrier_wait(bar_load, 0)
 
@@ -485,6 +493,12 @@ def tilelang_kkt_solve_fixed_fast(
                 a64_shared[32 + k_s, k_t] = a32o_fragment[k_s, k_t]
             for k_s, k_t in T.Parallel(32, 32):
                 a64_shared[k_s, 32 + k_t] = 0
+            if transform_a:
+                for j_s, j_t in T.Parallel(block_S, block_S):
+                    a64_shared[j_s, j_t] *= T.exp2(
+                        (g_shared[j_s] - g_shared[j_t]) * 1.442695
+                    )
+                    a64_shared[j_s, j_t] *= b_shared[j_t]
             T.barrier_arrive(bar_store)
             T.barrier_wait(bar_store, 0)
 
@@ -496,6 +510,7 @@ def tilelang_kkt_solve_fixed_fast(
 def kkt_solve(
     k: torch.Tensor,
     b: torch.Tensor,
+    g: Optional[torch.Tensor] = None,
     chunk_size: int = 64,
     cu_seqlens: Optional[torch.LongTensor] = None,
 ):
@@ -516,9 +531,11 @@ def kkt_solve(
             chunk_size,
             qkva_dtype=k.dtype,
             b_dtype=b.dtype,
+            g_dtype=(g.dtype if g is not None else b.dtype),
             accum_dtype="float32",
+            transform_a=g is not None,
         )
-        tilelang_kkt_solve_kernel(k, b, a, num_chunks)
+        tilelang_kkt_solve_kernel(k, b, g if g is not None else b, a, num_chunks)
         return a
     if experiment != "tcgen05":
         return hopper_kkt_solve(k, b, chunk_size, cu_seqlens)

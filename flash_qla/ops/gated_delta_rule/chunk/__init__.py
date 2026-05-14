@@ -1,6 +1,8 @@
 # Copyright (c) 2026 The Qwen team, Alibaba Group.
 # Licensed under The MIT License [see LICENSE for details]
 
+import os
+
 import torch
 import tilelang
 
@@ -33,11 +35,21 @@ def chunk_gated_delta_rule_fwd(
     auto_cp: bool = True,
 ):
     g = chunk_local_cumsum(g, chunk_size=64, cu_seqlens=cu_seqlens)
-    A = kkt_solve(
-        k=k,
-        b=beta,
-        cu_seqlens=cu_seqlens,
+    pretransform_a = (
+        os.environ.get("FLASHQLA_BLACKWELL_PRETRANSFORM_A", "") == "1"
+        and is_blackwell(_cc)
+        and cu_seqlens is None
+        and not output_h
+        and not auto_cp
     )
+    kkt_kwargs = {
+        "k": k,
+        "b": beta,
+        "cu_seqlens": cu_seqlens,
+    }
+    if pretransform_a:
+        kkt_kwargs["g"] = g
+    A = kkt_solve(**kkt_kwargs)
     if auto_cp:
         initial_state, cu_seqlens, cp_seq_map, raw_cu_seqlens = (
             intra_card_cp_preprocess(
