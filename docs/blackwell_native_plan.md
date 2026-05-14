@@ -186,7 +186,15 @@ FP32 helper loops.
 Use the variant runner to compare clean subprocesses:
 
 ```bash
-python scripts/bench_blackwell_variants.py --variants compat,kkt --set profile
+python scripts/bench_blackwell_variants.py --variants compat,fwd,kkt --set profile
+```
+
+For dispatch debugging:
+
+```bash
+FLASHQLA_DEBUG_BLACKWELL_DISPATCH=1 FLASHQLA_BLACKWELL_NATIVE=1 \
+  FLASHQLA_BLACKWELL_NATIVE_KERNELS=fwd \
+  python tests/test_gdr.py --set profile --skip-bwd --hide-lat
 ```
 
 ## Difficulty

@@ -22,6 +22,10 @@ VARIANTS = {
         "FLASHQLA_BLACKWELL_NATIVE": "1",
         "FLASHQLA_BLACKWELL_NATIVE_KERNELS": "kkt,fwd",
     },
+    "fwd": {
+        "FLASHQLA_BLACKWELL_NATIVE": "1",
+        "FLASHQLA_BLACKWELL_NATIVE_KERNELS": "fwd",
+    },
 }
 
 
@@ -61,8 +65,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--variants",
-        default="compat,kkt",
-        help="Comma-separated variants: compat,kkt,kkt_fwd",
+        default="compat,fwd,kkt",
+        help="Comma-separated variants: compat,fwd,kkt,kkt_fwd",
     )
     parser.add_argument("--set", default="profile")
     parser.add_argument("--seqlen", type=int, default=None)

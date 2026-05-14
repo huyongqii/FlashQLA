@@ -12,6 +12,15 @@ from flash_qla.ops.gated_delta_rule.chunk.hopper.fused_fwd import (
 )
 
 
+def _debug_enabled() -> bool:
+    return os.environ.get("FLASHQLA_DEBUG_BLACKWELL_DISPATCH", "") == "1"
+
+
+def _debug(message: str):
+    if _debug_enabled():
+        print(f"[FlashQLA Blackwell fwd native] {message}", flush=True)
+
+
 @tilelang.jit(
     pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
@@ -272,13 +281,20 @@ def fused_gdr_fwd(
     _, _, H, V = v.shape
     scale = scale or K ** (-0.5)
 
-    if (
-        output_h
-        or cu_seqlens is not None
-        or cp_seq_map is not None
-        or raw_cu_seqlens is not None
-        or num_tokens % chunk_size != 0
-    ):
+    fallback_reasons = []
+    if output_h:
+        fallback_reasons.append("output_h")
+    if cu_seqlens is not None:
+        fallback_reasons.append("varlen")
+    if cp_seq_map is not None:
+        fallback_reasons.append("cp_seq_map")
+    if raw_cu_seqlens is not None:
+        fallback_reasons.append("raw_cu_seqlens")
+    if num_tokens % chunk_size != 0:
+        fallback_reasons.append("ragged_tokens")
+
+    if fallback_reasons:
+        _debug("fallback=hopper reason=" + ",".join(fallback_reasons))
         return hopper_fused_gdr_fwd(
             q=q,
             k=k,
@@ -297,6 +313,10 @@ def fused_gdr_fwd(
             chunk_size=chunk_size,
         )
 
+    _debug(
+        f"using native fixed-length fwd H={H} Hg={Hg} tokens={num_tokens} "
+        f"output_final_state={output_final_state} output_o={output_o}"
+    )
     assert K == V == 128
     assert chunk_size == 64
 

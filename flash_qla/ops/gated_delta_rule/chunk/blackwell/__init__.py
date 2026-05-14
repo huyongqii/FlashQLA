@@ -51,6 +51,16 @@ else:
 
 HAS_NATIVE_BLACKWELL_KERNELS = _USE_EXPERIMENTAL_NATIVE
 _WARNING_EMITTED = False
+_DEBUG_EMITTED = False
+
+
+def _debug_enabled() -> bool:
+    return os.environ.get("FLASHQLA_DEBUG_BLACKWELL_DISPATCH", "") == "1"
+
+
+def _debug_dispatch(message: str):
+    if _debug_enabled():
+        print(f"[FlashQLA Blackwell dispatch] {message}", flush=True)
 
 
 def _require_or_warn(kernel_name: str):
@@ -76,8 +86,10 @@ def _require_or_warn(kernel_name: str):
 
 def kkt_solve(*args, **kwargs):
     if _native_kkt_solve is not None:
+        _debug_dispatch("kkt_solve=native")
         return _native_kkt_solve(*args, **kwargs)
     if _USE_EXPERIMENTAL_NATIVE:
+        _debug_dispatch("kkt_solve=hopper_fallback")
         return _hopper_kkt_solve(*args, **kwargs)
     _require_or_warn("kkt_solve")
     return _hopper_kkt_solve(*args, **kwargs)
@@ -85,8 +97,10 @@ def kkt_solve(*args, **kwargs):
 
 def fused_gdr_fwd(*args, **kwargs):
     if _native_fused_gdr_fwd is not None:
+        _debug_dispatch("fused_gdr_fwd=native_candidate")
         return _native_fused_gdr_fwd(*args, **kwargs)
     if _USE_EXPERIMENTAL_NATIVE:
+        _debug_dispatch("fused_gdr_fwd=hopper_fallback")
         return _hopper_fused_gdr_fwd(*args, **kwargs)
     _require_or_warn("fused_gdr_fwd")
     return _hopper_fused_gdr_fwd(*args, **kwargs)
