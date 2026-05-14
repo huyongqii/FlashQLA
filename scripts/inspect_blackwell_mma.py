@@ -13,6 +13,7 @@ Hopper WGMMA instructions.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timedelta
 import os
 from pathlib import Path
 import shutil
@@ -82,6 +83,16 @@ def _iter_artifacts(roots: list[Path], since: float | None) -> list[Path]:
         except OSError:
             continue
     return sorted(set(artifacts), key=lambda p: p.stat().st_mtime, reverse=True)
+
+
+def _latest_tvm_debug_dir() -> Path | None:
+    root = Path("/tmp/tvm-debug-mode-tempdirs")
+    if not root.exists():
+        return None
+    dirs = [path for path in root.iterdir() if path.is_dir()]
+    if not dirs:
+        return None
+    return max(dirs, key=lambda path: path.stat().st_mtime)
 
 
 def _is_relevant_artifact(path: Path) -> bool:
@@ -188,6 +199,23 @@ def main() -> int:
     parser.add_argument("--root", action="append", default=[], help="Extra scan root")
     parser.add_argument("--all", action="store_true", help="Scan all artifacts")
     parser.add_argument(
+        "--latest-tvm-dir",
+        action="store_true",
+        help="Inspect only the newest /tmp/tvm-debug-mode-tempdirs run directory",
+    )
+    parser.add_argument(
+        "--since-minutes",
+        type=float,
+        default=None,
+        help="Inspect artifacts modified within the last N minutes",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=200,
+        help="Maximum number of matching artifacts to print",
+    )
+    parser.add_argument(
         "--include-unrelated",
         action="store_true",
         help="Also classify unrelated artifacts such as FlashInfer/GDRCopy",
@@ -204,8 +232,12 @@ def main() -> int:
     if not args.no_run:
         _trigger_flashqla_compile(args)
 
-    roots = _artifact_roots(args.root)
-    since = None if args.all or args.no_run else start_time
+    latest_tvm_dir = _latest_tvm_debug_dir() if args.latest_tvm_dir else None
+    roots = [latest_tvm_dir] if latest_tvm_dir is not None else _artifact_roots(args.root)
+    if args.since_minutes is not None:
+        since = (datetime.now() - timedelta(minutes=args.since_minutes)).timestamp()
+    else:
+        since = None if args.all or args.no_run or args.latest_tvm_dir else start_time
     artifacts = _iter_artifacts(roots, since)
     if not artifacts and since is not None:
         print("no recent artifacts found; falling back to full artifact scan")
@@ -213,6 +245,8 @@ def main() -> int:
     if not args.include_unrelated:
         artifacts = [path for path in artifacts if _is_relevant_artifact(path)]
     print(f"scanned_roots={':'.join(str(root) for root in roots)}")
+    if latest_tvm_dir is not None:
+        print(f"latest_tvm_dir={latest_tvm_dir}")
     print(f"candidate_artifacts={len(artifacts)}")
 
     hits = []
@@ -222,7 +256,7 @@ def main() -> int:
         if has_tcgen or has_wgmma or has_hmma or has_tmem:
             hits.append((path, has_tcgen, has_wgmma, has_hmma, has_tmem))
 
-    for path, has_tcgen, has_wgmma, has_hmma, has_tmem in hits:
+    for path, has_tcgen, has_wgmma, has_hmma, has_tmem in hits[: args.limit]:
         flags = []
         if has_tcgen:
             flags.append("tcgen05/tcgen")
@@ -232,7 +266,10 @@ def main() -> int:
             flags.append("hmma")
         if has_tmem:
             flags.append("tmem")
-        print(f"HIT {'+'.join(flags)} {path}")
+        mtime = datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds")
+        print(f"HIT {'+'.join(flags)} mtime={mtime} {path}")
+    if len(hits) > args.limit:
+        print(f"... omitted {len(hits) - args.limit} hits; increase --limit to show more")
 
     if any(has_tcgen for _, has_tcgen, _, _, _ in hits):
         print("RESULT: Blackwell tensor core instructions detected.")

@@ -60,6 +60,15 @@ FLASHQLA_BLACKWELL_NATIVE=1 python tests/test_gdr.py --set profile --skip-bwd --
 python scripts/inspect_blackwell_mma.py --no-run --all
 ```
 
+To bind SASS inspection to the latest benchmark instead of old TVM cache
+directories, prefer:
+
+```bash
+python scripts/inspect_blackwell_mma.py --no-run --latest-tvm-dir
+# or, immediately after a benchmark:
+python scripts/inspect_blackwell_mma.py --no-run --since-minutes 5
+```
+
 To debug the mechanical fused-forward TCGEN05 port:
 
 ```bash
