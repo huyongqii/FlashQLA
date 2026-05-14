@@ -227,6 +227,16 @@ FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE=1 FLASHQLA_BLACKWELL_NATIVE=1 \
 Any benchmark collected with `FLASHQLA_BLACKWELL_FWD_MAX_ITERS>0` is a runtime
 debug probe only and is not a valid full-sequence performance result.
 
+When probing kernels that may hang inside CUDA, use the timeout wrapper so the
+process group is killed if Ctrl-C cannot interrupt the GPU work:
+
+```bash
+python scripts/run_with_timeout.py --timeout 120 -- \
+  env FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE=1 FLASHQLA_BLACKWELL_NATIVE=1 \
+  FLASHQLA_BLACKWELL_NATIVE_KERNELS=fwd FLASHQLA_BLACKWELL_FWD_MAX_ITERS=4 \
+  python tests/test_gdr.py --set profile --skip-bwd --no-cp --hide-acc
+```
+
 Before debugging that kernel, run the minimal TCGEN05 smoke test:
 
 ```bash
