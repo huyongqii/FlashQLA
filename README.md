@@ -47,6 +47,21 @@ export FLASHQLA_AUTOCP=0
 export FLASHQLA_SUPPRESS_BLACKWELL_WARNING=1
 ```
 
+### Blackwell codegen check
+
+On B200/B300, inspect the generated TileLang artifacts before tuning:
+
+```bash
+python scripts/inspect_blackwell_mma.py
+# For larger-head kernels:
+python scripts/inspect_blackwell_mma.py --q-heads 16 --v-heads 64 --tokens 2048
+```
+
+The script reports whether the generated code contains Blackwell `tcgen05`
+instructions or Hopper `wgmma` instructions. If it reports WGMMA, FlashQLA is
+still effectively running Hopper-style tensor core code on Blackwell and needs
+a dedicated Blackwell kernel path before serious B200/B300 performance tuning.
+
 ## Usage
 
 ### High-level API

@@ -4,6 +4,7 @@
 import argparse
 import fnmatch
 import math
+import os
 
 import torch
 import pandas as pd
@@ -69,6 +70,20 @@ def _print_profiler_note(label: str, prof: dict[str, float]):
     )
 
 
+def _skip_fla_bwd_by_default(device: torch.device | str) -> bool:
+    force = os.environ.get("FLASHQLA_SKIP_FLA_BWD", "").strip()
+    if force:
+        return force == "1"
+    if not torch.cuda.is_available():
+        return False
+    device = torch.device(device)
+    if device.type != "cuda":
+        return False
+    device_index = torch.cuda.current_device() if device.index is None else device.index
+    major, _ = torch.cuda.get_device_capability(device_index)
+    return major >= 10
+
+
 def test_gated_delta_rule(
     batch_size: int,
     num_tokens: int,
@@ -89,6 +104,7 @@ def test_gated_delta_rule(
     auto_cp: bool = True,
     swa_ratio: float = 0.75,
     skip_bwd: bool = False,
+    skip_fla_bwd: bool | None = None,
 ):
     data_dtype = getattr(torch, data_dtype)
     ref_dtype = getattr(torch, ref_dtype)
@@ -357,6 +373,8 @@ def test_gated_delta_rule(
 
     if skip_bwd:
         return
+    if skip_fla_bwd is None:
+        skip_fla_bwd = _skip_fla_bwd_by_default(device)
 
     dq_ref, dk_ref, dv_ref, db_ref, dg_ref, dh0_ref = chunk_gated_delta_rule_bwd_ref(
         q.to(ref_dtype, copy=True),
@@ -371,21 +389,28 @@ def test_gated_delta_rule(
         dht,
         cu_seqlens,
     )
-    dq_fla, dk_fla, dv_fla, db_fla, dg_fla, dh0_fla, _, _ = (
-        chunk_gated_delta_rule_bwd_fla(
-            q,
-            k,
-            v,
-            g_fla,
-            beta,
-            A_fla,
-            scale,
-            h0,
-            do,
-            dht,
-            cu_seqlens,
+    if skip_fla_bwd:
+        print(
+            "[bwd] skip FLA backward baseline "
+            "(set FLASHQLA_SKIP_FLA_BWD=0 to force it)."
         )
-    )
+        dq_fla = dk_fla = dv_fla = db_fla = dg_fla = dh0_fla = None
+    else:
+        dq_fla, dk_fla, dv_fla, db_fla, dg_fla, dh0_fla, _, _ = (
+            chunk_gated_delta_rule_bwd_fla(
+                q,
+                k,
+                v,
+                g_fla,
+                beta,
+                A_fla,
+                scale,
+                h0,
+                do,
+                dht,
+                cu_seqlens,
+            )
+        )
     dq_qla, dk_qla, dv_qla, db_qla, dg_qla, dh0_qla = chunk_gated_delta_rule_bwd_qla(
         q,
         k,
@@ -401,40 +426,46 @@ def test_gated_delta_rule(
     )
 
     if check_accuracy:
-        print(
-            f"dq_fla: {(dq_fla - dq_ref).abs().max().item():.4f} / {dq_ref.abs().max().item():.4f}"
-        )
+        if dq_fla is not None:
+            print(
+                f"dq_fla: {(dq_fla - dq_ref).abs().max().item():.4f} / {dq_ref.abs().max().item():.4f}"
+            )
         print(
             f"dq_qla: {(dq_qla - dq_ref).abs().max().item():.4f} / {dq_ref.abs().max().item():.4f}"
         )
-        print(
-            f"dk_fla: {(dk_fla - dk_ref).abs().max().item():.4f} / {dk_ref.abs().max().item():.4f}"
-        )
+        if dk_fla is not None:
+            print(
+                f"dk_fla: {(dk_fla - dk_ref).abs().max().item():.4f} / {dk_ref.abs().max().item():.4f}"
+            )
         print(
             f"dk_qla: {(dk_qla - dk_ref).abs().max().item():.4f} / {dk_ref.abs().max().item():.4f}"
         )
-        print(
-            f"dv_fla: {(dv_fla - dv_ref).abs().max().item():.4f} / {dv_ref.abs().max().item():.4f}"
-        )
+        if dv_fla is not None:
+            print(
+                f"dv_fla: {(dv_fla - dv_ref).abs().max().item():.4f} / {dv_ref.abs().max().item():.4f}"
+            )
         print(
             f"dv_qla: {(dv_qla - dv_ref).abs().max().item():.4f} / {dv_ref.abs().max().item():.4f}"
         )
-        if dht is not None:
+        if dht is not None and dh0_fla is not None:
             print(
                 f"dh0_fla: {(dh0_fla - dh0_ref).abs().max().item():.4f} / {dh0_ref.abs().max().item():.4f}"
             )
+        if dht is not None:
             print(
                 f"dh0_qla: {(dh0_qla - dh0_ref).abs().max().item():.4f} / {dh0_ref.abs().max().item():.4f}"
             )
-        print(
-            f"db_fla: {(db_fla - db_ref).abs().max().item():.4f} / {db_ref.abs().max().item():.4f}"
-        )
+        if db_fla is not None:
+            print(
+                f"db_fla: {(db_fla - db_ref).abs().max().item():.4f} / {db_ref.abs().max().item():.4f}"
+            )
         print(
             f"db_qla: {(db_qla - db_ref).abs().max().item():.4f} / {db_ref.abs().max().item():.4f}"
         )
-        print(
-            f"dg_fla: {(dg_fla - dg_ref).abs().max().item():.4f} / {dg_ref.abs().max().item():.4f}"
-        )
+        if dg_fla is not None:
+            print(
+                f"dg_fla: {(dg_fla - dg_ref).abs().max().item():.4f} / {dg_ref.abs().max().item():.4f}"
+            )
         print(
             f"dg_qla: {(dg_qla - dg_ref).abs().max().item():.4f} / {dg_ref.abs().max().item():.4f}"
         )
@@ -500,43 +531,49 @@ def test_gated_delta_rule(
                 raise e
 
     if show_speedup:
-        prof_fla = profile(
-            chunk_gated_delta_rule_bwd_fla,
-            [q, k, v, g_fla, beta, A_fla, scale, h0, do, dht, cu_seqlens],
-        )
+        prof_fla = None
+        if not skip_fla_bwd:
+            prof_fla = profile(
+                chunk_gated_delta_rule_bwd_fla,
+                [q, k, v, g_fla, beta, A_fla, scale, h0, do, dht, cu_seqlens],
+            )
         prof_qla = profile(
             chunk_gated_delta_rule_bwd_qla,
             [q, k, v, g_qla, beta, A_qla, do, dht, scale, h0, cu_seqlens],
         )
-        print(f"[bwd] prof_fla keys ({len(prof_fla)}): {sorted(prof_fla.keys())}")
+        if prof_fla is not None:
+            print(f"[bwd] prof_fla keys ({len(prof_fla)}): {sorted(prof_fla.keys())}")
         print(f"[bwd] prof_qla keys ({len(prof_qla)}): {sorted(prof_qla.keys())}")
-        _print_profiler_note("[bwd] FLA", prof_fla)
+        if prof_fla is not None:
+            _print_profiler_note("[bwd] FLA", prof_fla)
         _print_profiler_note("[bwd] FlashQLA", prof_qla)
-        result_fla = {
-            "[bwd] csum": _profile_value(
-                prof_fla, "[bwd] FLA csum", "chunk_local_cumsum_scalar_kernel"
-            ),
-            "[bwd] recom": _profile_value(
-                prof_fla,
-                "[bwd] FLA recom",
-                "recompute_w_u_fwd_kernel",
-                "chunk_gated_delta_rule_fwd_kernel_h_blockdim*",
-            ),
-            "[bwd] dv": _profile_value(
-                prof_fla, "[bwd] FLA dv", "chunk_bwd_kernel_dv_local"
-            ),
-            "[bwd] gdr": _profile_value(
-                prof_fla,
-                "[bwd] FLA gdr",
-                "chunk_gated_delta_rule_bwd_kernel_dhu_blockdim*",
-            ),
-            "[bwd] dqkwg": _profile_value(
-                prof_fla, "[bwd] FLA dqkwg", "kernel_kernel"
-            ),
-            "[bwd] wy": _profile_value(
-                prof_fla, "[bwd] FLA wy", "prepare_wy_repr_bwd_kernel"
-            ),
-        }
+        result_fla = {}
+        if prof_fla is not None:
+            result_fla = {
+                "[bwd] csum": _profile_value(
+                    prof_fla, "[bwd] FLA csum", "chunk_local_cumsum_scalar_kernel"
+                ),
+                "[bwd] recom": _profile_value(
+                    prof_fla,
+                    "[bwd] FLA recom",
+                    "recompute_w_u_fwd_kernel",
+                    "chunk_gated_delta_rule_fwd_kernel_h_blockdim*",
+                ),
+                "[bwd] dv": _profile_value(
+                    prof_fla, "[bwd] FLA dv", "chunk_bwd_kernel_dv_local"
+                ),
+                "[bwd] gdr": _profile_value(
+                    prof_fla,
+                    "[bwd] FLA gdr",
+                    "chunk_gated_delta_rule_bwd_kernel_dhu_blockdim*",
+                ),
+                "[bwd] dqkwg": _profile_value(
+                    prof_fla, "[bwd] FLA dqkwg", "kernel_kernel"
+                ),
+                "[bwd] wy": _profile_value(
+                    prof_fla, "[bwd] FLA wy", "prepare_wy_repr_bwd_kernel"
+                ),
+            }
         result_qla = {
             "[bwd] csum": _profile_value(
                 prof_qla,
@@ -555,25 +592,27 @@ def test_gated_delta_rule(
             ),
         }
         if num_k_heads < num_v_heads:
-            result_fla["[bwd] reduc"] = _profile_value(
-                prof_fla, "[bwd] FLA reduc", "compress_heads_kernel"
-            )
+            if prof_fla is not None:
+                result_fla["[bwd] reduc"] = _profile_value(
+                    prof_fla, "[bwd] FLA reduc", "compress_heads_kernel"
+                )
             result_qla["[bwd] reduc"] = _profile_value(
                 prof_qla,
                 "[bwd] FlashQLA reduc",
                 "tilelang_group_reduce_vector_kernel_kernel",
                 "tilelang_group_reduce_vector_kernel_kernel",
             )
-        result_fla["total"] = prof_fla["total"]
+        if prof_fla is not None:
+            result_fla["total"] = prof_fla["total"]
         result_qla["total"] = prof_qla["total"]
-        results = {
-            "fla": result_fla,
-            "flash_qla": result_qla,
-        }
+        results = {"flash_qla": result_qla}
+        if prof_fla is not None:
+            results = {"fla": result_fla, **results}
         df = pd.DataFrame(results)
         print(df.round(3))
-        speedup = results["fla"]["total"] / results["flash_qla"]["total"]
-        print(f"Speed up: {speedup:2.2f}x")
+        if prof_fla is not None:
+            speedup = results["fla"]["total"] / results["flash_qla"]["total"]
+            print(f"Speed up: {speedup:2.2f}x")
 
 
 if __name__ == "__main__":
@@ -629,6 +668,11 @@ if __name__ == "__main__":
     parser.add_argument("--hide-acc", action="store_true", help="Do not print accuracy")
     parser.add_argument("--hide-lat", action="store_true", help="Do not print latency")
     parser.add_argument(
+        "--run-fla-bwd",
+        action="store_true",
+        help="Force running the FLA backward baseline even on Blackwell",
+    )
+    parser.add_argument(
         "--seed", "--random-seed", type=int, default=42, help="Random seed"
     )
     args = parser.parse_args()
@@ -649,13 +693,12 @@ if __name__ == "__main__":
         "check_accuracy": not args.hide_acc,
         "show_speedup": not args.hide_lat,
         "skip_bwd": args.skip_bwd,
+        "skip_fla_bwd": False if args.run_fla_bwd else None,
         "auto_cp": not args.no_cp,
         "swa_ratio": args.swa_ratio,
         "random_seed": args.seed,
         "device": "cuda",
     }
-
-    import os
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
     preset = pd.read_csv(os.path.join(script_dir, "settings", f"{args.set}.csv"))
