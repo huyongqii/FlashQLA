@@ -243,6 +243,8 @@ def test_gated_delta_rule(
             chunk_gated_delta_rule_fwd_qla,
             [q, k, v, g, beta, scale, h0, cu_seqlens, True, False, auto_cp],
         )
+        print(f"[fwd] prof_fla keys ({len(prof_fla)}): {sorted(prof_fla.keys())}")
+        print(f"[fwd] prof_qla keys ({len(prof_qla)}): {sorted(prof_qla.keys())}")
         result_fla = {
             "[fwd] csum": prof_fla["chunk_local_cumsum_scalar_kernel"],
             "[fwd] solve": prof_fla["chunk_gated_delta_rule_fwd_kkt_solve_kernel"],
@@ -428,6 +430,8 @@ def test_gated_delta_rule(
             chunk_gated_delta_rule_bwd_qla,
             [q, k, v, g_qla, beta, A_qla, do, dht, scale, h0, cu_seqlens],
         )
+        print(f"[bwd] prof_fla keys ({len(prof_fla)}): {sorted(prof_fla.keys())}")
+        print(f"[bwd] prof_qla keys ({len(prof_qla)}): {sorted(prof_qla.keys())}")
         result_fla = {
             "[bwd] csum": prof_fla["chunk_local_cumsum_scalar_kernel"],
             "[bwd] recom": prof_fla["recompute_w_u_fwd_kernel"]
