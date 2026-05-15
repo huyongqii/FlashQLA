@@ -64,7 +64,7 @@ def _sync_barriers() -> set[str]:
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     },
 )
-def tilelang_fused_chunk_gdr_fwd_blackwell_ag_pg(
+def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
     H,
     Hg,
     DK,
@@ -102,7 +102,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag_pg(
     o_shape = (batch_size, num_tokens, H, DV)
 
     @T.prim_func
-    def tilelang_fused_chunk_gdr_fwd_blackwell_ag_pg_kernel(
+    def tilelang_fused_chunk_gdr_fwd_blackwell_ag_kernel(
         q: T.Tensor(q_shape, dtype=qkva_dtype),
         k: T.Tensor(k_shape, dtype=qkva_dtype),
         v: T.Tensor(v_shape, dtype=qkva_dtype),
@@ -139,6 +139,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag_pg(
             u_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
             v_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
             p_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
+            g_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
             g_last_local = T.alloc_local((1), dtype=accum_dtype)
             p_shared = T.alloc_shared((block_S, block_S), dtype=qkva_dtype)
 
@@ -214,6 +215,18 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag_pg(
                     u_fragment[j_s, j_v] += v_shared[j_s, j_v]
                     v_shared[j_s, j_v] = u_fragment[j_s, j_v]
 
+                # The fixed-length Blackwell fast KKT path precomputes Ag =
+                # G * A * beta, so this kernel only needs G for the P path.
+                for j_s, j_t in T.Parallel(block_S, block_S):
+                    g_fragment[j_s, j_t] = g_shared[j_s] - g_shared[j_t]
+                for j_s, j_t in T.Parallel(block_S, block_S):
+                    if j_s >= j_t:
+                        g_fragment[j_s, j_t] = T.exp2(
+                            g_fragment[j_s, j_t] * 1.442695
+                        )
+                    else:
+                        g_fragment[j_s, j_t] = 0
+
                 # Vd = Ag @ W
                 T.tcgen05_gemm(
                     a_shared,
@@ -254,17 +267,9 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag_pg(
                 T.mbarrier_wait_parity(mbar_o0[mbar_slot], mbar_phase)
                 T.copy(tmp_tmem[:, 0:block_DV], o_fragment)
 
-                # Pg = scale * G * P; O = scale * g * O + Pg @ Vd.
-                # Ag is precomputed by fast KKT, so this is the only place
-                # that still needs the 64x64 gate matrix in fwd. Fold it
-                # directly into P instead of materializing another fragment.
+                # Pg = scale * G * P; O = scale * g * O + Pg @ Vd
                 for j_s, j_t in T.Parallel(block_S, block_S):
-                    if j_s >= j_t:
-                        p_fragment[j_s, j_t] *= scale * T.exp2(
-                            (g_shared[j_s] - g_shared[j_t]) * 1.442695
-                        )
-                    else:
-                        p_fragment[j_s, j_t] = 0
+                    p_fragment[j_s, j_t] *= scale * g_fragment[j_s, j_t]
                 T.copy(p_fragment, p_shared)
                 for j_s, j_v in T.Parallel(block_S, block_DV):
                     o_fragment[j_s, j_v] *= scale * g_exp_shared[j_s]
@@ -307,7 +312,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag_pg(
             if store_final_state:
                 T.copy(h_fragment, ht[bb, bh, 0:DK, bv * block_DV : (bv + 1) * block_DV])
 
-    return tilelang_fused_chunk_gdr_fwd_blackwell_ag_pg_kernel
+    return tilelang_fused_chunk_gdr_fwd_blackwell_ag_kernel
 
 
 def fused_gdr_fwd(
@@ -404,7 +409,7 @@ def fused_gdr_fwd(
         )
     sync_barriers = _sync_barriers()
     _debug(f"threads={num_threads} sync_barriers=" + ",".join(sorted(sync_barriers)))
-    tilelang_fused_chunk_gdr_fwd_kernel = tilelang_fused_chunk_gdr_fwd_blackwell_ag_pg(
+    tilelang_fused_chunk_gdr_fwd_kernel = tilelang_fused_chunk_gdr_fwd_blackwell_ag(
         H,
         Hg,
         K,
