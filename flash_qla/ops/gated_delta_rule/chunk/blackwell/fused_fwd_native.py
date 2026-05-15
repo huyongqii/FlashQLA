@@ -359,14 +359,12 @@ def tilelang_precompute_pg_blackwell(
             q_shared = T.alloc_shared((block_S, DK), dtype=qkva_dtype)
             k_shared = T.alloc_shared((block_S, DK), dtype=qkva_dtype)
             g_shared = T.alloc_shared((block_S), dtype=accum_dtype, scope="shared")
-            pg_shared = T.alloc_shared((block_S, block_S), dtype=qkva_dtype)
 
             p_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
             g_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
             p_tmem = T.alloc_tmem((block_S, block_S), dtype=accum_dtype)
             mbar_p = T.alloc_barrier(arrive_count=1)
             bar_load = T.alloc_barrier(arrive_count=128)
-            bar_store = T.alloc_barrier(arrive_count=128)
 
             T.copy(q[bb, left:right, bhg, 0:DK], q_shared)
             T.copy(k[bb, left:right, bhg, 0:DK], k_shared)
@@ -397,10 +395,8 @@ def tilelang_precompute_pg_blackwell(
                     g_fragment[j_s, j_t] = 0
             for j_s, j_t in T.Parallel(block_S, block_S):
                 p_fragment[j_s, j_t] *= scale * g_fragment[j_s, j_t]
-            T.copy(p_fragment, pg_shared)
-            T.barrier_arrive(bar_store)
-            T.barrier_wait(bar_store, 0)
-            T.copy(pg_shared, pg[bb, left:right, bh, 0:block_S])
+            for j_s, j_t in T.Parallel(block_S, block_S):
+                pg[bb, left + j_s, bh, j_t] = p_fragment[j_s, j_t]
 
     return tilelang_precompute_pg_blackwell_kernel
 
