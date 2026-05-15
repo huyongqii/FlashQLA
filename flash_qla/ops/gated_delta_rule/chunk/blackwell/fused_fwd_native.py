@@ -1666,64 +1666,10 @@ def fused_gdr_fwd(
                 "FLASHQLA_BLACKWELL_FWD_EXPERIMENT=small_hv currently requires "
                 f"FLASHQLA_BLACKWELL_BLOCK_DV=64, got {block_DV}"
             )
-        _debug("using small_hv P-precompute experiment")
-        num_chunks = batch_size * tilelang.cdiv(num_tokens, chunk_size)
-        p = torch.empty(
-            (batch_size, num_tokens, Hg, chunk_size),
-            dtype=torch.float32,
-            device=q.device,
+        _debug(
+            "small_hv P-precompute copy-kernel experiment is disabled; "
+            "using the stable ag kernel as the small-Hv baseline"
         )
-        tilelang_precompute_p_kernel = tilelang_precompute_p_blackwell(
-            Hg,
-            K,
-            chunk_size,
-            qkva_dtype=q.dtype,
-            accum_dtype="float32",
-        )
-        tilelang_precompute_p_kernel(q, k, p, num_chunks)
-        tilelang_fused_chunk_gdr_fwd_kernel = (
-            tilelang_fused_chunk_gdr_fwd_blackwell_p_input(
-                H,
-                Hg,
-                K,
-                V,
-                chunk_size,
-                scale,
-                qkva_dtype=q.dtype,
-                g_dtype=g.dtype,
-                h0_dtype=initial_state.dtype,
-                ht_dtype=final_state.dtype,
-                o_dtype=o.dtype,
-                accum_dtype="float32",
-                use_initial_state=use_initial_state,
-                store_final_state=output_final_state,
-                store_o=output_o,
-                max_iters=max_iters,
-                recompute_p_for_debug=(
-                    os.environ.get("FLASHQLA_BLACKWELL_SMALL_HV_RECOMPUTE_P", "")
-                    == "1"
-                ),
-                num_threads=num_threads,
-                block_DV=block_DV,
-            )
-        )
-        tilelang_fused_chunk_gdr_fwd_kernel(
-            q,
-            k,
-            v,
-            a,
-            g,
-            p,
-            initial_state,
-            o,
-            final_state,
-        )
-
-        if not output_final_state:
-            final_state = None
-        if not output_o:
-            o = None
-        return o, h, final_state
     if fwd_experiment not in ("", "ag", "small_hv"):
         raise ValueError(
             "FLASHQLA_BLACKWELL_FWD_EXPERIMENT must be unset, 'ag', "
