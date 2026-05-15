@@ -18,6 +18,7 @@ if is_blackwell(_cc):
         fused_gdr_h,
         kkt_solve,
     )
+    from .blackwell.policy import should_use_native_fwd
 from .cp_context import intra_card_cp_preprocess
 
 
@@ -35,9 +36,14 @@ def chunk_gated_delta_rule_fwd(
     auto_cp: bool = True,
 ):
     g = chunk_local_cumsum(g, chunk_size=64, cu_seqlens=cu_seqlens)
+    Hg, H = k.shape[-2], v.shape[-2]
+    use_blackwell_native_fwd = False
+    if is_blackwell(_cc):
+        use_blackwell_native_fwd, _ = should_use_native_fwd(H, Hg)
     pretransform_a = (
         os.environ.get("FLASHQLA_BLACKWELL_PRETRANSFORM_A", "1") == "1"
         and is_blackwell(_cc)
+        and use_blackwell_native_fwd
         and cu_seqlens is None
         and not output_h
         and not auto_cp

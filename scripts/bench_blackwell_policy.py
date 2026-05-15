@@ -32,12 +32,37 @@ SHAPES = {
 }
 
 
+SHAPE_GROUPS = {
+    "qwen397": ("tp8", "tp4", "tp2", "tp1"),
+    "all": tuple(SHAPES),
+}
+
+
 POLICIES = {
     "compat": {},
+    "auto_256_lh": {
+        "FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE": "1",
+        "FLASHQLA_BLACKWELL_NATIVE": "1",
+        "FLASHQLA_BLACKWELL_NATIVE_KERNELS": "fwd,kkt",
+        "FLASHQLA_BLACKWELL_FWD_POLICY": "auto",
+        "FLASHQLA_BLACKWELL_BLOCK_DV": "64",
+        "FLASHQLA_BLACKWELL_FWD_THREADS": "256",
+        "FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS": "load,h",
+    },
+    "qwen397_native": {
+        "FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE": "1",
+        "FLASHQLA_BLACKWELL_NATIVE": "1",
+        "FLASHQLA_BLACKWELL_NATIVE_KERNELS": "fwd,kkt",
+        "FLASHQLA_BLACKWELL_FWD_POLICY": "native",
+        "FLASHQLA_BLACKWELL_BLOCK_DV": "64",
+        "FLASHQLA_BLACKWELL_FWD_THREADS": "256",
+        "FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS": "load,h",
+    },
     "ag_256_lh": {
         "FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE": "1",
         "FLASHQLA_BLACKWELL_NATIVE": "1",
         "FLASHQLA_BLACKWELL_NATIVE_KERNELS": "fwd,kkt",
+        "FLASHQLA_BLACKWELL_FWD_POLICY": "native",
         "FLASHQLA_BLACKWELL_BLOCK_DV": "64",
         "FLASHQLA_BLACKWELL_FWD_THREADS": "256",
         "FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS": "load,h",
@@ -46,6 +71,7 @@ POLICIES = {
         "FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE": "1",
         "FLASHQLA_BLACKWELL_NATIVE": "1",
         "FLASHQLA_BLACKWELL_NATIVE_KERNELS": "fwd,kkt",
+        "FLASHQLA_BLACKWELL_FWD_POLICY": "native",
         "FLASHQLA_BLACKWELL_BLOCK_DV": "64",
         "FLASHQLA_BLACKWELL_FWD_THREADS": "256",
         "FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS": "load,h,o",
@@ -54,6 +80,7 @@ POLICIES = {
         "FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE": "1",
         "FLASHQLA_BLACKWELL_NATIVE": "1",
         "FLASHQLA_BLACKWELL_NATIVE_KERNELS": "fwd,kkt",
+        "FLASHQLA_BLACKWELL_FWD_POLICY": "native",
         "FLASHQLA_BLACKWELL_BLOCK_DV": "64",
         "FLASHQLA_BLACKWELL_FWD_THREADS": "256",
         "FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS": "load,h,ag",
@@ -62,6 +89,7 @@ POLICIES = {
         "FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE": "1",
         "FLASHQLA_BLACKWELL_NATIVE": "1",
         "FLASHQLA_BLACKWELL_NATIVE_KERNELS": "fwd,kkt",
+        "FLASHQLA_BLACKWELL_FWD_POLICY": "native",
         "FLASHQLA_BLACKWELL_BLOCK_DV": "64",
         "FLASHQLA_BLACKWELL_FWD_THREADS": "128",
         "FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS": "load,h",
@@ -70,6 +98,7 @@ POLICIES = {
         "FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE": "1",
         "FLASHQLA_BLACKWELL_NATIVE": "1",
         "FLASHQLA_BLACKWELL_NATIVE_KERNELS": "fwd,kkt",
+        "FLASHQLA_BLACKWELL_FWD_POLICY": "native",
         "FLASHQLA_BLACKWELL_BLOCK_DV": "128",
         "FLASHQLA_BLACKWELL_FWD_THREADS": "256",
         "FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS": "load,h",
@@ -84,6 +113,7 @@ ENV_TO_CLEAR = (
     "FLASHQLA_BLACKWELL_BLOCK_DV",
     "FLASHQLA_BLACKWELL_FWD_THREADS",
     "FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS",
+    "FLASHQLA_BLACKWELL_FWD_POLICY",
     "FLASHQLA_BLACKWELL_FWD_EXPERIMENT",
     "FLASHQLA_BLACKWELL_FWD_MAX_ITERS",
     "FLASHQLA_BLACKWELL_KKT_EXPERIMENT",
@@ -117,6 +147,16 @@ class RunResult:
 
 def _split_csv(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _expand_shapes(items: list[str]) -> list[str]:
+    expanded: list[str] = []
+    for item in items:
+        if item in SHAPE_GROUPS:
+            expanded.extend(SHAPE_GROUPS[item])
+        else:
+            expanded.append(item)
+    return list(dict.fromkeys(expanded))
 
 
 def _parse_float(value: str) -> float | None:
@@ -323,13 +363,17 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--policies",
-        default="ag_256_lh,ag_256_lho,ag_256_lhag,ag_128_lh,ag_b128_256_lh",
+        default="qwen397_native,auto_256_lh,compat",
         help=f"Comma-separated policies. Available: {','.join(sorted(POLICIES))}",
     )
     parser.add_argument(
         "--shapes",
-        default="h64",
-        help=f"Comma-separated shape presets. Available: {','.join(sorted(SHAPES))}",
+        default="qwen397",
+        help=(
+            "Comma-separated shape presets or groups. "
+            f"Shapes: {','.join(sorted(SHAPES))}. "
+            f"Groups: {','.join(sorted(SHAPE_GROUPS))}"
+        ),
     )
     parser.add_argument("--set", default="profile")
     parser.add_argument("--timeout", type=float, default=300.0)
@@ -343,7 +387,7 @@ def main() -> int:
     args = parser.parse_args()
 
     selected_policies = _split_csv(args.policies)
-    selected_shapes = _split_csv(args.shapes)
+    selected_shapes = _expand_shapes(_split_csv(args.shapes))
     unknown_policies = [item for item in selected_policies if item not in POLICIES]
     unknown_shapes = [item for item in selected_shapes if item not in SHAPES]
     if unknown_policies:

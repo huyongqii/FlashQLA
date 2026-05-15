@@ -10,6 +10,7 @@ import tilelang.language as T
 from flash_qla.ops.gated_delta_rule.chunk.hopper.fused_fwd import (
     fused_gdr_fwd as hopper_fused_gdr_fwd,
 )
+from flash_qla.ops.gated_delta_rule.chunk.blackwell.policy import should_use_native_fwd
 
 
 def _debug_enabled() -> bool:
@@ -1234,6 +1235,9 @@ def fused_gdr_fwd(
         fallback_reasons.append("ragged_tokens")
     if os.environ.get("FLASHQLA_BLACKWELL_PRETRANSFORM_A", "1") != "1":
         fallback_reasons.append("raw_a")
+    use_native_by_policy, policy_reason = should_use_native_fwd(H, Hg)
+    if not use_native_by_policy:
+        fallback_reasons.append(policy_reason)
 
     if fallback_reasons:
         _debug("fallback=hopper reason=" + ",".join(fallback_reasons))

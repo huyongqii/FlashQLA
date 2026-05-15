@@ -37,6 +37,7 @@ def _run_variant(name: str, args: argparse.Namespace) -> int:
     env.pop("FLASHQLA_BLACKWELL_BLOCK_DV", None)
     env.pop("FLASHQLA_BLACKWELL_FWD_THREADS", None)
     env.pop("FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS", None)
+    env.pop("FLASHQLA_BLACKWELL_FWD_POLICY", None)
     env.pop("FLASHQLA_BLACKWELL_FWD_EXPERIMENT", None)
     env.pop("FLASHQLA_BLACKWELL_FWD_MAX_ITERS", None)
     env.pop("FLASHQLA_BLACKWELL_KKT_EXPERIMENT", None)
@@ -85,6 +86,7 @@ def _run_variant(name: str, args: argparse.Namespace) -> int:
             "FLASHQLA_BLACKWELL_BLOCK_DV",
             "FLASHQLA_BLACKWELL_FWD_THREADS",
             "FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS",
+            "FLASHQLA_BLACKWELL_FWD_POLICY",
             "FLASHQLA_CORRECTNESS_REPEATS",
         )
         if key in env
