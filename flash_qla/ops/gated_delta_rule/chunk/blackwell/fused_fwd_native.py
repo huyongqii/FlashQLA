@@ -620,6 +620,21 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_pg_input(
                     v_fragment[j_s, j_v] *= g_rev_exp_shared[j_s]
                     vn_shared[j_s, j_v] = v_fragment[j_s, j_v]
 
+                if recompute_p_for_debug:
+                    T.tcgen05_gemm(
+                        q_shared,
+                        k_shared,
+                        p_tmem,
+                        transpose_B=True,
+                        clear_accum=True,
+                        mbar=mbar_p[mbar_slot],
+                    )
+                    T.mbarrier_wait_parity(mbar_p[mbar_slot], mbar_phase)
+                    T.copy(p_tmem, p_fragment)
+                else:
+                    for j_s, j_t in T.Parallel(block_S, block_S):
+                        p_fragment[j_s, j_t] = p[bb, left + j_s, bhg, j_t]
+
                 T.tcgen05_gemm(
                     q_shared,
                     h_shared,
@@ -831,19 +846,6 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_p_input(
                 T.mbarrier_wait_parity(mbar_o0[mbar_slot], mbar_phase)
                 T.copy(tmp_tmem[:, 0:block_DV], o_fragment)
 
-                for j_s, j_t in T.Parallel(block_S, block_S):
-                    p_fragment[j_s, j_t] = p[bb, left + j_s, bhg, j_t]
-                if recompute_p_for_debug:
-                    T.tcgen05_gemm(
-                        q_shared,
-                        k_shared,
-                        p_tmem,
-                        transpose_B=True,
-                        clear_accum=True,
-                        mbar=mbar_p[mbar_slot],
-                    )
-                    T.mbarrier_wait_parity(mbar_p[mbar_slot], mbar_phase)
-                    T.copy(p_tmem, p_fragment)
                 for j_s, j_t in T.Parallel(block_S, block_S):
                     g_fragment[j_s, j_t] = g_shared[j_s] - g_shared[j_t]
                 for j_s, j_t in T.Parallel(block_S, block_S):
