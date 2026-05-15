@@ -64,7 +64,7 @@ def _sync_barriers() -> set[str]:
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     },
 )
-def tilelang_fused_chunk_gdr_fwd_blackwell_native(
+def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
     H,
     Hg,
     DK,
@@ -74,7 +74,6 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
     accum_dtype,
     qkva_dtype,
     g_dtype,
-    b_dtype,
     h0_dtype,
     ht_dtype,
     o_dtype,
@@ -84,10 +83,8 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
     max_iters,
     use_bar_load,
     use_bar_h_shared,
-    use_bar_ag,
     use_bar_o,
     use_bar_h_scaled,
-    input_a_is_ag,
     num_threads=128,
     block_DV=64,
 ):
@@ -100,19 +97,17 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
     v_shape = (batch_size, num_tokens, H, DV)
     a_shape = (batch_size, num_tokens, H, chunk_size)
     g_shape = (batch_size, num_tokens, H)
-    b_shape = (batch_size, num_tokens, H)
     h0_shape = (batch_size, H, DK, DV)
     ht_shape = (batch_size, H, DK, DV)
     o_shape = (batch_size, num_tokens, H, DV)
 
     @T.prim_func
-    def tilelang_fused_chunk_gdr_fwd_blackwell_native_kernel(
+    def tilelang_fused_chunk_gdr_fwd_blackwell_ag_kernel(
         q: T.Tensor(q_shape, dtype=qkva_dtype),
         k: T.Tensor(k_shape, dtype=qkva_dtype),
         v: T.Tensor(v_shape, dtype=qkva_dtype),
         a: T.Tensor(a_shape, dtype=qkva_dtype),
         g: T.Tensor(g_shape, dtype=g_dtype),
-        b: T.Tensor(b_shape, dtype=b_dtype),
         h0: T.Tensor(h0_shape, dtype=h0_dtype),
         o: T.Tensor(o_shape, dtype=o_dtype),
         ht: T.Tensor(ht_shape, dtype=ht_dtype),
@@ -146,11 +141,6 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
             p_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
             g_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
             g_last_local = T.alloc_local((1), dtype=accum_dtype)
-            if not input_a_is_ag:
-                b_shared = T.alloc_shared(
-                    (block_S), dtype=accum_dtype, scope="shared"
-                )
-                a_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
             p_shared = T.alloc_shared((block_S, block_S), dtype=qkva_dtype)
 
             # Keep TMEM allocations small and reusable. This first native kernel
@@ -168,7 +158,6 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
             mbar_h = T.alloc_barrier(arrive_count=[1] * 8)
             bar_load = T.alloc_barrier(arrive_count=num_threads)
             bar_h_shared = T.alloc_barrier(arrive_count=num_threads)
-            bar_ag = T.alloc_barrier(arrive_count=num_threads)
             bar_o = T.alloc_barrier(arrive_count=num_threads)
             bar_h_scaled = T.alloc_barrier(arrive_count=num_threads)
 
@@ -193,9 +182,6 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
                 T.copy(a[bb, left:right, bh, 0:block_S], a_shared)
                 for j_s in T.Parallel(block_S):
                     g_shared[j_s] = g[bb, left + j_s, bh]
-                if not input_a_is_ag:
-                    for j_s in T.Parallel(block_S):
-                        b_shared[j_s] = b[bb, left + j_s, bh]
 
                 for j_s in T.Parallel(block_S):
                     g_exp_shared[j_s] = T.exp2(g_shared[j_s] * 1.442695)
@@ -229,9 +215,8 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
                     u_fragment[j_s, j_v] += v_shared[j_s, j_v]
                     v_shared[j_s, j_v] = u_fragment[j_s, j_v]
 
-                # Ag = G * A * beta. Some fixed-length Blackwell experiments
-                # precompute this in fast KKT to avoid repeating the transform
-                # once per DV tile.
+                # The fixed-length Blackwell fast KKT path precomputes Ag =
+                # G * A * beta, so this kernel only needs G for the P path.
                 for j_s, j_t in T.Parallel(block_S, block_S):
                     g_fragment[j_s, j_t] = g_shared[j_s] - g_shared[j_t]
                 for j_s, j_t in T.Parallel(block_S, block_S):
@@ -241,15 +226,6 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
                         )
                     else:
                         g_fragment[j_s, j_t] = 0
-                if not input_a_is_ag:
-                    for j_s, j_t in T.Parallel(block_S, block_S):
-                        a_fragment[j_s, j_t] = a_shared[j_s, j_t]
-                        a_fragment[j_s, j_t] *= g_fragment[j_s, j_t]
-                        a_fragment[j_s, j_t] *= b_shared[j_t]
-                        a_shared[j_s, j_t] = a_fragment[j_s, j_t]
-                    if use_bar_ag:
-                        T.barrier_arrive(bar_ag)
-                        T.barrier_wait(bar_ag, i_s % 2)
 
                 # Vd = Ag @ W
                 T.tcgen05_gemm(
@@ -336,7 +312,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_native(
             if store_final_state:
                 T.copy(h_fragment, ht[bb, bh, 0:DK, bv * block_DV : (bv + 1) * block_DV])
 
-    return tilelang_fused_chunk_gdr_fwd_blackwell_native_kernel
+    return tilelang_fused_chunk_gdr_fwd_blackwell_ag_kernel
 
 
 def fused_gdr_fwd(
@@ -373,6 +349,8 @@ def fused_gdr_fwd(
         fallback_reasons.append("raw_cu_seqlens")
     if num_tokens % chunk_size != 0:
         fallback_reasons.append("ragged_tokens")
+    if os.environ.get("FLASHQLA_BLACKWELL_PRETRANSFORM_A", "1") != "1":
+        fallback_reasons.append("raw_a")
 
     if fallback_reasons:
         _debug("fallback=hopper reason=" + ",".join(fallback_reasons))
@@ -430,9 +408,8 @@ def fused_gdr_fwd(
             f"native fwd path, got {num_threads}"
         )
     sync_barriers = _sync_barriers()
-    input_a_is_ag = os.environ.get("FLASHQLA_BLACKWELL_PRETRANSFORM_A", "1") == "1"
     _debug(f"threads={num_threads} sync_barriers=" + ",".join(sorted(sync_barriers)))
-    tilelang_fused_chunk_gdr_fwd_kernel = tilelang_fused_chunk_gdr_fwd_blackwell_native(
+    tilelang_fused_chunk_gdr_fwd_kernel = tilelang_fused_chunk_gdr_fwd_blackwell_ag(
         H,
         Hg,
         K,
@@ -441,7 +418,6 @@ def fused_gdr_fwd(
         scale,
         qkva_dtype=q.dtype,
         g_dtype=g.dtype,
-        b_dtype=b.dtype,
         h0_dtype=initial_state.dtype,
         ht_dtype=final_state.dtype,
         o_dtype=o.dtype,
@@ -452,10 +428,8 @@ def fused_gdr_fwd(
         max_iters=max_iters,
         use_bar_load="load" in sync_barriers,
         use_bar_h_shared="h" in sync_barriers,
-        use_bar_ag="ag" in sync_barriers,
         use_bar_o="o" in sync_barriers,
         use_bar_h_scaled="hscale" in sync_barriers,
-        input_a_is_ag=input_a_is_ag,
         num_threads=num_threads,
         block_DV=block_DV,
     )
@@ -465,7 +439,6 @@ def fused_gdr_fwd(
         v,
         a,
         g,
-        b,
         initial_state,
         o,
         final_state,

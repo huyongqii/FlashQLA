@@ -94,7 +94,7 @@ def kkt_solve(*args, **kwargs):
         if os.environ.get("FLASHQLA_BLACKWELL_KKT_EXPERIMENT", "") == "tcgen05":
             _debug_dispatch("kkt_solve=native_tcgen05_experiment")
         else:
-            _debug_dispatch("kkt_solve=hopper_fallback")
+            _debug_dispatch("kkt_solve=native_fixed_fast_candidate")
         return _native_kkt_solve(*args, **kwargs)
     if _USE_EXPERIMENTAL_NATIVE:
         _debug_dispatch("kkt_solve=hopper_fallback")
