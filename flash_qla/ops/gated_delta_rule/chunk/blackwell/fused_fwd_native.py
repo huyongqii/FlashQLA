@@ -1351,66 +1351,12 @@ def fused_gdr_fwd(
             "a safer two-kernel or CTA-pair schedule."
         )
     if fwd_experiment == "pg_precompute":
-        if block_DV != 64:
-            raise ValueError(
-                "FLASHQLA_BLACKWELL_FWD_EXPERIMENT=pg_precompute currently "
-                f"requires FLASHQLA_BLACKWELL_BLOCK_DV=64, got {block_DV}"
-            )
-        _debug("using pg_precompute experiment")
-        pg = torch.empty(
-            (batch_size, num_tokens, H, chunk_size), dtype=q.dtype, device=q.device
+        raise RuntimeError(
+            "FLASHQLA_BLACKWELL_FWD_EXPERIMENT=pg_precompute is disabled: "
+            "both shared-buffer and elementwise global-store variants produced "
+            "intermittent O-path correctness failures on B300 with TileLang "
+            "0.1.9 while final_state stayed correct. Use the default 'ag' path."
         )
-        num_chunks = batch_size * tilelang.cdiv(num_tokens, chunk_size)
-        tilelang_precompute_pg_kernel = tilelang_precompute_pg_blackwell(
-            H,
-            Hg,
-            K,
-            chunk_size,
-            scale,
-            qkva_dtype=q.dtype,
-            g_dtype=g.dtype,
-            accum_dtype="float32",
-        )
-        tilelang_precompute_pg_kernel(q, k, g, pg, num_chunks)
-        tilelang_fused_chunk_gdr_fwd_kernel = (
-            tilelang_fused_chunk_gdr_fwd_blackwell_pg_input(
-                H,
-                Hg,
-                K,
-                V,
-                chunk_size,
-                scale,
-                qkva_dtype=q.dtype,
-                g_dtype=g.dtype,
-                h0_dtype=initial_state.dtype,
-                ht_dtype=final_state.dtype,
-                o_dtype=o.dtype,
-                accum_dtype="float32",
-                use_initial_state=use_initial_state,
-                store_final_state=output_final_state,
-                store_o=output_o,
-                max_iters=max_iters,
-                num_threads=num_threads,
-                block_DV=block_DV,
-            )
-        )
-        tilelang_fused_chunk_gdr_fwd_kernel(
-            q,
-            k,
-            v,
-            a,
-            g,
-            pg,
-            initial_state,
-            o,
-            final_state,
-        )
-
-        if not output_final_state:
-            final_state = None
-        if not output_o:
-            o = None
-        return o, h, final_state
     if fwd_experiment not in ("", "ag"):
         raise ValueError(
             "FLASHQLA_BLACKWELL_FWD_EXPERIMENT must be unset, 'ag', "

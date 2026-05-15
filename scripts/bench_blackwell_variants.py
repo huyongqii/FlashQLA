@@ -37,6 +37,11 @@ def _run_variant(name: str, args: argparse.Namespace) -> int:
     env.pop("FLASHQLA_BLACKWELL_BLOCK_DV", None)
     env.pop("FLASHQLA_BLACKWELL_FWD_THREADS", None)
     env.pop("FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS", None)
+    env.pop("FLASHQLA_BLACKWELL_FWD_EXPERIMENT", None)
+    env.pop("FLASHQLA_BLACKWELL_FWD_MAX_ITERS", None)
+    env.pop("FLASHQLA_BLACKWELL_KKT_EXPERIMENT", None)
+    env.pop("FLASHQLA_BLACKWELL_PRECOMPUTE_P", None)
+    env.pop("FLASHQLA_BLACKWELL_PRETRANSFORM_A", None)
     env.pop("FLASHQLA_CORRECTNESS_REPEATS", None)
     env.update(VARIANTS[name])
     if "fwd" in env.get("FLASHQLA_BLACKWELL_NATIVE_KERNELS", ""):
