@@ -58,6 +58,16 @@ POLICIES = {
         "FLASHQLA_BLACKWELL_FWD_THREADS": "256",
         "FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS": "load,h",
     },
+    "qwen397_small_hv": {
+        "FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE": "1",
+        "FLASHQLA_BLACKWELL_NATIVE": "1",
+        "FLASHQLA_BLACKWELL_NATIVE_KERNELS": "fwd,kkt",
+        "FLASHQLA_BLACKWELL_FWD_POLICY": "native",
+        "FLASHQLA_BLACKWELL_FWD_EXPERIMENT": "small_hv",
+        "FLASHQLA_BLACKWELL_BLOCK_DV": "64",
+        "FLASHQLA_BLACKWELL_FWD_THREADS": "256",
+        "FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS": "load,h",
+    },
     "ag_256_lh": {
         "FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE": "1",
         "FLASHQLA_BLACKWELL_NATIVE": "1",
@@ -141,6 +151,7 @@ class RunResult:
     speedup: float | None
     status: str
     returncode: int | None
+    error_tail: str
     log_path: str
     kernels: str
 
@@ -202,6 +213,26 @@ def _parse_output(text: str) -> tuple[list[dict[str, float | int | None]], list[
             pending_total = None
 
     return rows, sorted(kernels)
+
+
+def _error_tail(text: str, max_lines: int = 12) -> str:
+    interesting = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip()
+        and (
+            "Traceback" in line
+            or "Error" in line
+            or "ERROR" in line
+            or "Exception" in line
+            or "AssertionError" in line
+            or "RuntimeError" in line
+            or "ValueError" in line
+            or "timeout" in line.lower()
+        )
+    ]
+    tail = interesting[-max_lines:]
+    return " | ".join(tail)
 
 
 def _make_env(policy: str, correctness_repeats: int | None) -> dict[str, str]:
@@ -277,6 +308,7 @@ def _run_one(
     log_path.write_text(stdout, encoding="utf-8")
     parsed, kernels = _parse_output(stdout)
     kernel_text = ";".join(kernels)
+    error_tail = _error_tail(stdout) if status != "ok" else ""
 
     if not parsed:
         return [
@@ -291,6 +323,7 @@ def _run_one(
                 speedup=None,
                 status=status,
                 returncode=returncode,
+                error_tail=error_tail,
                 log_path=str(log_path),
                 kernels=kernel_text,
             )
@@ -308,6 +341,7 @@ def _run_one(
             speedup=row["speedup"],
             status=status,
             returncode=returncode,
+            error_tail=error_tail,
             log_path=str(log_path),
             kernels=kernel_text,
         )
@@ -327,6 +361,7 @@ def _write_csv(path: Path, rows: list[RunResult]) -> None:
         "speedup",
         "status",
         "returncode",
+        "error_tail",
         "kernels",
         "log_path",
     )

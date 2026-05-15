@@ -407,6 +407,68 @@ def tilelang_precompute_pg_blackwell(
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     },
 )
+def tilelang_precompute_p_blackwell(
+    Hg,
+    DK,
+    chunk_size,
+    accum_dtype,
+    qkva_dtype,
+):
+    batch_size = T.dynamic("batch_size")
+    num_tokens = T.dynamic("num_tokens")
+    num_chunks = T.dynamic("num_chunks")
+    block_S = chunk_size
+
+    q_shape = (batch_size, num_tokens, Hg, DK)
+    k_shape = (batch_size, num_tokens, Hg, DK)
+    p_shape = (batch_size, num_tokens, Hg, chunk_size)
+
+    @T.prim_func
+    def tilelang_precompute_p_blackwell_kernel(
+        q: T.Tensor(q_shape, dtype=qkva_dtype),
+        k: T.Tensor(k_shape, dtype=qkva_dtype),
+        p: T.Tensor(p_shape, dtype=qkva_dtype),
+        num_chunks: T.int32,
+    ):
+        with T.Kernel(num_chunks * Hg, threads=128) as (bcg,):
+            bc, bhg = bcg // Hg, bcg % Hg
+            bb = bc % batch_size
+            chunk_idx = bc // batch_size
+            left = chunk_idx * block_S
+            right = left + block_S
+
+            q_shared = T.alloc_shared((block_S, DK), dtype=qkva_dtype)
+            k_shared = T.alloc_shared((block_S, DK), dtype=qkva_dtype)
+            p_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
+            p_tmem = T.alloc_tmem((block_S, block_S), dtype=accum_dtype)
+            mbar_p = T.alloc_barrier(arrive_count=1)
+            bar_load = T.alloc_barrier(arrive_count=128)
+
+            T.copy(q[bb, left:right, bhg, 0:DK], q_shared)
+            T.copy(k[bb, left:right, bhg, 0:DK], k_shared)
+            T.barrier_arrive(bar_load)
+            T.barrier_wait(bar_load, 0)
+
+            T.tcgen05_gemm(
+                q_shared,
+                k_shared,
+                p_tmem,
+                transpose_B=True,
+                clear_accum=True,
+                mbar=mbar_p,
+            )
+            T.mbarrier_wait_parity(mbar_p, 0)
+            T.copy(p_tmem, p_fragment)
+            T.copy(p_fragment, p[bb, left:right, bhg, 0:block_S])
+
+    return tilelang_precompute_p_blackwell_kernel
+
+
+@tilelang.jit(
+    pass_configs={
+        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
+    },
+)
 def tilelang_fused_chunk_gdr_fwd_blackwell_pg_input(
     H,
     Hg,
@@ -598,6 +660,220 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_pg_input(
                 T.copy(h_fragment, ht[bb, bh, 0:DK, bv * block_DV : (bv + 1) * block_DV])
 
     return tilelang_fused_chunk_gdr_fwd_blackwell_pg_input_kernel
+
+
+@tilelang.jit(
+    pass_configs={
+        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
+    },
+)
+def tilelang_fused_chunk_gdr_fwd_blackwell_p_input(
+    H,
+    Hg,
+    DK,
+    DV,
+    chunk_size,
+    scale,
+    accum_dtype,
+    qkva_dtype,
+    g_dtype,
+    h0_dtype,
+    ht_dtype,
+    o_dtype,
+    use_initial_state,
+    store_final_state,
+    store_o,
+    max_iters,
+    num_threads=256,
+    block_DV=64,
+):
+    batch_size = T.dynamic("batch_size")
+    num_tokens = T.dynamic("num_tokens")
+    block_S = chunk_size
+
+    q_shape = (batch_size, num_tokens, Hg, DK)
+    k_shape = (batch_size, num_tokens, Hg, DK)
+    v_shape = (batch_size, num_tokens, H, DV)
+    a_shape = (batch_size, num_tokens, H, chunk_size)
+    g_shape = (batch_size, num_tokens, H)
+    p_shape = (batch_size, num_tokens, Hg, chunk_size)
+    h0_shape = (batch_size, H, DK, DV)
+    ht_shape = (batch_size, H, DK, DV)
+    o_shape = (batch_size, num_tokens, H, DV)
+
+    @T.prim_func
+    def tilelang_fused_chunk_gdr_fwd_blackwell_p_input_kernel(
+        q: T.Tensor(q_shape, dtype=qkva_dtype),
+        k: T.Tensor(k_shape, dtype=qkva_dtype),
+        v: T.Tensor(v_shape, dtype=qkva_dtype),
+        a: T.Tensor(a_shape, dtype=qkva_dtype),
+        g: T.Tensor(g_shape, dtype=g_dtype),
+        p: T.Tensor(p_shape, dtype=qkva_dtype),
+        h0: T.Tensor(h0_shape, dtype=h0_dtype),
+        o: T.Tensor(o_shape, dtype=o_dtype),
+        ht: T.Tensor(ht_shape, dtype=ht_dtype),
+    ):
+        with T.Kernel(T.ceildiv(DV, block_DV) * batch_size * H, threads=num_threads) as (
+            bbhv,
+        ):
+            bbh, bv = bbhv // T.ceildiv(DV, block_DV), bbhv % T.ceildiv(DV, block_DV)
+            bb, bh = bbh // H, bbh % H
+            bhg = bh // (H // Hg)
+
+            q_shared = T.alloc_shared((block_S, DK), dtype=qkva_dtype)
+            k_shared = T.alloc_shared((block_S, DK), dtype=qkva_dtype)
+            v_shared = T.alloc_shared((block_S, block_DV), dtype=qkva_dtype)
+            a_shared = T.alloc_shared((block_S, block_S), dtype=qkva_dtype)
+            h_shared = T.alloc_shared((DK, block_DV), dtype=qkva_dtype)
+            vd_shared = T.alloc_shared((block_S, block_DV), dtype=qkva_dtype)
+            vn_shared = T.alloc_shared((block_S, block_DV), dtype=qkva_dtype)
+            p_shared = T.alloc_shared((block_S, block_S), dtype=qkva_dtype)
+            g_shared = T.alloc_shared((block_S), dtype=accum_dtype, scope="shared")
+            g_exp_shared = T.alloc_shared(
+                (block_S), dtype=accum_dtype, scope="shared"
+            )
+            g_rev_exp_shared = T.alloc_shared(
+                (block_S), dtype=accum_dtype, scope="shared"
+            )
+
+            h_fragment = T.alloc_fragment((DK, block_DV), dtype=accum_dtype)
+            o_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
+            u_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
+            v_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
+            p_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
+            g_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
+            g_last_local = T.alloc_local((1), dtype=accum_dtype)
+
+            h_tmem = T.alloc_tmem((DK, 128), dtype=accum_dtype)
+            tmp_tmem = T.alloc_tmem((block_S, 128), dtype=accum_dtype)
+
+            mbar_u = T.alloc_barrier(arrive_count=[1] * 8)
+            mbar_v = T.alloc_barrier(arrive_count=[1] * 8)
+            mbar_o0 = T.alloc_barrier(arrive_count=[1] * 8)
+            mbar_o1 = T.alloc_barrier(arrive_count=[1] * 8)
+            mbar_h = T.alloc_barrier(arrive_count=[1] * 8)
+            bar_load = T.alloc_barrier(arrive_count=num_threads)
+            bar_h_shared = T.alloc_barrier(arrive_count=num_threads)
+
+            num_iters = T.ceildiv(num_tokens, block_S)
+            if max_iters > 0 and num_iters > max_iters:
+                num_iters = max_iters
+
+            if use_initial_state:
+                T.copy(h0[bb, bh, 0:DK, bv * block_DV : (bv + 1) * block_DV], h_fragment)
+            else:
+                T.clear(h_fragment)
+
+            for i_s in T.serial(num_iters):
+                left = i_s * block_S
+                right = left + block_S
+                mbar_slot = i_s % 8
+                mbar_phase = (i_s // 8) % 2
+
+                T.copy(q[bb, left:right, bhg, 0:DK], q_shared)
+                T.copy(k[bb, left:right, bhg, 0:DK], k_shared)
+                T.copy(v[bb, left:right, bh, bv * block_DV : (bv + 1) * block_DV], v_shared)
+                T.copy(a[bb, left:right, bh, 0:block_S], a_shared)
+                T.copy(p[bb, left:right, bhg, 0:block_S], p_shared)
+                for j_s in T.Parallel(block_S):
+                    g_shared[j_s] = g[bb, left + j_s, bh]
+                for j_s in T.Parallel(block_S):
+                    g_exp_shared[j_s] = T.exp2(g_shared[j_s] * 1.442695)
+                    g_rev_exp_shared[j_s] = T.exp2(
+                        (g_shared[block_S - 1] - g_shared[j_s]) * 1.442695
+                    )
+                T.barrier_arrive(bar_load)
+                T.barrier_wait(bar_load, i_s % 2)
+
+                T.copy(h_fragment, h_shared)
+                T.barrier_arrive(bar_h_shared)
+                T.barrier_wait(bar_h_shared, i_s % 2)
+
+                T.tcgen05_gemm(
+                    k_shared,
+                    h_shared,
+                    tmp_tmem[:, 0:block_DV],
+                    clear_accum=True,
+                    mbar=mbar_u[mbar_slot],
+                )
+                T.mbarrier_wait_parity(mbar_u[mbar_slot], mbar_phase)
+                T.copy(tmp_tmem[:, 0:block_DV], u_fragment)
+                for j_s, j_v in T.Parallel(block_S, block_DV):
+                    u_fragment[j_s, j_v] *= -g_exp_shared[j_s]
+                    u_fragment[j_s, j_v] += v_shared[j_s, j_v]
+                    v_shared[j_s, j_v] = u_fragment[j_s, j_v]
+
+                T.tcgen05_gemm(
+                    a_shared,
+                    v_shared,
+                    tmp_tmem[:, 0:block_DV],
+                    clear_accum=True,
+                    mbar=mbar_v[mbar_slot],
+                )
+                T.mbarrier_wait_parity(mbar_v[mbar_slot], mbar_phase)
+                T.copy(tmp_tmem[:, 0:block_DV], v_fragment)
+                T.copy(v_fragment, vd_shared)
+                for j_s, j_v in T.Parallel(block_S, block_DV):
+                    v_fragment[j_s, j_v] *= g_rev_exp_shared[j_s]
+                    vn_shared[j_s, j_v] = v_fragment[j_s, j_v]
+
+                T.tcgen05_gemm(
+                    q_shared,
+                    h_shared,
+                    tmp_tmem[:, 0:block_DV],
+                    clear_accum=True,
+                    mbar=mbar_o0[mbar_slot],
+                )
+                T.mbarrier_wait_parity(mbar_o0[mbar_slot], mbar_phase)
+                T.copy(tmp_tmem[:, 0:block_DV], o_fragment)
+
+                T.copy(p_shared, p_fragment)
+                for j_s, j_t in T.Parallel(block_S, block_S):
+                    g_fragment[j_s, j_t] = g_shared[j_s] - g_shared[j_t]
+                for j_s, j_t in T.Parallel(block_S, block_S):
+                    if j_s >= j_t:
+                        g_fragment[j_s, j_t] = T.exp2(
+                            g_fragment[j_s, j_t] * 1.442695
+                        )
+                    else:
+                        g_fragment[j_s, j_t] = 0
+                for j_s, j_t in T.Parallel(block_S, block_S):
+                    p_fragment[j_s, j_t] *= scale * g_fragment[j_s, j_t]
+                T.copy(p_fragment, p_shared)
+                for j_s, j_v in T.Parallel(block_S, block_DV):
+                    o_fragment[j_s, j_v] *= scale * g_exp_shared[j_s]
+                T.copy(o_fragment, tmp_tmem[:, 0:block_DV])
+                T.tcgen05_gemm(
+                    p_shared,
+                    vd_shared,
+                    tmp_tmem[:, 0:block_DV],
+                    clear_accum=False,
+                    mbar=mbar_o1[mbar_slot],
+                )
+                T.mbarrier_wait_parity(mbar_o1[mbar_slot], mbar_phase)
+                T.copy(tmp_tmem[:, 0:block_DV], o_fragment)
+                if store_o:
+                    T.copy(o_fragment, o[bb, left:right, bh, bv * block_DV : (bv + 1) * block_DV])
+
+                g_last_local[0] = g_exp_shared[block_S - 1]
+                for j_k, j_v in T.Parallel(DK, block_DV):
+                    h_fragment[j_k, j_v] *= g_last_local[0]
+                T.copy(h_fragment, h_tmem[:, 0:block_DV])
+                T.tcgen05_gemm(
+                    k_shared,
+                    vn_shared,
+                    h_tmem[:, 0:block_DV],
+                    transpose_A=True,
+                    clear_accum=False,
+                    mbar=mbar_h[mbar_slot],
+                )
+                T.mbarrier_wait_parity(mbar_h[mbar_slot], mbar_phase)
+                T.copy(h_tmem[:, 0:block_DV], h_fragment)
+
+            if store_final_state:
+                T.copy(h_fragment, ht[bb, bh, 0:DK, bv * block_DV : (bv + 1) * block_DV])
+
+    return tilelang_fused_chunk_gdr_fwd_blackwell_p_input_kernel
 
 
 @tilelang.jit(
@@ -1361,10 +1637,73 @@ def fused_gdr_fwd(
             "intermittent O-path correctness failures on B300 with TileLang "
             "0.1.9 while final_state stayed correct. Use the default 'ag' path."
         )
-    if fwd_experiment not in ("", "ag"):
+    if fwd_experiment == "small_hv":
+        if H > 32:
+            raise ValueError(
+                "FLASHQLA_BLACKWELL_FWD_EXPERIMENT=small_hv is only intended "
+                f"for Qwen small-Hv TP2/TP4/TP8 shapes, got H={H}"
+            )
+        if block_DV != 64:
+            raise ValueError(
+                "FLASHQLA_BLACKWELL_FWD_EXPERIMENT=small_hv currently requires "
+                f"FLASHQLA_BLACKWELL_BLOCK_DV=64, got {block_DV}"
+            )
+        _debug("using small_hv P-precompute experiment")
+        num_chunks = batch_size * tilelang.cdiv(num_tokens, chunk_size)
+        p = torch.empty(
+            (batch_size, num_tokens, Hg, chunk_size), dtype=q.dtype, device=q.device
+        )
+        tilelang_precompute_p_kernel = tilelang_precompute_p_blackwell(
+            Hg,
+            K,
+            chunk_size,
+            qkva_dtype=q.dtype,
+            accum_dtype="float32",
+        )
+        tilelang_precompute_p_kernel(q, k, p, num_chunks)
+        tilelang_fused_chunk_gdr_fwd_kernel = (
+            tilelang_fused_chunk_gdr_fwd_blackwell_p_input(
+                H,
+                Hg,
+                K,
+                V,
+                chunk_size,
+                scale,
+                qkva_dtype=q.dtype,
+                g_dtype=g.dtype,
+                h0_dtype=initial_state.dtype,
+                ht_dtype=final_state.dtype,
+                o_dtype=o.dtype,
+                accum_dtype="float32",
+                use_initial_state=use_initial_state,
+                store_final_state=output_final_state,
+                store_o=output_o,
+                max_iters=max_iters,
+                num_threads=num_threads,
+                block_DV=block_DV,
+            )
+        )
+        tilelang_fused_chunk_gdr_fwd_kernel(
+            q,
+            k,
+            v,
+            a,
+            g,
+            p,
+            initial_state,
+            o,
+            final_state,
+        )
+
+        if not output_final_state:
+            final_state = None
+        if not output_o:
+            o = None
+        return o, h, final_state
+    if fwd_experiment not in ("", "ag", "small_hv"):
         raise ValueError(
             "FLASHQLA_BLACKWELL_FWD_EXPERIMENT must be unset, 'ag', "
-            "'pg_precompute', 'dv128_reuse', or "
+            "'small_hv', 'pg_precompute', 'dv128_reuse', or "
             f"'pipeline', got {fwd_experiment!r}"
         )
     sync_barriers = _sync_barriers()
