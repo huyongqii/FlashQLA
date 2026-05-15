@@ -1656,19 +1656,12 @@ def fused_gdr_fwd(
             "0.1.9 while final_state stayed correct. Use the default 'ag' path."
         )
     if fwd_experiment == "small_hv":
-        if H > 32:
-            raise ValueError(
-                "FLASHQLA_BLACKWELL_FWD_EXPERIMENT=small_hv is only intended "
-                f"for Qwen small-Hv TP2/TP4/TP8 shapes, got H={H}"
-            )
-        if block_DV != 64:
-            raise ValueError(
-                "FLASHQLA_BLACKWELL_FWD_EXPERIMENT=small_hv currently requires "
-                f"FLASHQLA_BLACKWELL_BLOCK_DV=64, got {block_DV}"
-            )
-        _debug(
-            "small_hv P-precompute copy-kernel experiment is disabled; "
-            "using the stable ag kernel as the small-Hv baseline"
+        raise RuntimeError(
+            "FLASHQLA_BLACKWELL_FWD_EXPERIMENT=small_hv is disabled: the "
+            "copy-kernel P-precompute prototype failed correctness even when "
+            "P was recomputed in-kernel. Use the default native ag path while "
+            "the next small-Hv implementation is built directly inside the "
+            "stable ag kernel."
         )
     if fwd_experiment not in ("", "ag", "small_hv"):
         raise ValueError(
