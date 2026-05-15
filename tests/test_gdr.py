@@ -364,6 +364,7 @@ def test_gated_delta_rule(
                     "tilelang_fused_chunk_gdr_fwd_blackwell_ag_pg_kernel_kernel",
                     "tilelang_fused_chunk_gdr_fwd_blackwell_pipeline_kernel_kernel",
                     "tilelang_fused_chunk_gdr_fwd_blackwell_dv128_reuse_kernel_kernel",
+                    "tilelang_fused_chunk_gdr_fwd_blackwell_dv128_reuse_v2_kernel_kernel",
                 ),
             ),
             "[fwd] o": 0.0,

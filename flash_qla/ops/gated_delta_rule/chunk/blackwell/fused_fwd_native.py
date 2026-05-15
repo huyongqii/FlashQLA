@@ -173,8 +173,9 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
             for i_s in T.serial(num_iters):
                 left = i_s * block_S
                 right = left + block_S
-                mbar_slot = i_s % 8
-                mbar_phase = (i_s // 8) % 2
+                mbar_slot0 = (i_s * 2) % 8
+                mbar_slot1 = (i_s * 2 + 1) % 8
+                mbar_phase = (i_s // 4) % 2
 
                 T.copy(q[bb, left:right, bhg, 0:DK], q_shared)
                 T.copy(k[bb, left:right, bhg, 0:DK], k_shared)
@@ -632,7 +633,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_pipeline(
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     },
 )
-def tilelang_fused_chunk_gdr_fwd_blackwell_dv128_reuse(
+def tilelang_fused_chunk_gdr_fwd_blackwell_dv128_reuse_v2(
     H,
     Hg,
     DK,
@@ -665,7 +666,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_dv128_reuse(
     o_shape = (batch_size, num_tokens, H, DV)
 
     @T.prim_func
-    def tilelang_fused_chunk_gdr_fwd_blackwell_dv128_reuse_kernel(
+    def tilelang_fused_chunk_gdr_fwd_blackwell_dv128_reuse_v2_kernel(
         q: T.Tensor(q_shape, dtype=qkva_dtype),
         k: T.Tensor(k_shape, dtype=qkva_dtype),
         v: T.Tensor(v_shape, dtype=qkva_dtype),
@@ -731,8 +732,9 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_dv128_reuse(
             for i_s in T.serial(num_iters):
                 left = i_s * block_S
                 right = left + block_S
-                mbar_slot = i_s % 8
-                mbar_phase = (i_s // 8) % 2
+                mbar_slot0 = (i_s * 2) % 8
+                mbar_slot1 = (i_s * 2 + 1) % 8
+                mbar_phase = (i_s // 4) % 2
 
                 T.copy(q[bb, left:right, bhg, 0:DK], q_shared)
                 T.copy(k[bb, left:right, bhg, 0:DK], k_shared)
@@ -763,9 +765,9 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_dv128_reuse(
                     p_tmem,
                     transpose_B=True,
                     clear_accum=True,
-                    mbar=mbar_p[mbar_slot],
+                    mbar=mbar_p[mbar_slot0],
                 )
-                T.mbarrier_wait_parity(mbar_p[mbar_slot], mbar_phase)
+                T.mbarrier_wait_parity(mbar_p[mbar_slot0], mbar_phase)
                 T.copy(p_tmem, p_fragment)
                 for j_s, j_t in T.Parallel(block_S, block_S):
                     p_fragment[j_s, j_t] *= scale * g_fragment[j_s, j_t]
@@ -780,9 +782,9 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_dv128_reuse(
                     h_shared,
                     tmp_tmem[:, 0:half_DV],
                     clear_accum=True,
-                    mbar=mbar_u[mbar_slot],
+                    mbar=mbar_u[mbar_slot0],
                 )
-                T.mbarrier_wait_parity(mbar_u[mbar_slot], mbar_phase)
+                T.mbarrier_wait_parity(mbar_u[mbar_slot0], mbar_phase)
                 T.copy(tmp_tmem[:, 0:half_DV], u_fragment)
                 for j_s, j_v in T.Parallel(block_S, half_DV):
                     u_fragment[j_s, j_v] *= -g_exp_shared[j_s]
@@ -793,9 +795,9 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_dv128_reuse(
                     v_shared,
                     tmp_tmem[:, 0:half_DV],
                     clear_accum=True,
-                    mbar=mbar_v[mbar_slot],
+                    mbar=mbar_v[mbar_slot0],
                 )
-                T.mbarrier_wait_parity(mbar_v[mbar_slot], mbar_phase)
+                T.mbarrier_wait_parity(mbar_v[mbar_slot0], mbar_phase)
                 T.copy(tmp_tmem[:, 0:half_DV], v_fragment)
                 T.copy(v_fragment, vd_shared)
                 for j_s, j_v in T.Parallel(block_S, half_DV):
@@ -806,9 +808,9 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_dv128_reuse(
                     h_shared,
                     tmp_tmem[:, 0:half_DV],
                     clear_accum=True,
-                    mbar=mbar_o0[mbar_slot],
+                    mbar=mbar_o0[mbar_slot0],
                 )
-                T.mbarrier_wait_parity(mbar_o0[mbar_slot], mbar_phase)
+                T.mbarrier_wait_parity(mbar_o0[mbar_slot0], mbar_phase)
                 T.copy(tmp_tmem[:, 0:half_DV], o_fragment)
                 for j_s, j_v in T.Parallel(block_S, half_DV):
                     o_fragment[j_s, j_v] *= scale * g_exp_shared[j_s]
@@ -818,9 +820,9 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_dv128_reuse(
                     vd_shared,
                     tmp_tmem[:, 0:half_DV],
                     clear_accum=False,
-                    mbar=mbar_o1[mbar_slot],
+                    mbar=mbar_o1[mbar_slot0],
                 )
-                T.mbarrier_wait_parity(mbar_o1[mbar_slot], mbar_phase)
+                T.mbarrier_wait_parity(mbar_o1[mbar_slot0], mbar_phase)
                 T.copy(tmp_tmem[:, 0:half_DV], o_fragment)
                 if store_o:
                     T.copy(o_fragment, o[bb, left:right, bh, 0:half_DV])
@@ -834,9 +836,9 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_dv128_reuse(
                     h_tmem[:, 0:half_DV],
                     transpose_A=True,
                     clear_accum=False,
-                    mbar=mbar_h[mbar_slot],
+                    mbar=mbar_h[mbar_slot0],
                 )
-                T.mbarrier_wait_parity(mbar_h[mbar_slot], mbar_phase)
+                T.mbarrier_wait_parity(mbar_h[mbar_slot0], mbar_phase)
                 T.copy(h_tmem[:, 0:half_DV], h0_fragment)
 
                 T.copy(v[bb, left:right, bh, half_DV:DV], v_shared)
@@ -848,9 +850,9 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_dv128_reuse(
                     h_shared,
                     tmp_tmem[:, 0:half_DV],
                     clear_accum=True,
-                    mbar=mbar_u[mbar_slot],
+                    mbar=mbar_u[mbar_slot1],
                 )
-                T.mbarrier_wait_parity(mbar_u[mbar_slot], mbar_phase)
+                T.mbarrier_wait_parity(mbar_u[mbar_slot1], mbar_phase)
                 T.copy(tmp_tmem[:, 0:half_DV], u_fragment)
                 for j_s, j_v in T.Parallel(block_S, half_DV):
                     u_fragment[j_s, j_v] *= -g_exp_shared[j_s]
@@ -861,9 +863,9 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_dv128_reuse(
                     v_shared,
                     tmp_tmem[:, 0:half_DV],
                     clear_accum=True,
-                    mbar=mbar_v[mbar_slot],
+                    mbar=mbar_v[mbar_slot1],
                 )
-                T.mbarrier_wait_parity(mbar_v[mbar_slot], mbar_phase)
+                T.mbarrier_wait_parity(mbar_v[mbar_slot1], mbar_phase)
                 T.copy(tmp_tmem[:, 0:half_DV], v_fragment)
                 T.copy(v_fragment, vd_shared)
                 for j_s, j_v in T.Parallel(block_S, half_DV):
@@ -874,9 +876,9 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_dv128_reuse(
                     h_shared,
                     tmp_tmem[:, 0:half_DV],
                     clear_accum=True,
-                    mbar=mbar_o0[mbar_slot],
+                    mbar=mbar_o0[mbar_slot1],
                 )
-                T.mbarrier_wait_parity(mbar_o0[mbar_slot], mbar_phase)
+                T.mbarrier_wait_parity(mbar_o0[mbar_slot1], mbar_phase)
                 T.copy(tmp_tmem[:, 0:half_DV], o_fragment)
                 for j_s, j_v in T.Parallel(block_S, half_DV):
                     o_fragment[j_s, j_v] *= scale * g_exp_shared[j_s]
@@ -886,9 +888,9 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_dv128_reuse(
                     vd_shared,
                     tmp_tmem[:, 0:half_DV],
                     clear_accum=False,
-                    mbar=mbar_o1[mbar_slot],
+                    mbar=mbar_o1[mbar_slot1],
                 )
-                T.mbarrier_wait_parity(mbar_o1[mbar_slot], mbar_phase)
+                T.mbarrier_wait_parity(mbar_o1[mbar_slot1], mbar_phase)
                 T.copy(tmp_tmem[:, 0:half_DV], o_fragment)
                 if store_o:
                     T.copy(o_fragment, o[bb, left:right, bh, half_DV:DV])
@@ -901,16 +903,16 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_dv128_reuse(
                     h_tmem[:, 0:half_DV],
                     transpose_A=True,
                     clear_accum=False,
-                    mbar=mbar_h[mbar_slot],
+                    mbar=mbar_h[mbar_slot1],
                 )
-                T.mbarrier_wait_parity(mbar_h[mbar_slot], mbar_phase)
+                T.mbarrier_wait_parity(mbar_h[mbar_slot1], mbar_phase)
                 T.copy(h_tmem[:, 0:half_DV], h1_fragment)
 
             if store_final_state:
                 T.copy(h0_fragment, ht[bb, bh, 0:DK, 0:half_DV])
                 T.copy(h1_fragment, ht[bb, bh, 0:DK, half_DV:DV])
 
-    return tilelang_fused_chunk_gdr_fwd_blackwell_dv128_reuse_kernel
+    return tilelang_fused_chunk_gdr_fwd_blackwell_dv128_reuse_v2_kernel
 
 
 def fused_gdr_fwd(
@@ -1066,7 +1068,7 @@ def fused_gdr_fwd(
             )
         _debug("using dv128_reuse experiment")
         tilelang_fused_chunk_gdr_fwd_kernel = (
-            tilelang_fused_chunk_gdr_fwd_blackwell_dv128_reuse(
+            tilelang_fused_chunk_gdr_fwd_blackwell_dv128_reuse_v2(
                 H,
                 Hg,
                 K,
