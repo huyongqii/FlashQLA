@@ -17,10 +17,7 @@ if is_blackwell(_cc):
         fused_gdr_bwd,
         fused_gdr_h,
         kkt_solve,
-        precompute_p,
     )
-else:
-    precompute_p = None
 from .cp_context import intra_card_cp_preprocess
 
 
@@ -53,21 +50,12 @@ def chunk_gated_delta_rule_fwd(
     if pretransform_a:
         kkt_kwargs["g"] = g
     A = kkt_solve(**kkt_kwargs)
-    precompute_p_enabled = (
-        os.environ.get("FLASHQLA_BLACKWELL_PRECOMPUTE_P", "") == "1"
-        and is_blackwell(_cc)
-        and precompute_p is not None
-        and cu_seqlens is None
-        and not output_h
-        and not auto_cp
-    )
-    if precompute_p_enabled:
+    if os.environ.get("FLASHQLA_BLACKWELL_PRECOMPUTE_P", "") == "1":
         raise RuntimeError(
             "FLASHQLA_BLACKWELL_PRECOMPUTE_P=1 is disabled: the first prototype "
             "corrupted final_state on B200. Use the default pretransform-A path "
             "while the P-reuse design is reworked."
         )
-    P = precompute_p(q, k, beta.shape[-1]) if precompute_p_enabled else None
     if auto_cp:
         initial_state, cu_seqlens, cp_seq_map, raw_cu_seqlens = (
             intra_card_cp_preprocess(
@@ -99,8 +87,6 @@ def chunk_gated_delta_rule_fwd(
         "cp_seq_map": cp_seq_map,
         "raw_cu_seqlens": raw_cu_seqlens,
     }
-    if P is not None:
-        fwd_kwargs["p"] = P
     o, h, final_state = fused_gdr_fwd(**fwd_kwargs)
     return g, A, o, h, final_state
 
