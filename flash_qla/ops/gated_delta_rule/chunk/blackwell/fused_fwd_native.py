@@ -430,7 +430,7 @@ def fused_gdr_fwd(
             f"native fwd path, got {num_threads}"
         )
     sync_barriers = _sync_barriers()
-    input_a_is_ag = os.environ.get("FLASHQLA_BLACKWELL_PRETRANSFORM_A", "") == "1"
+    input_a_is_ag = os.environ.get("FLASHQLA_BLACKWELL_PRETRANSFORM_A", "1") == "1"
     _debug(f"threads={num_threads} sync_barriers=" + ",".join(sorted(sync_barriers)))
     tilelang_fused_chunk_gdr_fwd_kernel = tilelang_fused_chunk_gdr_fwd_blackwell_native(
         H,
