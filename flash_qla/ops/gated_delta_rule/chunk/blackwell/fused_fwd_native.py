@@ -85,6 +85,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
     use_bar_h_shared,
     use_bar_o,
     use_bar_h_scaled,
+    direct_vd_tmem_store,
     num_threads=128,
     block_DV=64,
 ):
@@ -236,8 +237,11 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     mbar=mbar_v[mbar_slot],
                 )
                 T.mbarrier_wait_parity(mbar_v[mbar_slot], mbar_phase)
+                if direct_vd_tmem_store:
+                    T.copy(tmp_tmem[:, 0:block_DV], vd_shared)
                 T.copy(tmp_tmem[:, 0:block_DV], v_fragment)
-                T.copy(v_fragment, vd_shared)
+                if not direct_vd_tmem_store:
+                    T.copy(v_fragment, vd_shared)
 
                 # V' = g_last / g * Vd
                 for j_s, j_v in T.Parallel(block_S, block_DV):
@@ -764,9 +768,9 @@ def fused_gdr_fwd(
         if not output_o:
             o = None
         return o, h, final_state
-    if fwd_experiment not in ("", "ag"):
+    if fwd_experiment not in ("", "ag", "tmem_v2"):
         raise ValueError(
-            "FLASHQLA_BLACKWELL_FWD_EXPERIMENT must be unset, 'ag', or "
+            "FLASHQLA_BLACKWELL_FWD_EXPERIMENT must be unset, 'ag', 'tmem_v2', or "
             f"'pipeline', got {fwd_experiment!r}"
         )
     sync_barriers = _sync_barriers()
@@ -792,6 +796,7 @@ def fused_gdr_fwd(
         use_bar_h_shared="h" in sync_barriers,
         use_bar_o="o" in sync_barriers,
         use_bar_h_scaled="hscale" in sync_barriers,
+        direct_vd_tmem_store=fwd_experiment == "tmem_v2",
         num_threads=num_threads,
         block_DV=block_DV,
     )
