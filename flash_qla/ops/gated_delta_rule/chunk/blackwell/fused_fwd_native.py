@@ -173,9 +173,8 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
             for i_s in T.serial(num_iters):
                 left = i_s * block_S
                 right = left + block_S
-                mbar_slot0 = (i_s * 2) % 8
-                mbar_slot1 = (i_s * 2 + 1) % 8
-                mbar_phase = (i_s // 4) % 2
+                mbar_slot = i_s % 8
+                mbar_phase = (i_s // 8) % 2
 
                 T.copy(q[bb, left:right, bhg, 0:DK], q_shared)
                 T.copy(k[bb, left:right, bhg, 0:DK], k_shared)
@@ -1060,49 +1059,13 @@ def fused_gdr_fwd(
             "constraints are reworked."
         )
     if fwd_experiment == "dv128_reuse":
-        if V != 128 or block_DV != 64:
-            raise ValueError(
-                "FLASHQLA_BLACKWELL_FWD_EXPERIMENT=dv128_reuse requires "
-                f"DV=128 and FLASHQLA_BLACKWELL_BLOCK_DV=64, got DV={V}, "
-                f"block_DV={block_DV}"
-            )
-        _debug("using dv128_reuse experiment")
-        tilelang_fused_chunk_gdr_fwd_kernel = (
-            tilelang_fused_chunk_gdr_fwd_blackwell_dv128_reuse_v2(
-                H,
-                Hg,
-                K,
-                V,
-                chunk_size,
-                scale,
-                qkva_dtype=q.dtype,
-                g_dtype=g.dtype,
-                h0_dtype=initial_state.dtype,
-                ht_dtype=final_state.dtype,
-                o_dtype=o.dtype,
-                accum_dtype="float32",
-                use_initial_state=use_initial_state,
-                store_final_state=output_final_state,
-                store_o=output_o,
-                max_iters=max_iters,
-            )
+        raise RuntimeError(
+            "FLASHQLA_BLACKWELL_FWD_EXPERIMENT=dv128_reuse is disabled: the "
+            "single-CTA two-half prototype hangs on B300 with TileLang 0.1.9, "
+            "even after separate TCGEN05 mbarrier slots/parity for each half. "
+            "Use the default 'ag' path while the P-reuse design is reworked as "
+            "a safer two-kernel or CTA-pair schedule."
         )
-        tilelang_fused_chunk_gdr_fwd_kernel(
-            q,
-            k,
-            v,
-            a,
-            g,
-            initial_state,
-            o,
-            final_state,
-        )
-
-        if not output_final_state:
-            final_state = None
-        if not output_o:
-            o = None
-        return o, h, final_state
     if fwd_experiment not in ("", "ag"):
         raise ValueError(
             "FLASHQLA_BLACKWELL_FWD_EXPERIMENT must be unset, 'ag', "
