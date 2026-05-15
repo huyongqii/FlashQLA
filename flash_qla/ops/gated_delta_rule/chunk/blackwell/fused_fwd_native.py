@@ -427,7 +427,7 @@ def tilelang_precompute_p_blackwell(
     def tilelang_precompute_p_blackwell_kernel(
         q: T.Tensor(q_shape, dtype=qkva_dtype),
         k: T.Tensor(k_shape, dtype=qkva_dtype),
-        p: T.Tensor(p_shape, dtype=qkva_dtype),
+        p: T.Tensor(p_shape, dtype=accum_dtype),
         num_chunks: T.int32,
     ):
         with T.Kernel(num_chunks * Hg, threads=128) as (bcg,):
@@ -708,7 +708,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_p_input(
         v: T.Tensor(v_shape, dtype=qkva_dtype),
         a: T.Tensor(a_shape, dtype=qkva_dtype),
         g: T.Tensor(g_shape, dtype=g_dtype),
-        p: T.Tensor(p_shape, dtype=qkva_dtype),
+        p: T.Tensor(p_shape, dtype=accum_dtype),
         h0: T.Tensor(h0_shape, dtype=h0_dtype),
         o: T.Tensor(o_shape, dtype=o_dtype),
         ht: T.Tensor(ht_shape, dtype=ht_dtype),
@@ -774,7 +774,6 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_p_input(
                 T.copy(k[bb, left:right, bhg, 0:DK], k_shared)
                 T.copy(v[bb, left:right, bh, bv * block_DV : (bv + 1) * block_DV], v_shared)
                 T.copy(a[bb, left:right, bh, 0:block_S], a_shared)
-                T.copy(p[bb, left:right, bhg, 0:block_S], p_shared)
                 for j_s in T.Parallel(block_S):
                     g_shared[j_s] = g[bb, left + j_s, bh]
                 for j_s in T.Parallel(block_S):
@@ -827,7 +826,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_p_input(
                 T.mbarrier_wait_parity(mbar_o0[mbar_slot], mbar_phase)
                 T.copy(tmp_tmem[:, 0:block_DV], o_fragment)
 
-                T.copy(p_shared, p_fragment)
+                T.copy(p[bb, left:right, bhg, 0:block_S], p_fragment)
                 for j_s, j_t in T.Parallel(block_S, block_S):
                     g_fragment[j_s, j_t] = g_shared[j_s] - g_shared[j_t]
                 for j_s, j_t in T.Parallel(block_S, block_S):
@@ -1651,7 +1650,9 @@ def fused_gdr_fwd(
         _debug("using small_hv P-precompute experiment")
         num_chunks = batch_size * tilelang.cdiv(num_tokens, chunk_size)
         p = torch.empty(
-            (batch_size, num_tokens, Hg, chunk_size), dtype=q.dtype, device=q.device
+            (batch_size, num_tokens, Hg, chunk_size),
+            dtype=torch.float32,
+            device=q.device,
         )
         tilelang_precompute_p_kernel = tilelang_precompute_p_blackwell(
             Hg,
