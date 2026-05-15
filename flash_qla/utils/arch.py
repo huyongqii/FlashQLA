@@ -6,12 +6,13 @@ Arch detection utility for FlashQLA.
 
 Supported compute capabilities:
     - "9.0"    : Hopper (H100 / H200)         -> uses flash_qla.ops.gated_delta_rule.chunk.hopper
-    - "10.0"   : Blackwell datacenter (B200/B300) -> reuse hopper kernels for now (Tier-1 minimal support)
-    - "10.0a"  : Blackwell sm_100a            -> same as above
+    - "10.x"   : Blackwell datacenter (B200/B300) -> Blackwell dispatch path
+    - "10.xa"  : Blackwell accelerated targets -> same as above
 
 Override via environment variable:
     FLASHQLA_FORCE_ARCH=sm90    # force hopper path
     FLASHQLA_FORCE_ARCH=sm100   # force blackwell path
+    FLASHQLA_FORCE_ARCH=sm103   # force blackwell path for B300-like targets
 """
 
 import os
@@ -24,13 +25,11 @@ import tilelang
 # (4-warpgroup, warp-specialized, WGMMA / TMA) implementation in
 # flash_qla.ops.gated_delta_rule.chunk.hopper.
 #
-# For Blackwell (sm_100 / sm_100a) we reuse the hopper kernels at Tier-1; the
-# TileLang backend is expected to lower T.gemm to tcgen05.mma automatically
-# when targeting sm_100a. A dedicated `blackwell/` directory may be added later
-# for Tier-3 specialization.
+# Blackwell devices can report different minor compute capabilities, e.g.
+# B200 has been observed as sm_100 while B300 reports sm_103. Treat all 10.x
+# CUDA targets as Blackwell-like for dispatch, then let the TileLang/CUDA
+# backend decide the exact codegen target.
 _HOPPER_LIKE_CCS = {"9.0"}
-_BLACKWELL_LIKE_CCS = {"10.0", "10.0a", "11.0"}
-_SUPPORTED_CCS = _HOPPER_LIKE_CCS | _BLACKWELL_LIKE_CCS
 
 
 _FORCE_ARCH_TO_CC = {
@@ -42,8 +41,14 @@ _FORCE_ARCH_TO_CC = {
     "sm_100": "10.0",
     "sm100a": "10.0a",
     "sm_100a": "10.0a",
+    "sm103": "10.3",
+    "sm_103": "10.3",
+    "sm103a": "10.3a",
+    "sm_103a": "10.3a",
     "10.0": "10.0",
     "10.0a": "10.0a",
+    "10.3": "10.3",
+    "10.3a": "10.3a",
     "blackwell": "10.0",
 }
 
@@ -71,7 +76,11 @@ def is_hopper(cc: str | None = None) -> bool:
 
 def is_blackwell(cc: str | None = None) -> bool:
     cc = cc or get_compute_capability()
-    return cc in _BLACKWELL_LIKE_CCS
+    return cc.startswith("10.")
+
+
+def _cc_to_sm(cc: str) -> str:
+    return f"sm_{cc.replace('.', '')}"
 
 
 _BLACKWELL_WARNING_EMITTED = False
@@ -81,23 +90,23 @@ def assert_supported(cc: str | None = None) -> str:
     global _BLACKWELL_WARNING_EMITTED
 
     cc = cc or get_compute_capability()
-    if cc not in _SUPPORTED_CCS:
+    if cc not in _HOPPER_LIKE_CCS and not is_blackwell(cc):
         raise ValueError(
-            f"FlashQLA does not support compute capability sm_{cc.replace('.', '')}. "
-            f"Supported: sm_90 (Hopper), sm_100 / sm_100a (Blackwell). "
-            f"Set FLASHQLA_FORCE_ARCH=sm90|sm100 to override."
+            f"FlashQLA does not support compute capability {_cc_to_sm(cc)}. "
+            f"Supported: sm_90 (Hopper), sm_10x / sm_10xa (Blackwell). "
+            f"Set FLASHQLA_FORCE_ARCH=sm90|sm100|sm103 to override."
         )
-    if cc in _BLACKWELL_LIKE_CCS and not _BLACKWELL_WARNING_EMITTED:
+    if is_blackwell(cc) and not _BLACKWELL_WARNING_EMITTED:
         # Tier-1: reuse hopper kernels on Blackwell. Warn ONCE per process so
         # users know perf may be sub-optimal until Tier-3 specialized kernels
         # are in place.
         _BLACKWELL_WARNING_EMITTED = True
         if os.environ.get("FLASHQLA_SUPPRESS_BLACKWELL_WARNING", "") != "1":
             warnings.warn(
-                "FlashQLA is running on sm_100 (Blackwell) using the "
-                "Hopper-compatible kernel path. Current TileLang/TVM lowering "
-                "has been observed to emit HMMA rather than tcgen05/TMEM on "
-                "B200, so performance is not yet tuned for B200/B300. "
+                f"FlashQLA is running on {_cc_to_sm(cc)} (Blackwell). "
+                "B200/B300 support is experimental; enable the native "
+                "Blackwell path for tcgen05/TMEM kernels and verify generated "
+                "SASS on the target GPU. "
                 "Set FLASHQLA_SUPPRESS_BLACKWELL_WARNING=1 to silence.",
                 stacklevel=2,
             )

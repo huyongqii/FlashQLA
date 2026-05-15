@@ -18,11 +18,11 @@ Key features:
 
 ## Requirements
 
-- SM90 (Hopper) or SM100 (Blackwell) — Blackwell B200/B300 is supported in
+- SM90 (Hopper) or SM10x (Blackwell) — Blackwell B200/B300 is supported in
   Tier-1 mode (correctness only; performance is not yet specially tuned).
-- CUDA 12.8 or above (CUDA 12.6+ is required for sm_100a codegen)
+- CUDA 12.8 or above (CUDA 12.6+ is required for sm_100a/sm_103a codegen)
 - PyTorch 2.8 or above
-- TileLang >= 0.1.9 (verified on sm_90 Hopper and sm_100 Blackwell)
+- TileLang >= 0.1.9 (verified on sm_90 Hopper and sm_100/sm_103 Blackwell)
 
 ## Installation
 
@@ -35,8 +35,8 @@ pip install -v .
 ### Architecture override (debug only)
 
 ```bash
-# force the hopper kernel path on a Blackwell card
-export FLASHQLA_FORCE_ARCH=sm100      # or sm90 / sm_100a
+# force architecture dispatch for debugging
+export FLASHQLA_FORCE_ARCH=sm103      # or sm90 / sm100 / sm_100a
 # tune target SM occupancy ratio (default 0.7 on Hopper, 0.5 on Blackwell)
 export FLASHQLA_TARGET_CTA_RATIO=0.5
 # manual block_DV (overrides the auto rule {128/64/32})
