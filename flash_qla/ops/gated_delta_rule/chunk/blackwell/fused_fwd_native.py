@@ -459,7 +459,8 @@ def tilelang_precompute_p_blackwell(
             )
             T.mbarrier_wait_parity(mbar_p, 0)
             T.copy(p_tmem, p_fragment)
-            T.copy(p_fragment, p[bb, left:right, bhg, 0:block_S])
+            for j_s, j_t in T.Parallel(block_S, block_S):
+                p[bb, left + j_s, bhg, j_t] = p_fragment[j_s, j_t]
 
     return tilelang_precompute_p_blackwell_kernel
 
@@ -859,7 +860,8 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_p_input(
                     T.mbarrier_wait_parity(mbar_p[mbar_slot], mbar_phase)
                     T.copy(p_tmem, p_fragment)
                 else:
-                    T.copy(p[bb, left:right, bhg, 0:block_S], p_fragment)
+                    for j_s, j_t in T.Parallel(block_S, block_S):
+                        p_fragment[j_s, j_t] = p[bb, left + j_s, bhg, j_t]
                 for j_s, j_t in T.Parallel(block_S, block_S):
                     g_fragment[j_s, j_t] = g_shared[j_s] - g_shared[j_t]
                 for j_s, j_t in T.Parallel(block_S, block_S):
