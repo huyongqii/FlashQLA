@@ -439,6 +439,7 @@ def tilelang_precompute_p_blackwell(
 
             q_shared = T.alloc_shared((block_S, DK), dtype=qkva_dtype)
             k_shared = T.alloc_shared((block_S, DK), dtype=qkva_dtype)
+            p_shared = T.alloc_shared((block_S, block_S), dtype=accum_dtype)
             p_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
             p_tmem = T.alloc_tmem((block_S, block_S), dtype=accum_dtype)
             mbar_p = T.alloc_barrier(arrive_count=1)
@@ -459,8 +460,9 @@ def tilelang_precompute_p_blackwell(
             )
             T.mbarrier_wait_parity(mbar_p, 0)
             T.copy(p_tmem, p_fragment)
+            T.copy(p_fragment, p_shared)
             for j_s, j_t in T.Parallel(block_S, block_S):
-                p[bb, left + j_s, bhg, j_t] = p_fragment[j_s, j_t]
+                p[bb, left + j_s, bhg, j_t] = p_shared[j_s, j_t]
 
     return tilelang_precompute_p_blackwell_kernel
 
@@ -748,6 +750,9 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_p_input(
             vd_shared = T.alloc_shared((block_S, block_DV), dtype=qkva_dtype)
             vn_shared = T.alloc_shared((block_S, block_DV), dtype=qkva_dtype)
             p_shared = T.alloc_shared((block_S, block_S), dtype=qkva_dtype)
+            p_global_shared = T.alloc_shared(
+                (block_S, block_S), dtype=accum_dtype, scope="shared"
+            )
             g_shared = T.alloc_shared((block_S), dtype=accum_dtype, scope="shared")
             g_exp_shared = T.alloc_shared(
                 (block_S), dtype=accum_dtype, scope="shared"
@@ -861,7 +866,8 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_p_input(
                     T.copy(p_tmem, p_fragment)
                 else:
                     for j_s, j_t in T.Parallel(block_S, block_S):
-                        p_fragment[j_s, j_t] = p[bb, left + j_s, bhg, j_t]
+                        p_global_shared[j_s, j_t] = p[bb, left + j_s, bhg, j_t]
+                    T.copy(p_global_shared, p_fragment)
                 for j_s, j_t in T.Parallel(block_S, block_S):
                     g_fragment[j_s, j_t] = g_shared[j_s] - g_shared[j_t]
                 for j_s, j_t in T.Parallel(block_S, block_S):
