@@ -59,6 +59,14 @@ POLICIES = {
         "FLASHQLA_BLACKWELL_FWD_THREADS": "256",
         "FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS": "load,h",
     },
+    "qwen397_kkt_compat_fwd": {
+        "FLASHQLA_BLACKWELL_NATIVE": "1",
+        "FLASHQLA_BLACKWELL_NATIVE_KERNELS": "kkt",
+        "FLASHQLA_BLACKWELL_FWD_POLICY": "compat",
+        "FLASHQLA_BLACKWELL_BLOCK_DV": "64",
+        "FLASHQLA_BLACKWELL_FWD_THREADS": "256",
+        "FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS": "load,h",
+    },
     "qwen397_small_hv": {
         "FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE": "1",
         "FLASHQLA_BLACKWELL_NATIVE": "1",
@@ -399,7 +407,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--policies",
-        default="qwen397_native,auto_256_lh,compat",
+        default="qwen397_native,qwen397_kkt_compat_fwd,qwen397_small_hv",
         help=f"Comma-separated policies. Available: {','.join(sorted(POLICIES))}",
     )
     parser.add_argument(
