@@ -846,6 +846,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_p_input(
                 T.mbarrier_wait_parity(mbar_o0[mbar_slot], mbar_phase)
                 T.copy(tmp_tmem[:, 0:block_DV], o_fragment)
 
+                T.copy(p[bb, left:right, bhg, 0:block_S], p_fragment)
                 for j_s, j_t in T.Parallel(block_S, block_S):
                     g_fragment[j_s, j_t] = g_shared[j_s] - g_shared[j_t]
                 for j_s, j_t in T.Parallel(block_S, block_S):
@@ -1677,13 +1678,69 @@ def fused_gdr_fwd(
             "0.1.9 while final_state stayed correct. Use the default 'ag' path."
         )
     if fwd_experiment == "small_hv":
-        raise RuntimeError(
-            "FLASHQLA_BLACKWELL_FWD_EXPERIMENT=small_hv is disabled: the "
-            "copy-kernel P-precompute prototype failed correctness even when "
-            "P was recomputed in-kernel. Use the default native ag path while "
-            "the next small-Hv implementation is built directly inside the "
-            "stable ag kernel."
+        if H <= Hg:
+            raise ValueError(
+                "FLASHQLA_BLACKWELL_FWD_EXPERIMENT=small_hv is intended for "
+                f"H > Hg P-reuse shapes, got H={H}, Hg={Hg}"
+            )
+        if block_DV != 64:
+            raise ValueError(
+                "FLASHQLA_BLACKWELL_FWD_EXPERIMENT=small_hv currently requires "
+                f"FLASHQLA_BLACKWELL_BLOCK_DV=64, got {block_DV}"
+            )
+        num_chunks = tilelang.cdiv(num_tokens, chunk_size)
+        p = torch.empty(
+            (batch_size, num_tokens, Hg, chunk_size),
+            dtype=torch.float32,
+            device=q.device,
         )
+        _debug(f"using small_hv P-reuse path H={H} Hg={Hg} chunks={num_chunks}")
+        tilelang_precompute_p_kernel = tilelang_precompute_p_blackwell(
+            Hg,
+            K,
+            chunk_size,
+            accum_dtype="float32",
+            qkva_dtype=q.dtype,
+        )
+        tilelang_precompute_p_kernel(q, k, p, num_chunks)
+        tilelang_fused_chunk_gdr_fwd_kernel = (
+            tilelang_fused_chunk_gdr_fwd_blackwell_p_input(
+                H,
+                Hg,
+                K,
+                V,
+                chunk_size,
+                scale,
+                qkva_dtype=q.dtype,
+                g_dtype=g.dtype,
+                h0_dtype=initial_state.dtype,
+                ht_dtype=final_state.dtype,
+                o_dtype=o.dtype,
+                accum_dtype="float32",
+                use_initial_state=use_initial_state,
+                store_final_state=output_final_state,
+                store_o=output_o,
+                max_iters=max_iters,
+                num_threads=num_threads,
+                block_DV=block_DV,
+            )
+        )
+        tilelang_fused_chunk_gdr_fwd_kernel(
+            q,
+            k,
+            v,
+            a,
+            g,
+            p,
+            initial_state,
+            o,
+            final_state,
+        )
+        if not output_final_state:
+            final_state = None
+        if not output_o:
+            o = None
+        return o, h, final_state
     if fwd_experiment not in ("", "ag", "small_hv"):
         raise ValueError(
             "FLASHQLA_BLACKWELL_FWD_EXPERIMENT must be unset, 'ag', "
