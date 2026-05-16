@@ -146,6 +146,10 @@ SHAPE_RE = re.compile(r"Shape: B=(?P<b>\d+) Hk=(?P<hk>\d+) Hv=(?P<hv>\d+) T=(?P<
 TOTAL_RE = re.compile(r"^total\s+(?P<fla>[0-9.]+|NaN)\s+(?P<qla>[0-9.]+|NaN)\s*$")
 SPEEDUP_RE = re.compile(r"Speed up:\s+(?P<speedup>[0-9.]+)x")
 KERNEL_RE = re.compile(r"'(?P<kernel>tilelang_[^']+_kernel)'")
+PROFILE_RE = re.compile(
+    r"^\[fwd\]\s+(?P<name>csum|solve|wu|gdr|o)\s+"
+    r"(?P<fla>[0-9.]+|NaN)\s+(?P<qla>[0-9.]+|NaN)\s*$"
+)
 
 
 @dataclass
@@ -158,6 +162,16 @@ class RunResult:
     fla_ms: float | None
     qla_ms: float | None
     speedup: float | None
+    fla_csum_ms: float | None
+    qla_csum_ms: float | None
+    fla_solve_ms: float | None
+    qla_solve_ms: float | None
+    fla_wu_ms: float | None
+    qla_wu_ms: float | None
+    fla_gdr_ms: float | None
+    qla_gdr_ms: float | None
+    fla_o_ms: float | None
+    qla_o_ms: float | None
     status: str
     returncode: int | None
     error_tail: str
@@ -190,12 +204,14 @@ def _parse_output(text: str) -> tuple[list[dict[str, float | int | None]], list[
     kernels: set[str] = set()
     current_t: int | None = None
     pending_total: tuple[float | None, float | None] | None = None
+    pending_profile: dict[str, tuple[float | None, float | None]] = {}
 
     for line in text.splitlines():
         shape_match = SHAPE_RE.search(line)
         if shape_match:
             current_t = int(shape_match.group("t"))
             pending_total = None
+            pending_profile = {}
             continue
 
         for kernel_match in KERNEL_RE.finditer(line):
@@ -209,16 +225,27 @@ def _parse_output(text: str) -> tuple[list[dict[str, float | int | None]], list[
             )
             continue
 
+        profile_match = PROFILE_RE.match(line.strip())
+        if profile_match:
+            pending_profile[profile_match.group("name")] = (
+                _parse_float(profile_match.group("fla")),
+                _parse_float(profile_match.group("qla")),
+            )
+            continue
+
         speedup_match = SPEEDUP_RE.search(line)
         if speedup_match and current_t is not None and pending_total is not None:
-            rows.append(
-                {
-                    "t": current_t,
-                    "fla_ms": pending_total[0],
-                    "qla_ms": pending_total[1],
-                    "speedup": float(speedup_match.group("speedup")),
-                }
-            )
+            row = {
+                "t": current_t,
+                "fla_ms": pending_total[0],
+                "qla_ms": pending_total[1],
+                "speedup": float(speedup_match.group("speedup")),
+            }
+            for name in ("csum", "solve", "wu", "gdr", "o"):
+                values = pending_profile.get(name, (None, None))
+                row[f"fla_{name}_ms"] = values[0]
+                row[f"qla_{name}_ms"] = values[1]
+            rows.append(row)
             pending_total = None
 
     return rows, sorted(kernels)
@@ -330,6 +357,16 @@ def _run_one(
                 fla_ms=None,
                 qla_ms=None,
                 speedup=None,
+                fla_csum_ms=None,
+                qla_csum_ms=None,
+                fla_solve_ms=None,
+                qla_solve_ms=None,
+                fla_wu_ms=None,
+                qla_wu_ms=None,
+                fla_gdr_ms=None,
+                qla_gdr_ms=None,
+                fla_o_ms=None,
+                qla_o_ms=None,
                 status=status,
                 returncode=returncode,
                 error_tail=error_tail,
@@ -348,6 +385,16 @@ def _run_one(
             fla_ms=row["fla_ms"],
             qla_ms=row["qla_ms"],
             speedup=row["speedup"],
+            fla_csum_ms=row["fla_csum_ms"],
+            qla_csum_ms=row["qla_csum_ms"],
+            fla_solve_ms=row["fla_solve_ms"],
+            qla_solve_ms=row["qla_solve_ms"],
+            fla_wu_ms=row["fla_wu_ms"],
+            qla_wu_ms=row["qla_wu_ms"],
+            fla_gdr_ms=row["fla_gdr_ms"],
+            qla_gdr_ms=row["qla_gdr_ms"],
+            fla_o_ms=row["fla_o_ms"],
+            qla_o_ms=row["qla_o_ms"],
             status=status,
             returncode=returncode,
             error_tail=error_tail,
@@ -368,6 +415,16 @@ def _write_csv(path: Path, rows: list[RunResult]) -> None:
         "fla_ms",
         "qla_ms",
         "speedup",
+        "fla_csum_ms",
+        "qla_csum_ms",
+        "fla_solve_ms",
+        "qla_solve_ms",
+        "fla_wu_ms",
+        "qla_wu_ms",
+        "fla_gdr_ms",
+        "qla_gdr_ms",
+        "fla_o_ms",
+        "qla_o_ms",
         "status",
         "returncode",
         "error_tail",
