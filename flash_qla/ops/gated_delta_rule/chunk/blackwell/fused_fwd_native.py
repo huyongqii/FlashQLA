@@ -702,6 +702,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_p_input(
     store_final_state,
     store_o,
     max_iters,
+    recompute_p_for_debug,
     num_threads=256,
     block_DV=64,
 ):
@@ -846,7 +847,19 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_p_input(
                 T.mbarrier_wait_parity(mbar_o0[mbar_slot], mbar_phase)
                 T.copy(tmp_tmem[:, 0:block_DV], o_fragment)
 
-                T.copy(p[bb, left:right, bhg, 0:block_S], p_fragment)
+                if recompute_p_for_debug:
+                    T.tcgen05_gemm(
+                        q_shared,
+                        k_shared,
+                        p_tmem,
+                        transpose_B=True,
+                        clear_accum=True,
+                        mbar=mbar_p[mbar_slot],
+                    )
+                    T.mbarrier_wait_parity(mbar_p[mbar_slot], mbar_phase)
+                    T.copy(p_tmem, p_fragment)
+                else:
+                    T.copy(p[bb, left:right, bhg, 0:block_S], p_fragment)
                 for j_s, j_t in T.Parallel(block_S, block_S):
                     g_fragment[j_s, j_t] = g_shared[j_s] - g_shared[j_t]
                 for j_s, j_t in T.Parallel(block_S, block_S):
@@ -1689,20 +1702,27 @@ def fused_gdr_fwd(
                 f"FLASHQLA_BLACKWELL_BLOCK_DV=64, got {block_DV}"
             )
         num_chunks = tilelang.cdiv(num_tokens, chunk_size)
+        recompute_p_for_debug = (
+            os.environ.get("FLASHQLA_BLACKWELL_SMALL_HV_RECOMPUTE_P", "") == "1"
+        )
         p = torch.empty(
             (batch_size, num_tokens, Hg, chunk_size),
             dtype=torch.float32,
             device=q.device,
         )
-        _debug(f"using small_hv P-reuse path H={H} Hg={Hg} chunks={num_chunks}")
-        tilelang_precompute_p_kernel = tilelang_precompute_p_blackwell(
-            Hg,
-            K,
-            chunk_size,
-            accum_dtype="float32",
-            qkva_dtype=q.dtype,
+        _debug(
+            f"using small_hv P-reuse path H={H} Hg={Hg} chunks={num_chunks} "
+            f"recompute_p={recompute_p_for_debug}"
         )
-        tilelang_precompute_p_kernel(q, k, p, num_chunks)
+        if not recompute_p_for_debug:
+            tilelang_precompute_p_kernel = tilelang_precompute_p_blackwell(
+                Hg,
+                K,
+                chunk_size,
+                accum_dtype="float32",
+                qkva_dtype=q.dtype,
+            )
+            tilelang_precompute_p_kernel(q, k, p, num_chunks)
         tilelang_fused_chunk_gdr_fwd_kernel = (
             tilelang_fused_chunk_gdr_fwd_blackwell_p_input(
                 H,
@@ -1721,6 +1741,7 @@ def fused_gdr_fwd(
                 store_final_state=output_final_state,
                 store_o=output_o,
                 max_iters=max_iters,
+                recompute_p_for_debug=recompute_p_for_debug,
                 num_threads=num_threads,
                 block_DV=block_DV,
             )
