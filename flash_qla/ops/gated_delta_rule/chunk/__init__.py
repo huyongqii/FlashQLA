@@ -40,10 +40,12 @@ def chunk_gated_delta_rule_fwd(
     use_blackwell_native_fwd = False
     if is_blackwell(_cc):
         use_blackwell_native_fwd, _ = should_use_native_fwd(H, Hg)
+    blackwell_fwd_experiment = os.environ.get("FLASHQLA_BLACKWELL_FWD_EXPERIMENT", "").lower()
     pretransform_a = (
         os.environ.get("FLASHQLA_BLACKWELL_PRETRANSFORM_A", "1") == "1"
         and is_blackwell(_cc)
         and use_blackwell_native_fwd
+        and blackwell_fwd_experiment not in ("hopper_pipeline", "hopper_port")
         and cu_seqlens is None
         and not output_h
         and not auto_cp

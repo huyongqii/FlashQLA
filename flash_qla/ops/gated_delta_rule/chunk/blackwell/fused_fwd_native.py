@@ -1633,6 +1633,27 @@ def fused_gdr_fwd(
         if not output_o:
             o = None
         return o, h, final_state
+    if fwd_experiment in ("hopper_pipeline", "hopper_port"):
+        from .fused_fwd import fused_gdr_fwd as _hopper_pipeline_fwd
+
+        _debug("using Hopper-structure Blackwell TCGEN05 pipeline")
+        return _hopper_pipeline_fwd(
+            q=q,
+            k=k,
+            v=v,
+            a=a,
+            g=g,
+            b=b,
+            scale=scale,
+            initial_state=initial_state if use_initial_state else None,
+            output_final_state=output_final_state,
+            output_h=output_h,
+            output_o=output_o,
+            cu_seqlens=cu_seqlens,
+            cp_seq_map=cp_seq_map,
+            raw_cu_seqlens=raw_cu_seqlens,
+            chunk_size=chunk_size,
+        )
     if fwd_experiment == "tmem_v2":
         raise RuntimeError(
             "FLASHQLA_BLACKWELL_FWD_EXPERIMENT=tmem_v2 is disabled: directly "
@@ -1666,8 +1687,8 @@ def fused_gdr_fwd(
     if fwd_experiment not in ("", "ag", "small_hv"):
         raise ValueError(
             "FLASHQLA_BLACKWELL_FWD_EXPERIMENT must be unset, 'ag', "
-            "'small_hv', 'pg_precompute', 'dv128_reuse', or "
-            f"'pipeline', got {fwd_experiment!r}"
+            "'small_hv', 'pg_precompute', 'dv128_reuse', 'pipeline', or "
+            f"'hopper_pipeline', got {fwd_experiment!r}"
         )
     sync_barriers = _sync_barriers()
     _debug(f"threads={num_threads} sync_barriers=" + ",".join(sorted(sync_barriers)))
