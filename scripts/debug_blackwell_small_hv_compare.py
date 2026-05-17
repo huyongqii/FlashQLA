@@ -195,20 +195,30 @@ def main() -> None:
         "FLASHQLA_BLACKWELL_FWD_EXPERIMENT": None,
         "FLASHQLA_BLACKWELL_SMALL_HV_RECOMPUTE_P": None,
         "FLASHQLA_BLACKWELL_SMALL_HV_PG_DTYPE": None,
+        "FLASHQLA_BLACKWELL_SMALL_HV_USE_PG": None,
     }
     recompute_env = {
         "FLASHQLA_BLACKWELL_FWD_EXPERIMENT": "small_hv",
         "FLASHQLA_BLACKWELL_SMALL_HV_RECOMPUTE_P": "1",
         "FLASHQLA_BLACKWELL_SMALL_HV_PG_DTYPE": None,
+        "FLASHQLA_BLACKWELL_SMALL_HV_USE_PG": None,
+    }
+    precompute_p_env = {
+        "FLASHQLA_BLACKWELL_FWD_EXPERIMENT": "small_hv",
+        "FLASHQLA_BLACKWELL_SMALL_HV_RECOMPUTE_P": None,
+        "FLASHQLA_BLACKWELL_SMALL_HV_PG_DTYPE": None,
+        "FLASHQLA_BLACKWELL_SMALL_HV_USE_PG": None,
     }
     pg_env = {
         "FLASHQLA_BLACKWELL_FWD_EXPERIMENT": "small_hv",
         "FLASHQLA_BLACKWELL_SMALL_HV_RECOMPUTE_P": None,
         "FLASHQLA_BLACKWELL_SMALL_HV_PG_DTYPE": "fp32" if args.pg_fp32 else None,
+        "FLASHQLA_BLACKWELL_SMALL_HV_USE_PG": "1",
     }
 
     _g_native, a_native, o_native, s_native = run_qla("native", q, k, v, g, beta, scale, h0, native_env)
     _g_rec, a_rec, o_rec, s_rec = run_qla("small_hv_recompute", q, k, v, g, beta, scale, h0, recompute_env)
+    _g_pre, a_pre, o_pre, s_pre = run_qla("small_hv_precompute_p", q, k, v, g, beta, scale, h0, precompute_p_env)
     _g_pg, a_pg, o_pg, s_pg = run_qla("small_hv_pg", q, k, v, g, beta, scale, h0, pg_env)
 
     for repeat_idx in range(1, args.repeats):
@@ -229,17 +239,23 @@ def main() -> None:
     print("\nAgainst reference:")
     max_report("native.o", o_native, o_ref, args.chunk_size)
     max_report("recompute.o", o_rec, o_ref, args.chunk_size)
+    max_report("precompute_p.o", o_pre, o_ref, args.chunk_size)
     max_report("pg.o", o_pg, o_ref, args.chunk_size)
     max_report("native.s", s_native, s_ref, args.chunk_size)
     max_report("recompute.s", s_rec, s_ref, args.chunk_size)
+    max_report("precompute_p.s", s_pre, s_ref, args.chunk_size)
     max_report("pg.s", s_pg, s_ref, args.chunk_size)
 
     print("\nVariant deltas:")
+    max_report("precompute_p.o_vs_recompute", o_pre, o_rec, args.chunk_size)
+    max_report("precompute_p.s_vs_recompute", s_pre, s_rec, args.chunk_size)
     max_report("pg.o_vs_recompute", o_pg, o_rec, args.chunk_size)
     max_report("pg.s_vs_recompute", s_pg, s_rec, args.chunk_size)
     max_report("recompute.o_vs_native", o_rec, o_native, args.chunk_size)
+    max_report("precompute_p.o_vs_native", o_pre, o_native, args.chunk_size)
     max_report("pg.o_vs_native", o_pg, o_native, args.chunk_size)
     max_report("pg.A_vs_recompute", a_pg.float(), a_rec.float(), args.chunk_size)
+    max_report("precompute_p.A_vs_recompute", a_pre.float(), a_rec.float(), args.chunk_size)
     max_report("native.A_vs_recompute", a_native.float(), a_rec.float(), args.chunk_size)
 
 

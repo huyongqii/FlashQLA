@@ -549,6 +549,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_pg_input(
             o_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
             u_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
             v_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
+            pg_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
             g_last_local = T.alloc_local((1), dtype=accum_dtype)
 
             h_tmem = T.alloc_tmem((DK, 128), dtype=accum_dtype)
@@ -625,7 +626,8 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_pg_input(
                     vn_shared[j_s, j_v] = v_fragment[j_s, j_v]
 
                 for j_s, j_t in T.Parallel(block_S, block_S):
-                    pg_shared[j_s, j_t] = pg[bb, left + j_s, bh, j_t]
+                    pg_fragment[j_s, j_t] = pg[bb, left + j_s, bh, j_t]
+                T.copy(pg_fragment, pg_shared)
                 T.barrier_arrive(bar_pg_shared)
                 T.barrier_wait(bar_pg_shared, i_s % 2)
 
@@ -867,9 +869,11 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_p_input(
                         p_fragment[j_s, j_t] *= scale * g_fragment[j_s, j_t]
                     T.copy(p_fragment, p_shared)
                 else:
-                    T.copy(p[bb, left:right, bhg, 0:block_S], p_shared)
                     for j_s, j_t in T.Parallel(block_S, block_S):
-                        p_shared[j_s, j_t] *= scale * g_fragment[j_s, j_t]
+                        p_fragment[j_s, j_t] = p[bb, left + j_s, bhg, j_t]
+                    for j_s, j_t in T.Parallel(block_S, block_S):
+                        p_fragment[j_s, j_t] *= scale * g_fragment[j_s, j_t]
+                    T.copy(p_fragment, p_shared)
                 T.barrier_arrive(bar_p_shared)
                 T.barrier_wait(bar_p_shared, i_s % 2)
                 for j_s, j_v in T.Parallel(block_S, block_DV):
@@ -1709,6 +1713,11 @@ def fused_gdr_fwd(
             f"using small_hv Pg-reuse path H={H} Hg={Hg} chunks={num_chunks} "
             f"recompute_p={recompute_p_for_debug}"
         )
+        use_pg_input = (
+            os.environ.get("FLASHQLA_BLACKWELL_SMALL_HV_USE_PG", "") == "1"
+            or os.environ.get("FLASHQLA_BLACKWELL_SMALL_HV_PG_DTYPE", "").lower()
+            in ("bf16", "bfloat16", "fp32", "float32")
+        )
         if recompute_p_for_debug:
             p = torch.empty(
                 (batch_size, num_tokens, Hg, chunk_size),
@@ -1734,6 +1743,54 @@ def fused_gdr_fwd(
                     store_o=output_o,
                     max_iters=max_iters,
                     recompute_p_for_debug=True,
+                    num_threads=num_threads,
+                    block_DV=block_DV,
+                )
+            )
+            tilelang_fused_chunk_gdr_fwd_kernel(
+                q,
+                k,
+                v,
+                a,
+                g,
+                p,
+                initial_state,
+                o,
+                final_state,
+            )
+        elif not use_pg_input:
+            p = torch.empty(
+                (batch_size, num_tokens, Hg, chunk_size),
+                dtype=torch.float32,
+                device=q.device,
+            )
+            tilelang_precompute_p_kernel = tilelang_precompute_p_blackwell(
+                Hg,
+                K,
+                chunk_size,
+                accum_dtype="float32",
+                qkva_dtype=q.dtype,
+            )
+            tilelang_precompute_p_kernel(q, k, p, num_chunks)
+            tilelang_fused_chunk_gdr_fwd_kernel = (
+                tilelang_fused_chunk_gdr_fwd_blackwell_p_input(
+                    H,
+                    Hg,
+                    K,
+                    V,
+                    chunk_size,
+                    scale,
+                    qkva_dtype=q.dtype,
+                    g_dtype=g.dtype,
+                    h0_dtype=initial_state.dtype,
+                    ht_dtype=final_state.dtype,
+                    o_dtype=o.dtype,
+                    accum_dtype="float32",
+                    use_initial_state=use_initial_state,
+                    store_final_state=output_final_state,
+                    store_o=output_o,
+                    max_iters=max_iters,
+                    recompute_p_for_debug=False,
                     num_threads=num_threads,
                     block_DV=block_DV,
                 )
