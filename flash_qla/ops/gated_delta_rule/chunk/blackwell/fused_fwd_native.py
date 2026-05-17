@@ -549,7 +549,6 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_pg_input(
             o_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
             u_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
             v_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
-            pg_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
             g_last_local = T.alloc_local((1), dtype=accum_dtype)
 
             h_tmem = T.alloc_tmem((DK, 128), dtype=accum_dtype)
@@ -626,8 +625,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_pg_input(
                     vn_shared[j_s, j_v] = v_fragment[j_s, j_v]
 
                 for j_s, j_t in T.Parallel(block_S, block_S):
-                    pg_fragment[j_s, j_t] = pg[bb, left + j_s, bh, j_t]
-                T.copy(pg_fragment, pg_shared)
+                    pg_shared[j_s, j_t] = pg[bb, left + j_s, bh, j_t]
                 T.barrier_arrive(bar_pg_shared)
                 T.barrier_wait(bar_pg_shared, i_s % 2)
 
