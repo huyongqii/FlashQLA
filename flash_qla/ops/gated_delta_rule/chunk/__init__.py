@@ -46,6 +46,7 @@ def chunk_gated_delta_rule_fwd(
         and is_blackwell(_cc)
         and use_blackwell_native_fwd
         and blackwell_fwd_experiment not in ("hopper_pipeline", "hopper_port")
+        and blackwell_fwd_experiment != "chunk_parallel"
         and cu_seqlens is None
         and not output_h
         and not auto_cp

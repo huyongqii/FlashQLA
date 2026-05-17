@@ -94,6 +94,16 @@ POLICIES = {
         "FLASHQLA_BLACKWELL_FWD_EXPERIMENT": "hopper_pipeline",
         "FLASHQLA_BLACKWELL_BLOCK_DV": "64",
     },
+    "qwen397_chunk_parallel": {
+        "FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE": "1",
+        "FLASHQLA_BLACKWELL_NATIVE": "1",
+        "FLASHQLA_BLACKWELL_NATIVE_KERNELS": "fwd,kkt",
+        "FLASHQLA_BLACKWELL_FWD_POLICY": "native",
+        "FLASHQLA_BLACKWELL_FWD_EXPERIMENT": "chunk_parallel",
+        "FLASHQLA_BLACKWELL_BLOCK_DV": "64",
+        "FLASHQLA_BLACKWELL_FWD_THREADS": "256",
+        "FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS": "load,h",
+    },
     "qwen397_kkt_compat_fwd": {
         "FLASHQLA_BLACKWELL_NATIVE": "1",
         "FLASHQLA_BLACKWELL_NATIVE_KERNELS": "kkt",
