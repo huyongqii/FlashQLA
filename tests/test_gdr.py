@@ -94,6 +94,50 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _print_error_location(label: str, actual: torch.Tensor, expected: torch.Tensor, chunk_size: int):
+    diff = (actual.float() - expected.float()).abs()
+    flat_idx = int(diff.argmax().item())
+    idx = tuple(
+        int(i)
+        for i in torch.unravel_index(
+            torch.tensor(flat_idx, device=diff.device), diff.shape
+        )
+    )
+    max_abs = diff[idx].item()
+    denom = expected.float().abs().amax().clamp_min(1e-6)
+    print(
+        f"{label} max_idx={idx} max_abs={max_abs:.6f} "
+        f"rel={(diff[idx] / denom).item():.6f} "
+        f"actual={actual[idx].float().item():.6f} "
+        f"expected={expected[idx].float().item():.6f}"
+    )
+    if diff.ndim == 4:
+        # O layout: [B, T, H, D]
+        per_head = diff.amax(dim=(0, 1, 3))
+        top_heads = torch.topk(per_head, k=min(8, per_head.numel()))
+        print(
+            f"{label} top_heads="
+            + ", ".join(
+                f"h{int(h)}:{float(v):.6f}"
+                for v, h in zip(top_heads.values, top_heads.indices)
+            )
+        )
+        num_chunks = diff.shape[1] // chunk_size
+        if num_chunks > 0:
+            chunk_diff = diff[:, : num_chunks * chunk_size].reshape(
+                diff.shape[0], num_chunks, chunk_size, diff.shape[2], diff.shape[3]
+            )
+            per_chunk = chunk_diff.amax(dim=(0, 2, 3, 4))
+            top_chunks = torch.topk(per_chunk, k=min(8, per_chunk.numel()))
+            print(
+                f"{label} top_chunks="
+                + ", ".join(
+                    f"c{int(c)}:{float(v):.6f}"
+                    for v, c in zip(top_chunks.values, top_chunks.indices)
+                )
+            )
+
+
 def test_gated_delta_rule(
     batch_size: int,
     num_tokens: int,
@@ -305,6 +349,9 @@ def test_gated_delta_rule(
                 print(
                     f"o_qla: {(o_qla - o_ref).abs().max().item():.4f} / {o_ref.abs().max().item():.4f}"
                 )
+                _print_error_location("o_qla", o_qla, o_ref, chunk_size)
+                if h0 is not None:
+                    _print_error_location("s_qla", s_qla, s_ref, chunk_size)
                 print("********** ERROR **********")
                 raise e
 
