@@ -778,6 +778,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_p_input(
             mbar_p = T.alloc_barrier(arrive_count=[1] * 8)
             bar_load = T.alloc_barrier(arrive_count=num_threads)
             bar_h_shared = T.alloc_barrier(arrive_count=num_threads)
+            bar_p_shared = T.alloc_barrier(arrive_count=num_threads)
 
             num_iters = T.ceildiv(num_tokens, block_S)
             if max_iters > 0 and num_iters > max_iters:
@@ -881,6 +882,8 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_p_input(
                             * scale
                             * g_fragment[j_s, j_t]
                         )
+                T.barrier_arrive(bar_p_shared)
+                T.barrier_wait(bar_p_shared, i_s % 2)
                 for j_s, j_v in T.Parallel(block_S, block_DV):
                     o_fragment[j_s, j_v] *= scale * g_exp_shared[j_s]
                 T.copy(o_fragment, tmp_tmem[:, 0:block_DV])
