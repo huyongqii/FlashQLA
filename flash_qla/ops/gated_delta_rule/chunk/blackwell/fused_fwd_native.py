@@ -167,6 +167,8 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
             bar_o = T.alloc_barrier(arrive_count=num_threads)
             bar_h_scaled = T.alloc_barrier(arrive_count=num_threads)
 
+            T.use_swizzle(10)
+
             num_iters = T.ceildiv(num_tokens, block_S)
             if max_iters > 0 and num_iters > max_iters:
                 num_iters = max_iters
