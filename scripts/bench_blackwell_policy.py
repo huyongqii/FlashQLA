@@ -564,6 +564,18 @@ def _print_summary(rows: list[RunResult]) -> None:
             flush=True,
         )
 
+    failed = [row for row in rows if row.status != "ok"]
+    if failed:
+        print("\nFailures", flush=True)
+        for row in failed:
+            print(
+                f"{row.policy:16s} {row.shape:6s} "
+                f"t={row.t if row.t is not None else 'unknown'} "
+                f"status={row.status} rc={row.returncode} "
+                f"tail={row.error_tail}",
+                flush=True,
+            )
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)

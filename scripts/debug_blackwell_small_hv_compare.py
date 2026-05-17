@@ -125,6 +125,21 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--swa-ratio", type=float, default=0.75)
     parser.add_argument("--pg-fp32", action="store_true")
+    parser.add_argument(
+        "--repeats",
+        type=int,
+        default=1,
+        help="Repeat the QLA variants on the same inputs to catch intermittent failures.",
+    )
+    parser.add_argument(
+        "--match-test-gdr-rng",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Consume the same extra random tensors as tests/test_gdr.py before "
+            "building the SWA mask, so seed=42 reproduces the benchmark inputs."
+        ),
+    )
     args = parser.parse_args()
 
     os.environ.setdefault("FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE", "1")
@@ -148,6 +163,11 @@ def main() -> None:
     ) / 16
     beta = torch.randn(args.batch, args.tokens, args.nvh, device=device, dtype=torch.float32).sigmoid()
     h0 = torch.randn(args.batch, args.nvh, args.dk, args.dv, device=device, dtype=torch.float32)
+    if args.match_test_gdr_rng:
+        _do = torch.randn_like(v)
+        _dht = torch.randn(
+            (args.batch, args.nvh, args.dk, args.dv), device=device, dtype=torch.float32
+        ) / 8
     scale = args.dk ** -0.5
 
     swa_mask = torch.zeros((args.nvh), dtype=torch.bool, device=device)
@@ -190,6 +210,21 @@ def main() -> None:
     _g_native, a_native, o_native, s_native = run_qla("native", q, k, v, g, beta, scale, h0, native_env)
     _g_rec, a_rec, o_rec, s_rec = run_qla("small_hv_recompute", q, k, v, g, beta, scale, h0, recompute_env)
     _g_pg, a_pg, o_pg, s_pg = run_qla("small_hv_pg", q, k, v, g, beta, scale, h0, pg_env)
+
+    for repeat_idx in range(1, args.repeats):
+        _g_pg_r, a_pg_r, o_pg_r, s_pg_r = run_qla(
+            f"small_hv_pg.repeat{repeat_idx}", q, k, v, g, beta, scale, h0, pg_env
+        )
+        pg_o_diff = (o_pg_r.float() - o_rec.float()).abs()
+        pg_s_diff = (s_pg_r.float() - s_rec.float()).abs()
+        print(
+            f"repeat{repeat_idx}: pg_vs_recompute_o_max={pg_o_diff.max().item():.6f} "
+            f"pg_vs_recompute_s_max={pg_s_diff.max().item():.6f}"
+        )
+        if pg_o_diff.max().item() > o_ref.float().abs().amax().item() * 0.02:
+            max_report(f"repeat{repeat_idx}.pg.o_vs_recompute", o_pg_r, o_rec, args.chunk_size)
+            max_report(f"repeat{repeat_idx}.pg.s_vs_recompute", s_pg_r, s_rec, args.chunk_size)
+            break
 
     print("\nAgainst reference:")
     max_report("native.o", o_native, o_ref, args.chunk_size)
