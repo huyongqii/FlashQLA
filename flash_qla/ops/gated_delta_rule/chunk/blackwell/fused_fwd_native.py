@@ -864,10 +864,6 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_p_input(
                     )
                     T.mbarrier_wait_parity(mbar_p[mbar_slot], mbar_phase)
                     T.copy(p_tmem, p_fragment)
-                else:
-                    for j_s, j_t in T.Parallel(block_S, block_S):
-                        p_global_shared[j_s, j_t] = p[bb, left + j_s, bhg, j_t]
-                    T.copy(p_global_shared, p_fragment)
                 for j_s, j_t in T.Parallel(block_S, block_S):
                     g_fragment[j_s, j_t] = g_shared[j_s] - g_shared[j_t]
                 for j_s, j_t in T.Parallel(block_S, block_S):
@@ -877,9 +873,18 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_p_input(
                         )
                     else:
                         g_fragment[j_s, j_t] = 0
-                for j_s, j_t in T.Parallel(block_S, block_S):
-                    p_fragment[j_s, j_t] *= scale * g_fragment[j_s, j_t]
-                T.copy(p_fragment, p_shared)
+                if recompute_p_for_debug:
+                    for j_s, j_t in T.Parallel(block_S, block_S):
+                        p_fragment[j_s, j_t] *= scale * g_fragment[j_s, j_t]
+                    T.copy(p_fragment, p_shared)
+                else:
+                    for j_s, j_t in T.Parallel(block_S, block_S):
+                        p_global_shared[j_s, j_t] = (
+                            p[bb, left + j_s, bhg, j_t]
+                            * scale
+                            * g_fragment[j_s, j_t]
+                        )
+                    T.copy(p_global_shared, p_shared)
                 for j_s, j_v in T.Parallel(block_S, block_DV):
                     o_fragment[j_s, j_v] *= scale * g_exp_shared[j_s]
                 T.copy(o_fragment, tmp_tmem[:, 0:block_DV])
