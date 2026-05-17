@@ -876,12 +876,9 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_p_input(
                         p_fragment[j_s, j_t] *= scale * g_fragment[j_s, j_t]
                     T.copy(p_fragment, p_shared)
                 else:
+                    T.copy(p[bb, left:right, bhg, 0:block_S], p_shared)
                     for j_s, j_t in T.Parallel(block_S, block_S):
-                        p_shared[j_s, j_t] = (
-                            p[bb, left + j_s, bhg, j_t]
-                            * scale
-                            * g_fragment[j_s, j_t]
-                        )
+                        p_shared[j_s, j_t] *= scale * g_fragment[j_s, j_t]
                 T.barrier_arrive(bar_p_shared)
                 T.barrier_wait(bar_p_shared, i_s % 2)
                 for j_s, j_v in T.Parallel(block_S, block_DV):
