@@ -330,7 +330,9 @@ def tilelang_precompute_pg_blackwell(
     accum_dtype,
     qkva_dtype,
     g_dtype,
+    pg_dtype=None,
 ):
+    pg_dtype = pg_dtype or qkva_dtype
     batch_size = T.dynamic("batch_size")
     num_tokens = T.dynamic("num_tokens")
     num_chunks = T.dynamic("num_chunks")
@@ -346,7 +348,7 @@ def tilelang_precompute_pg_blackwell(
         q: T.Tensor(q_shape, dtype=qkva_dtype),
         k: T.Tensor(k_shape, dtype=qkva_dtype),
         g: T.Tensor(g_shape, dtype=g_dtype),
-        pg: T.Tensor(pg_shape, dtype=qkva_dtype),
+        pg: T.Tensor(pg_shape, dtype=pg_dtype),
         num_chunks: T.int32,
     ):
         with T.Kernel(num_chunks * H, threads=128) as (bch,):
@@ -489,9 +491,11 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_pg_input(
     store_final_state,
     store_o,
     max_iters,
+    pg_dtype=None,
     num_threads=256,
     block_DV=64,
 ):
+    pg_dtype = pg_dtype or qkva_dtype
     batch_size = T.dynamic("batch_size")
     num_tokens = T.dynamic("num_tokens")
     block_S = chunk_size
@@ -513,7 +517,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_pg_input(
         v: T.Tensor(v_shape, dtype=qkva_dtype),
         a: T.Tensor(a_shape, dtype=qkva_dtype),
         g: T.Tensor(g_shape, dtype=g_dtype),
-        pg: T.Tensor(pg_shape, dtype=qkva_dtype),
+        pg: T.Tensor(pg_shape, dtype=pg_dtype),
         h0: T.Tensor(h0_shape, dtype=h0_dtype),
         o: T.Tensor(o_shape, dtype=o_dtype),
         ht: T.Tensor(ht_shape, dtype=ht_dtype),
@@ -1741,9 +1745,15 @@ def fused_gdr_fwd(
                 final_state,
             )
         else:
+            pg_dtype = (
+                torch.float32
+                if os.environ.get("FLASHQLA_BLACKWELL_SMALL_HV_PG_DTYPE", "").lower()
+                in ("fp32", "float32")
+                else q.dtype
+            )
             pg = torch.empty(
                 (batch_size, num_tokens, H, chunk_size),
-                dtype=q.dtype,
+                dtype=pg_dtype,
                 device=q.device,
             )
             tilelang_precompute_pg_kernel = tilelang_precompute_pg_blackwell(
@@ -1755,6 +1765,7 @@ def fused_gdr_fwd(
                 accum_dtype="float32",
                 qkva_dtype=q.dtype,
                 g_dtype=g.dtype,
+                pg_dtype=pg.dtype,
             )
             tilelang_precompute_pg_kernel(q, k, g, pg, num_chunks)
             tilelang_fused_chunk_gdr_fwd_kernel = (
@@ -1771,6 +1782,7 @@ def fused_gdr_fwd(
                     ht_dtype=final_state.dtype,
                     o_dtype=o.dtype,
                     accum_dtype="float32",
+                    pg_dtype=pg.dtype,
                     use_initial_state=use_initial_state,
                     store_final_state=output_final_state,
                     store_o=output_o,
