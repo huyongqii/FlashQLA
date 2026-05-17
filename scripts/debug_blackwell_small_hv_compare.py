@@ -196,24 +196,28 @@ def main() -> None:
         "FLASHQLA_BLACKWELL_SMALL_HV_RECOMPUTE_P": None,
         "FLASHQLA_BLACKWELL_SMALL_HV_PG_DTYPE": None,
         "FLASHQLA_BLACKWELL_SMALL_HV_USE_PG": None,
+        "FLASHQLA_BLACKWELL_SMALL_HV_ALLOW_UNSAFE_PRECOMPUTE": None,
     }
     recompute_env = {
         "FLASHQLA_BLACKWELL_FWD_EXPERIMENT": "small_hv",
         "FLASHQLA_BLACKWELL_SMALL_HV_RECOMPUTE_P": "1",
         "FLASHQLA_BLACKWELL_SMALL_HV_PG_DTYPE": None,
         "FLASHQLA_BLACKWELL_SMALL_HV_USE_PG": None,
+        "FLASHQLA_BLACKWELL_SMALL_HV_ALLOW_UNSAFE_PRECOMPUTE": None,
     }
     precompute_p_env = {
         "FLASHQLA_BLACKWELL_FWD_EXPERIMENT": "small_hv",
         "FLASHQLA_BLACKWELL_SMALL_HV_RECOMPUTE_P": None,
         "FLASHQLA_BLACKWELL_SMALL_HV_PG_DTYPE": None,
         "FLASHQLA_BLACKWELL_SMALL_HV_USE_PG": None,
+        "FLASHQLA_BLACKWELL_SMALL_HV_ALLOW_UNSAFE_PRECOMPUTE": "1",
     }
     pg_env = {
         "FLASHQLA_BLACKWELL_FWD_EXPERIMENT": "small_hv",
         "FLASHQLA_BLACKWELL_SMALL_HV_RECOMPUTE_P": None,
         "FLASHQLA_BLACKWELL_SMALL_HV_PG_DTYPE": "fp32" if args.pg_fp32 else None,
         "FLASHQLA_BLACKWELL_SMALL_HV_USE_PG": "1",
+        "FLASHQLA_BLACKWELL_SMALL_HV_ALLOW_UNSAFE_PRECOMPUTE": "1",
     }
 
     _g_native, a_native, o_native, s_native = run_qla("native", q, k, v, g, beta, scale, h0, native_env)

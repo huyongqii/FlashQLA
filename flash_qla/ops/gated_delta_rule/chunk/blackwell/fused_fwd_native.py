@@ -1700,6 +1700,21 @@ def fused_gdr_fwd(
                 "FLASHQLA_BLACKWELL_FWD_EXPERIMENT=small_hv is intended for "
                 f"H > Hg P-reuse shapes, got H={H}, Hg={Hg}"
             )
+        allow_unsafe_precompute = (
+            os.environ.get("FLASHQLA_BLACKWELL_SMALL_HV_ALLOW_UNSAFE_PRECOMPUTE", "") == "1"
+        )
+        if (
+            os.environ.get("FLASHQLA_BLACKWELL_SMALL_HV_RECOMPUTE_P", "") != "1"
+            and not allow_unsafe_precompute
+        ):
+            raise RuntimeError(
+                "FLASHQLA_BLACKWELL_FWD_EXPERIMENT=small_hv precompute-P/Pg "
+                "paths are disabled: loading a precomputed row-major P/Pg tile "
+                "back into a tcgen05 shared operand produces correctness "
+                "failures on B300 with TileLang 0.1.9. Set "
+                "FLASHQLA_BLACKWELL_SMALL_HV_RECOMPUTE_P=1 to run the stable "
+                "diagnostic path, or use qwen397_native for performance runs."
+            )
         if block_DV != 64:
             raise ValueError(
                 "FLASHQLA_BLACKWELL_FWD_EXPERIMENT=small_hv currently requires "
