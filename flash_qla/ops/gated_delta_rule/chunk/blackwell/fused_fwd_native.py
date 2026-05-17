@@ -489,7 +489,6 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_pg_input(
     store_final_state,
     store_o,
     max_iters,
-    recompute_p_for_debug,
     num_threads=256,
     block_DV=64,
 ):
@@ -550,14 +549,12 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_pg_input(
 
             h_tmem = T.alloc_tmem((DK, 128), dtype=accum_dtype)
             tmp_tmem = T.alloc_tmem((block_S, 128), dtype=accum_dtype)
-            p_tmem = T.alloc_tmem((block_S, block_S), dtype=accum_dtype)
 
             mbar_u = T.alloc_barrier(arrive_count=[1] * 8)
             mbar_v = T.alloc_barrier(arrive_count=[1] * 8)
             mbar_o0 = T.alloc_barrier(arrive_count=[1] * 8)
             mbar_o1 = T.alloc_barrier(arrive_count=[1] * 8)
             mbar_h = T.alloc_barrier(arrive_count=[1] * 8)
-            mbar_p = T.alloc_barrier(arrive_count=[1] * 8)
             bar_load = T.alloc_barrier(arrive_count=num_threads)
             bar_h_shared = T.alloc_barrier(arrive_count=num_threads)
 
@@ -622,21 +619,6 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_pg_input(
                 for j_s, j_v in T.Parallel(block_S, block_DV):
                     v_fragment[j_s, j_v] *= g_rev_exp_shared[j_s]
                     vn_shared[j_s, j_v] = v_fragment[j_s, j_v]
-
-                if recompute_p_for_debug:
-                    T.tcgen05_gemm(
-                        q_shared,
-                        k_shared,
-                        p_tmem,
-                        transpose_B=True,
-                        clear_accum=True,
-                        mbar=mbar_p[mbar_slot],
-                    )
-                    T.mbarrier_wait_parity(mbar_p[mbar_slot], mbar_phase)
-                    T.copy(p_tmem, p_fragment)
-                else:
-                    for j_s, j_t in T.Parallel(block_S, block_S):
-                        p_fragment[j_s, j_t] = p[bb, left + j_s, bhg, j_t]
 
                 T.tcgen05_gemm(
                     q_shared,
@@ -1714,58 +1696,100 @@ def fused_gdr_fwd(
         recompute_p_for_debug = (
             os.environ.get("FLASHQLA_BLACKWELL_SMALL_HV_RECOMPUTE_P", "") == "1"
         )
-        p = torch.empty(
-            (batch_size, num_tokens, Hg, chunk_size),
-            dtype=torch.float32,
-            device=q.device,
-        )
         _debug(
-            f"using small_hv P-reuse path H={H} Hg={Hg} chunks={num_chunks} "
+            f"using small_hv Pg-reuse path H={H} Hg={Hg} chunks={num_chunks} "
             f"recompute_p={recompute_p_for_debug}"
         )
-        if not recompute_p_for_debug:
-            tilelang_precompute_p_kernel = tilelang_precompute_p_blackwell(
-                Hg,
-                K,
-                chunk_size,
-                accum_dtype="float32",
-                qkva_dtype=q.dtype,
+        if recompute_p_for_debug:
+            p = torch.empty(
+                (batch_size, num_tokens, Hg, chunk_size),
+                dtype=torch.float32,
+                device=q.device,
             )
-            tilelang_precompute_p_kernel(q, k, p, num_chunks)
-        tilelang_fused_chunk_gdr_fwd_kernel = (
-            tilelang_fused_chunk_gdr_fwd_blackwell_p_input(
+            tilelang_fused_chunk_gdr_fwd_kernel = (
+                tilelang_fused_chunk_gdr_fwd_blackwell_p_input(
+                    H,
+                    Hg,
+                    K,
+                    V,
+                    chunk_size,
+                    scale,
+                    qkva_dtype=q.dtype,
+                    g_dtype=g.dtype,
+                    h0_dtype=initial_state.dtype,
+                    ht_dtype=final_state.dtype,
+                    o_dtype=o.dtype,
+                    accum_dtype="float32",
+                    use_initial_state=use_initial_state,
+                    store_final_state=output_final_state,
+                    store_o=output_o,
+                    max_iters=max_iters,
+                    recompute_p_for_debug=True,
+                    num_threads=num_threads,
+                    block_DV=block_DV,
+                )
+            )
+            tilelang_fused_chunk_gdr_fwd_kernel(
+                q,
+                k,
+                v,
+                a,
+                g,
+                p,
+                initial_state,
+                o,
+                final_state,
+            )
+        else:
+            pg = torch.empty(
+                (batch_size, num_tokens, H, chunk_size),
+                dtype=q.dtype,
+                device=q.device,
+            )
+            tilelang_precompute_pg_kernel = tilelang_precompute_pg_blackwell(
                 H,
                 Hg,
                 K,
-                V,
                 chunk_size,
                 scale,
+                accum_dtype="float32",
                 qkva_dtype=q.dtype,
                 g_dtype=g.dtype,
-                h0_dtype=initial_state.dtype,
-                ht_dtype=final_state.dtype,
-                o_dtype=o.dtype,
-                accum_dtype="float32",
-                use_initial_state=use_initial_state,
-                store_final_state=output_final_state,
-                store_o=output_o,
-                max_iters=max_iters,
-                recompute_p_for_debug=recompute_p_for_debug,
-                num_threads=num_threads,
-                block_DV=block_DV,
             )
-        )
-        tilelang_fused_chunk_gdr_fwd_kernel(
-            q,
-            k,
-            v,
-            a,
-            g,
-            p,
-            initial_state,
-            o,
-            final_state,
-        )
+            tilelang_precompute_pg_kernel(q, k, g, pg, num_chunks)
+            tilelang_fused_chunk_gdr_fwd_kernel = (
+                tilelang_fused_chunk_gdr_fwd_blackwell_pg_input(
+                    H,
+                    Hg,
+                    K,
+                    V,
+                    chunk_size,
+                    scale,
+                    qkva_dtype=q.dtype,
+                    g_dtype=g.dtype,
+                    h0_dtype=initial_state.dtype,
+                    ht_dtype=final_state.dtype,
+                    o_dtype=o.dtype,
+                    accum_dtype="float32",
+                    use_initial_state=use_initial_state,
+                    store_final_state=output_final_state,
+                    store_o=output_o,
+                    max_iters=max_iters,
+                    num_threads=num_threads,
+                    block_DV=block_DV,
+                )
+            )
+            tilelang_fused_chunk_gdr_fwd_kernel(
+                q,
+                k,
+                v,
+                a,
+                g,
+                pg,
+                initial_state,
+                o,
+                final_state,
+            )
         if not output_final_state:
             final_state = None
         if not output_o:
