@@ -549,6 +549,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_pg_input(
             o_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
             u_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
             v_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
+            pg_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
             g_last_local = T.alloc_local((1), dtype=accum_dtype)
 
             h_tmem = T.alloc_tmem((DK, 128), dtype=accum_dtype)
@@ -581,7 +582,6 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_pg_input(
                 T.copy(k[bb, left:right, bhg, 0:DK], k_shared)
                 T.copy(v[bb, left:right, bh, bv * block_DV : (bv + 1) * block_DV], v_shared)
                 T.copy(a[bb, left:right, bh, 0:block_S], a_shared)
-                T.copy(pg[bb, left:right, bh, 0:block_S], pg_shared)
                 for j_s in T.Parallel(block_S):
                     g_shared[j_s] = g[bb, left + j_s, bh]
                 for j_s in T.Parallel(block_S):
@@ -623,6 +623,10 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_pg_input(
                 for j_s, j_v in T.Parallel(block_S, block_DV):
                     v_fragment[j_s, j_v] *= g_rev_exp_shared[j_s]
                     vn_shared[j_s, j_v] = v_fragment[j_s, j_v]
+
+                for j_s, j_t in T.Parallel(block_S, block_S):
+                    pg_fragment[j_s, j_t] = pg[bb, left + j_s, bh, j_t]
+                T.copy(pg_fragment, pg_shared)
 
                 T.tcgen05_gemm(
                     q_shared,
