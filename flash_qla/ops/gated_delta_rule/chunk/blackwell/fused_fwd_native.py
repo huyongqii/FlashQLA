@@ -1768,6 +1768,8 @@ def fused_gdr_fwd(
                 pg_dtype=pg.dtype,
             )
             tilelang_precompute_pg_kernel(q, k, g, pg, num_chunks)
+            if os.environ.get("FLASHQLA_BLACKWELL_SMALL_HV_SYNC_PG", "") == "1":
+                torch.cuda.synchronize()
             tilelang_fused_chunk_gdr_fwd_kernel = (
                 tilelang_fused_chunk_gdr_fwd_blackwell_pg_input(
                     H,
