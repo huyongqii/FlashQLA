@@ -1717,19 +1717,20 @@ def fused_gdr_fwd(
     _, _, H, V = v.shape
     scale = scale or K ** (-0.5)
     fwd_experiment = os.environ.get("FLASHQLA_BLACKWELL_FWD_EXPERIMENT", "").lower()
+    allow_varlen_experiment = fwd_experiment in ("hopper_pipeline", "hopper_port")
 
     fallback_reasons = []
     if os.environ.get("FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE", "") != "1":
         fallback_reasons.append("native_fwd_disabled")
     if output_h:
         fallback_reasons.append("output_h")
-    if cu_seqlens is not None:
+    if cu_seqlens is not None and not allow_varlen_experiment:
         fallback_reasons.append("varlen")
-    if cp_seq_map is not None:
+    if cp_seq_map is not None and not allow_varlen_experiment:
         fallback_reasons.append("cp_seq_map")
-    if raw_cu_seqlens is not None:
+    if raw_cu_seqlens is not None and not allow_varlen_experiment:
         fallback_reasons.append("raw_cu_seqlens")
-    if num_tokens % chunk_size != 0:
+    if num_tokens % chunk_size != 0 and not allow_varlen_experiment:
         fallback_reasons.append("ragged_tokens")
     if (
         os.environ.get("FLASHQLA_BLACKWELL_PRETRANSFORM_A", "1") != "1"
