@@ -134,6 +134,9 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
             g_exp_shared = T.alloc_shared(
                 (block_S), dtype=accum_dtype, scope="shared"
             )
+            g_inv_exp_shared = T.alloc_shared(
+                (block_S), dtype=accum_dtype, scope="shared"
+            )
             g_rev_exp_shared = T.alloc_shared(
                 (block_S), dtype=accum_dtype, scope="shared"
             )
@@ -188,12 +191,13 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
 
                 for j_s in T.Parallel(block_S):
                     g_exp_shared[j_s] = T.exp2(g_shared[j_s] * 1.442695)
+                    g_inv_exp_shared[j_s] = 1.0 / g_exp_shared[j_s]
                 if use_bar_load:
                     T.barrier_arrive(bar_load)
                     T.barrier_wait(bar_load, i_s % 2)
                 for j_s in T.Parallel(block_S):
                     g_rev_exp_shared[j_s] = (
-                        g_exp_shared[block_S - 1] / g_exp_shared[j_s]
+                        g_exp_shared[block_S - 1] * g_inv_exp_shared[j_s]
                     )
 
                 # h_shared holds the previous recurrent state for this chunk.
@@ -263,7 +267,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                 for j_s, j_t in T.Parallel(block_S, block_S):
                     if j_s >= j_t:
                         p_fragment[j_s, j_t] *= (
-                            scale * g_exp_shared[j_s] / g_exp_shared[j_t]
+                            scale * g_exp_shared[j_s] * g_inv_exp_shared[j_t]
                         )
                     else:
                         p_fragment[j_s, j_t] = 0
