@@ -208,6 +208,8 @@ ENV_TO_CLEAR = (
     "FLASHQLA_BLACKWELL_PRECOMPUTE_P",
     "FLASHQLA_BLACKWELL_PRETRANSFORM_A",
     "FLASHQLA_BLACKWELL_SMALL_HV_RECOMPUTE_P",
+    "FLASHQLA_BLACKWELL_SMALL_HV_PG_DTYPE",
+    "FLASHQLA_BLACKWELL_SMALL_HV_SYNC_PG",
     "FLASHQLA_CORRECTNESS_REPEATS",
 )
 
@@ -327,7 +329,14 @@ def _error_tail(text: str, max_lines: int = 12) -> str:
         for line in text.splitlines()
         if line.strip()
         and (
-            "Traceback" in line
+            line.startswith("Shape:")
+            or "fwd correctness repeat:" in line
+            or line.startswith("s_qla:")
+            or line.startswith("o_qla:")
+            or "max_idx=" in line
+            or "top_heads=" in line
+            or "top_chunks=" in line
+            or "Traceback" in line
             or "Error" in line
             or "ERROR" in line
             or "Exception" in line
@@ -339,6 +348,32 @@ def _error_tail(text: str, max_lines: int = 12) -> str:
     ]
     tail = interesting[-max_lines:]
     return " | ".join(tail)
+
+
+def _make_filtered_settings(base_set: str, seqlens: list[int], log_dir: Path) -> tuple[str, Path]:
+    source = Path("tests/settings") / f"{base_set}.csv"
+    if not source.exists():
+        raise FileNotFoundError(f"Missing settings file: {source}")
+
+    with source.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        rows = [row for row in reader if int(row["num_tokens"]) in seqlens]
+        fieldnames = reader.fieldnames
+
+    if not rows:
+        raise ValueError(f"No rows in {source} match --seqlens={seqlens}")
+    if fieldnames is None:
+        raise ValueError(f"Settings file has no header: {source}")
+
+    name = f"_blackwell_policy_{os.getpid()}_{'_'.join(map(str, seqlens))}"
+    target = Path("tests/settings") / f"{name}.csv"
+    with target.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    (log_dir / f"{name}.csv").write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
+    return name, target
 
 
 def _make_env(policy: str, correctness_repeats: int | None) -> dict[str, str]:
@@ -547,6 +582,15 @@ def main() -> int:
         ),
     )
     parser.add_argument("--set", default="profile")
+    parser.add_argument(
+        "--seqlens",
+        default="",
+        help=(
+            "Optional comma-separated num_tokens filter for the selected settings "
+            "file, e.g. 4096 or 4096,8192. A temporary filtered settings file is "
+            "created under tests/settings and copied to the log directory."
+        ),
+    )
     parser.add_argument("--timeout", type=float, default=300.0)
     parser.add_argument("--correctness-repeats", type=int, default=1000)
     parser.add_argument("--out", default="blackwell_policy.csv")
@@ -568,27 +612,35 @@ def main() -> int:
 
     log_dir = Path(args.log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
+    filtered_settings_path: Path | None = None
+    if args.seqlens:
+        seqlens = [int(item) for item in _split_csv(args.seqlens)]
+        args.set, filtered_settings_path = _make_filtered_settings(args.set, seqlens, log_dir)
 
-    rows: list[RunResult] = []
-    for policy in selected_policies:
-        for shape in selected_shapes:
-            nkh, nvh = SHAPES[shape]
-            rows.extend(
-                _run_one(
-                    policy=policy,
-                    shape=shape,
-                    nkh=nkh,
-                    nvh=nvh,
-                    args=args,
-                    log_dir=log_dir,
+    try:
+        rows: list[RunResult] = []
+        for policy in selected_policies:
+            for shape in selected_shapes:
+                nkh, nvh = SHAPES[shape]
+                rows.extend(
+                    _run_one(
+                        policy=policy,
+                        shape=shape,
+                        nkh=nkh,
+                        nvh=nvh,
+                        args=args,
+                        log_dir=log_dir,
+                    )
                 )
-            )
 
-    out_path = Path(args.out)
-    _write_csv(out_path, rows)
-    _print_summary(rows)
-    print(f"\nwrote {out_path}", flush=True)
-    return 1 if any(row.status != "ok" for row in rows) else 0
+        out_path = Path(args.out)
+        _write_csv(out_path, rows)
+        _print_summary(rows)
+        print(f"\nwrote {out_path}", flush=True)
+        return 1 if any(row.status != "ok" for row in rows) else 0
+    finally:
+        if filtered_settings_path is not None:
+            filtered_settings_path.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
