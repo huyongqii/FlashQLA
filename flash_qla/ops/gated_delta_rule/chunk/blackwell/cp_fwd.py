@@ -1,6 +1,8 @@
 # Copyright (c) 2026 The Qwen team, Alibaba Group.
 # Licensed under The MIT License [see LICENSE for details]
 
+import os
+
 import torch
 import tilelang
 import tilelang.language as T
@@ -312,13 +314,15 @@ def correct_initial_states(
             cp_h0,
         )
 
-    # Keep the first CP segment of each raw sequence exact. On Blackwell this
-    # also avoids any ambiguity in the TileLang correction kernel's initial
-    # state writeback, which directly affects early-token outputs.
-    raw_starts = seq_map_r2c[:-1].to(torch.long)
-    if use_raw_h0:
-        cp_h0.index_copy_(0, raw_starts, raw_h0)
-    else:
-        cp_h0.index_fill_(0, raw_starts, 0)
+    if os.environ.get("FLASHQLA_BLACKWELL_CP_SKIP_START_FIX", "") != "1":
+        # Keep the first CP segment of each raw sequence exact. This is
+        # intentionally an opt-out guard while the Blackwell CP correction path
+        # is being tuned; the TileLang kernel already writes these rows, but
+        # this post-fix has protected earlier correctness work.
+        raw_starts = seq_map_r2c[:-1].to(torch.long)
+        if use_raw_h0:
+            cp_h0.index_copy_(0, raw_starts, raw_h0)
+        else:
+            cp_h0.index_fill_(0, raw_starts, 0)
 
     return cp_h0
