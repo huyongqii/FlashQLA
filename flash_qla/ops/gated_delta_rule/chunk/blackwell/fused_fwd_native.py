@@ -183,6 +183,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
     use_bar_o,
     use_bar_h_scaled,
     use_precomputed_p,
+    keep_precomputed_p_gemm,
     num_threads=128,
     block_DV=64,
     tmem_width=128,
@@ -360,6 +361,16 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                 # by multiple value heads; the optional precompute path avoids
                 # recomputing it once per (head, DV block).
                 if use_precomputed_p:
+                    if keep_precomputed_p_gemm:
+                        T.tcgen05_gemm(
+                            q_shared,
+                            k_shared,
+                            p_tmem,
+                            transpose_B=True,
+                            clear_accum=True,
+                            mbar=mbar_p[mbar_slot],
+                        )
+                        T.mbarrier_wait_parity(mbar_p[mbar_slot], mbar_phase)
                     T.copy(p[bb, left:right, bhg, 0:block_S], p_fragment)
                 else:
                     T.tcgen05_gemm(
@@ -517,8 +528,15 @@ def fused_gdr_fwd(
     )
     h = torch.empty((batch_size, 0, H, K, V), dtype=k.dtype, device=k.device)
     o = torch.empty_like(v)
-    use_precomputed_p = os.environ.get("FLASHQLA_BLACKWELL_PRECOMPUTE_P", "") == "1"
-    if use_precomputed_p:
+    precompute_p = os.environ.get("FLASHQLA_BLACKWELL_PRECOMPUTE_P", "") == "1"
+    use_precomputed_p = (
+        precompute_p
+        and os.environ.get("FLASHQLA_BLACKWELL_USE_PRECOMPUTED_P", "1") != "0"
+    )
+    keep_precomputed_p_gemm = (
+        os.environ.get("FLASHQLA_BLACKWELL_PRECOMPUTED_P_KEEP_GEMM", "") == "1"
+    )
+    if precompute_p:
         p = torch.empty(
             (batch_size, num_tokens, Hg, chunk_size),
             dtype=torch.float32,
@@ -596,6 +614,7 @@ def fused_gdr_fwd(
         use_bar_o="o" in sync_barriers,
         use_bar_h_scaled="hscale" in sync_barriers,
         use_precomputed_p=use_precomputed_p,
+        keep_precomputed_p_gemm=keep_precomputed_p_gemm,
         num_threads=num_threads,
         block_DV=block_DV,
         tmem_width=tmem_width,
