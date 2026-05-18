@@ -26,86 +26,6 @@ if is_blackwell(_cc):
 from .cp_context import intra_card_cp_preprocess
 
 
-def _blackwell_segment_chunks() -> int:
-    value = os.environ.get("FLASHQLA_BLACKWELL_SEGMENT_CHUNKS", "").strip()
-    if not value:
-        return 0
-    segment_chunks = int(value)
-    if segment_chunks < 1:
-        raise ValueError(
-            "FLASHQLA_BLACKWELL_SEGMENT_CHUNKS must be a positive integer, "
-            f"got {segment_chunks}"
-        )
-    return segment_chunks
-
-
-def _blackwell_segment_preprocess(
-    *,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    a_raw: torch.Tensor,
-    g: torch.Tensor,
-    beta: torch.Tensor,
-    initial_state: torch.Tensor | None,
-    segment_chunks: int,
-    chunk_size: int,
-):
-    from .blackwell import correct_initial_states
-
-    batch_size, num_tokens, _, _ = k.shape
-    _, _, H, _ = v.shape
-    if batch_size != 1:
-        raise NotImplementedError(
-            "FLASHQLA_BLACKWELL_SEGMENT_CHUNKS currently supports batch_size=1."
-        )
-    segment_tokens = segment_chunks * chunk_size
-    if num_tokens % segment_tokens != 0:
-        raise ValueError(
-            "FLASHQLA_BLACKWELL_SEGMENT_CHUNKS requires num_tokens to be "
-            f"divisible by segment_chunks * chunk_size, got num_tokens={num_tokens}, "
-            f"segment_chunks={segment_chunks}, chunk_size={chunk_size}."
-        )
-
-    num_segments = num_tokens // segment_tokens
-    seqlen_dtype = torch.int32
-    device = k.device
-    cu_segments = (
-        torch.arange(num_segments + 1, dtype=seqlen_dtype, device=device)
-        * segment_tokens
-    )
-    raw_cu_seqlens = torch.tensor([0, num_tokens], dtype=seqlen_dtype, device=device)
-    cp_seq_map = torch.zeros((num_segments,), dtype=seqlen_dtype, device=device)
-    seq_map_r2c = torch.tensor([0, num_segments], dtype=seqlen_dtype, device=device)
-    num_warmup_chunks = torch.full(
-        (num_segments, H),
-        segment_chunks,
-        dtype=seqlen_dtype,
-        device=device,
-    )
-    fallback_mask = torch.ones((num_segments, H), dtype=torch.bool, device=device)
-
-    _, ht, mt = fused_gdr_h(
-        k=k,
-        v=v,
-        a=a_raw,
-        g=g,
-        b=beta,
-        initial_state=None,
-        output_final_state=True,
-        output_h=False,
-        cu_seqlens=cu_segments,
-        num_warmup_chunks=num_warmup_chunks,
-    )
-    segment_h0 = correct_initial_states(
-        raw_h0=initial_state,
-        ht_buffer=ht,
-        mt_buffer=mt,
-        fallback_mask=fallback_mask,
-        seq_map_r2c=seq_map_r2c,
-    )
-    return segment_h0, cu_segments, cp_seq_map, raw_cu_seqlens
-
-
 def chunk_gated_delta_rule_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -123,32 +43,12 @@ def chunk_gated_delta_rule_fwd(
     Hg, H = k.shape[-2], v.shape[-2]
     use_blackwell_native_fwd = False
     use_blackwell_cp = False
-    blackwell_segment_chunks = 0
-    use_blackwell_segment = False
     if is_blackwell(_cc):
         use_blackwell_native_fwd, _ = should_use_native_fwd(H, Hg)
-        blackwell_segment_chunks = _blackwell_segment_chunks()
-        if blackwell_segment_chunks > 0:
-            if not use_blackwell_native_fwd:
-                raise NotImplementedError(
-                    "FLASHQLA_BLACKWELL_SEGMENT_CHUNKS requires the native "
-                    "Blackwell forward policy."
-                )
-            if cu_seqlens is not None or output_h:
-                raise NotImplementedError(
-                    "FLASHQLA_BLACKWELL_SEGMENT_CHUNKS currently supports only "
-                    "fixed-length forward with output_h=False."
-                )
-            use_blackwell_segment = True
         blackwell_cp_requested = (
             os.environ.get("FLASHQLA_BLACKWELL_CP", "") == "1"
             or os.environ.get("FLASHQLA_BLACKWELL_CP_EXACT", "") == "1"
         )
-        if use_blackwell_segment and blackwell_cp_requested:
-            raise NotImplementedError(
-                "FLASHQLA_BLACKWELL_SEGMENT_CHUNKS cannot be combined with "
-                "FLASHQLA_BLACKWELL_CP or FLASHQLA_BLACKWELL_CP_EXACT."
-            )
         use_blackwell_cp = auto_cp and use_blackwell_native_fwd and blackwell_cp_requested
         if use_blackwell_cp and cu_seqlens is not None:
             raise NotImplementedError(
@@ -166,7 +66,7 @@ def chunk_gated_delta_rule_fwd(
                 )
             if (k.shape[1] + 63) // 64 < min_cp_chunks:
                 use_blackwell_cp = False
-        if auto_cp and not blackwell_cp_requested and not use_blackwell_segment:
+        if auto_cp and not blackwell_cp_requested:
             raise NotImplementedError(
                 "Blackwell native intra-card CP is not implemented yet. Hopper "
                 "fallback is disabled on Blackwell; rerun with --no-cp or enable "
@@ -209,27 +109,6 @@ def chunk_gated_delta_rule_fwd(
                 g=g if pretransform_a else None,
                 cu_seqlens=None,
             )
-    elif use_blackwell_segment:
-        from .blackwell import kkt_solve_raw_and_transformed
-
-        if not pretransform_a:
-            raise NotImplementedError(
-                "FLASHQLA_BLACKWELL_SEGMENT_CHUNKS requires "
-                "FLASHQLA_BLACKWELL_PRETRANSFORM_A=1."
-            )
-        A_raw, A = kkt_solve_raw_and_transformed(k=k, b=beta, g=g)
-        initial_state, cu_seqlens, cp_seq_map, raw_cu_seqlens = (
-            _blackwell_segment_preprocess(
-                k=k,
-                v=v,
-                a_raw=A_raw,
-                g=g,
-                beta=beta,
-                initial_state=initial_state,
-                segment_chunks=blackwell_segment_chunks,
-                chunk_size=64,
-            )
-        )
     else:
         kkt_kwargs = {
             "k": k,
@@ -239,7 +118,7 @@ def chunk_gated_delta_rule_fwd(
         if pretransform_a:
             kkt_kwargs["g"] = g
         A = kkt_solve(**kkt_kwargs)
-    if auto_cp and not use_blackwell_cp and not use_blackwell_segment:
+    if auto_cp and not use_blackwell_cp:
         initial_state, cu_seqlens, cp_seq_map, raw_cu_seqlens = (
             intra_card_cp_preprocess(
                 k=k,
@@ -251,7 +130,7 @@ def chunk_gated_delta_rule_fwd(
                 raw_cu_seqlens=cu_seqlens,
             )
         )
-    elif not use_blackwell_cp and not use_blackwell_segment:
+    elif not use_blackwell_cp:
         cp_seq_map = None
         raw_cu_seqlens = None
     fwd_kwargs = {

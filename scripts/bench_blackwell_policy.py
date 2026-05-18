@@ -39,6 +39,9 @@ SHAPE_GROUPS = {
 
 
 POLICIES = {
+    'hopper_compat': {
+        'FLASHQLA_FORCE_ARCH': 'sm90',
+    },
     'auto_256_lh': {
         'FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE': '1',
         'FLASHQLA_BLACKWELL_NATIVE': '1',
@@ -84,16 +87,6 @@ POLICIES = {
         'FLASHQLA_BLACKWELL_FWD_THREADS': '256',
         'FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS': 'load,h,o',
     },
-    'qwen397_native_segment_s8': {
-        'FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE': '1',
-        'FLASHQLA_BLACKWELL_NATIVE': '1',
-        'FLASHQLA_BLACKWELL_NATIVE_KERNELS': 'fwd,kkt',
-        'FLASHQLA_BLACKWELL_FWD_POLICY': 'native',
-        'FLASHQLA_BLACKWELL_BLOCK_DV': '64',
-        'FLASHQLA_BLACKWELL_FWD_THREADS': '256',
-        'FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS': 'load,h,o',
-        'FLASHQLA_BLACKWELL_SEGMENT_CHUNKS': '8',
-    },
     'qwen397_native_cp': {
         'FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE': '1',
         'FLASHQLA_BLACKWELL_NATIVE': '1',
@@ -103,22 +96,6 @@ POLICIES = {
         'FLASHQLA_BLACKWELL_CP_DUAL_A': '1',
         'FLASHQLA_BLACKWELL_CP_SUMMARY_DTYPE': 'bf16',
         'FLASHQLA_BLACKWELL_PREPARE_H_TCGEN05': 'x',
-        'FLASHQLA_CP_MAX_LOCAL_CHUNKS': '32',
-        'FLASHQLA_CP_MIN_CHUNKS': '512',
-        'FLASHQLA_CP_WARMUP_THRESHOLD': '-1.0',
-        'FLASHQLA_BLACKWELL_FWD_THREADS': '256',
-        'FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS': 'load,h,o',
-    },
-    'qwen397_native_cp_pcache': {
-        'FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE': '1',
-        'FLASHQLA_BLACKWELL_NATIVE': '1',
-        'FLASHQLA_BLACKWELL_NATIVE_KERNELS': 'fwd,kkt',
-        'FLASHQLA_BLACKWELL_FWD_POLICY': 'native',
-        'FLASHQLA_BLACKWELL_CP': '1',
-        'FLASHQLA_BLACKWELL_CP_DUAL_A': '1',
-        'FLASHQLA_BLACKWELL_CP_SUMMARY_DTYPE': 'bf16',
-        'FLASHQLA_BLACKWELL_PREPARE_H_TCGEN05': 'x',
-        'FLASHQLA_BLACKWELL_GDR_PRECOMPUTE_P': '1',
         'FLASHQLA_CP_MAX_LOCAL_CHUNKS': '32',
         'FLASHQLA_CP_MIN_CHUNKS': '512',
         'FLASHQLA_CP_WARMUP_THRESHOLD': '-1.0',
@@ -393,6 +370,8 @@ POLICIES = {
 }
 
 ENV_TO_CLEAR = (
+    "FLASHQLA_FORCE_ARCH",
+    "FLASHQLA_SUPPRESS_BLACKWELL_WARNING",
     "FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE",
     "FLASHQLA_BLACKWELL_NATIVE",
     "FLASHQLA_BLACKWELL_NATIVE_KERNELS",
@@ -412,7 +391,6 @@ ENV_TO_CLEAR = (
     "FLASHQLA_BLACKWELL_CP_START_FIX_TL",
     "FLASHQLA_BLACKWELL_PREPARE_H_V2",
     "FLASHQLA_BLACKWELL_PREPARE_H_TCGEN05",
-    "FLASHQLA_BLACKWELL_GDR_PRECOMPUTE_P",
     "FLASHQLA_CP_EXACT",
     "FLASHQLA_CP_WARMUP_THRESHOLD",
     "FLASHQLA_CP_CORRECT_H0_TORCH",
@@ -422,7 +400,6 @@ ENV_TO_CLEAR = (
     "FLASHQLA_BLACKWELL_FWD_MAX_ITERS",
     "FLASHQLA_BLACKWELL_KKT_EXPERIMENT",
     "FLASHQLA_BLACKWELL_PRETRANSFORM_A",
-    "FLASHQLA_BLACKWELL_SEGMENT_CHUNKS",
     "FLASHQLA_CORRECTNESS_REPEATS",
 )
 
@@ -1093,6 +1070,11 @@ def main() -> int:
         help=f"Comma-separated policies. Available: {','.join(sorted(POLICIES))}",
     )
     parser.add_argument(
+        "--with-hopper",
+        action="store_true",
+        help="Also run the original Hopper-compatible implementation as hopper_compat.",
+    )
+    parser.add_argument(
         "--shapes",
         default="qwen397",
         help=(
@@ -1135,6 +1117,8 @@ def main() -> int:
     args = parser.parse_args()
 
     selected_policies = _split_csv(args.policies)
+    if args.with_hopper and "hopper_compat" not in selected_policies:
+        selected_policies.append("hopper_compat")
     selected_shapes = _expand_shapes(_split_csv(args.shapes))
     unknown_policies = [item for item in selected_policies if item not in POLICIES]
     unknown_shapes = [item for item in selected_shapes if item not in SHAPES]

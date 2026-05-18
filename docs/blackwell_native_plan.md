@@ -200,13 +200,12 @@ worse for small-head Qwen397 shapes. Keep it as a policy comparison, but do not
 treat it as the main branch. The main branch should now move to an affine
 state-prefix design that increases chunk-level parallelism for TP2/TP4/TP8.
 
-The first isolated experiment for that direction is
-`FLASHQLA_BLACKWELL_SEGMENT_CHUNKS=<N>`. It reuses the Hopper-compatible
-`prepare_h`/`mt` affine summary to compute exact segment initial states, then
-reshapes the fixed-length sequence into a larger batch and runs the stable
-Blackwell AG kernel per segment. This is not the final production design because
-the summary/prefix work still uses the compatibility path, but it cleanly tests
-whether adding chunk-axis parallelism fixes the B300 small-TP bottleneck.
+An isolated segment-prefix experiment confirmed the diagnosis: splitting fixed
+sequences into segment-sized forward invocations greatly reduced the native GDR
+kernel time for small head counts, but the extra summary/correction/tail overhead
+made end-to-end latency worse or only marginally better. The production path
+should therefore integrate the affine state-prefix idea into the native CP flow
+instead of keeping a separate segment-dispatch experiment.
 
 For dispatch debugging:
 
