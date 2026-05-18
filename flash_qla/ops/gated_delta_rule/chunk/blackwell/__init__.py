@@ -36,10 +36,16 @@ if _USE_EXPERIMENTAL_NATIVE:
     else:
         _native_kkt_solve = None
     from .prepare_h import fused_gdr_h as _native_fused_gdr_h
+    from .cp_fwd import (
+        correct_initial_states as _native_correct_initial_states,
+        get_warmup_chunks as _native_get_warmup_chunks,
+    )
 else:
     _native_fused_gdr_fwd = None
     _native_kkt_solve = None
     _native_fused_gdr_h = None
+    _native_correct_initial_states = None
+    _native_get_warmup_chunks = None
     _NATIVE_FWD_NAME = "none"
 
 
@@ -98,10 +104,16 @@ def fused_gdr_bwd(*args, **kwargs):
 
 
 def get_warmup_chunks(*args, **kwargs):
+    if _native_get_warmup_chunks is not None:
+        _debug_dispatch("get_warmup_chunks=native_cp")
+        return _native_get_warmup_chunks(*args, **kwargs)
     _unsupported("get_warmup_chunks")
 
 
 def correct_initial_states(*args, **kwargs):
+    if _native_correct_initial_states is not None:
+        _debug_dispatch("correct_initial_states=native_cp")
+        return _native_correct_initial_states(*args, **kwargs)
     _unsupported("correct_initial_states")
 
 

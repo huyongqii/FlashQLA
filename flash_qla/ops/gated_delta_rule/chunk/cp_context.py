@@ -12,8 +12,7 @@ from flash_qla.utils import tensor_cache, assert_supported, is_blackwell
 _cc = assert_supported()
 if is_blackwell(_cc):
     from .blackwell.prepare_h import fused_gdr_h
-
-    get_warmup_chunks = correct_initial_states = None
+    from .blackwell.cp_fwd import correct_initial_states, get_warmup_chunks
 else:
     from .hopper import get_warmup_chunks, fused_gdr_h, correct_initial_states
 
@@ -138,10 +137,15 @@ def intra_card_cp_preprocess(
     device = k.device
 
     if is_blackwell(_cc):
-        if os.environ.get("FLASHQLA_BLACKWELL_CP_EXACT", "") != "1":
+        use_blackwell_cp = os.environ.get("FLASHQLA_BLACKWELL_CP", "") == "1"
+        use_blackwell_exact_cp = (
+            os.environ.get("FLASHQLA_BLACKWELL_CP_EXACT", "") == "1"
+        )
+        if not (use_blackwell_cp or use_blackwell_exact_cp):
             raise NotImplementedError(
                 "Blackwell native intra-card CP is experimental and must be "
-                "enabled explicitly with FLASHQLA_BLACKWELL_CP_EXACT=1."
+                "enabled explicitly with FLASHQLA_BLACKWELL_CP=1 or "
+                "FLASHQLA_BLACKWELL_CP_EXACT=1."
             )
         if batch_size > 1:
             return raw_h0, raw_cu_seqlens, None, None
@@ -159,17 +163,19 @@ def intra_card_cp_preprocess(
         if not use_cp:
             return raw_h0, None, None, None
 
-        segment_chunks = (cp_cu_seqlens[1:] - cp_cu_seqlens[:-1]) // chunk_size
-        num_warmup_chunks = torch.where(
-            ht_mask[:, None],
-            torch.zeros(
-                (segment_chunks.numel(), num_v_heads),
-                dtype=cp_cu_seqlens.dtype,
-                device=device,
-            ),
-            segment_chunks[:, None].expand(-1, num_v_heads),
-        ).contiguous()
-        fallback_mask = (~ht_mask)[:, None].expand(-1, num_v_heads).contiguous()
+        threshold_env = os.environ.get("FLASHQLA_CP_WARMUP_THRESHOLD", "").strip()
+        if threshold_env:
+            warmup_threshold = float(threshold_env)
+        if use_blackwell_exact_cp or os.environ.get("FLASHQLA_CP_EXACT", "") == "1":
+            warmup_threshold = float("-inf")
+
+        num_warmup_chunks, fallback_mask = get_warmup_chunks(
+            g=g,
+            cu_seqlens=cp_cu_seqlens,
+            ht_mask=ht_mask,
+            chunk_size=chunk_size,
+            threshold=warmup_threshold,
+        )
 
         _, ht, mt = fused_gdr_h(
             k=k,
@@ -183,13 +189,22 @@ def intra_card_cp_preprocess(
             cu_seqlens=cp_cu_seqlens,
             num_warmup_chunks=num_warmup_chunks,
         )
-        cp_h0 = _correct_initial_states_torch(
-            raw_h0=raw_h0,
-            ht_buffer=ht,
-            mt_buffer=mt,
-            fallback_mask=fallback_mask,
-            seq_map_r2c=seq_map_r2c,
-        )
+        if os.environ.get("FLASHQLA_CP_CORRECT_H0_TORCH", "") == "1":
+            cp_h0 = _correct_initial_states_torch(
+                raw_h0=raw_h0,
+                ht_buffer=ht,
+                mt_buffer=mt,
+                fallback_mask=fallback_mask,
+                seq_map_r2c=seq_map_r2c,
+            )
+        else:
+            cp_h0 = correct_initial_states(
+                raw_h0=raw_h0,
+                ht_buffer=ht,
+                mt_buffer=mt,
+                fallback_mask=fallback_mask,
+                seq_map_r2c=seq_map_r2c,
+            )
         return cp_h0, cp_cu_seqlens, seq_map_c2r, raw_cu_seqlens
 
     if batch_size > 1:

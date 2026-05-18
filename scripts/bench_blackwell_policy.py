@@ -84,6 +84,50 @@ POLICIES = {
         'FLASHQLA_BLACKWELL_FWD_THREADS': '256',
         'FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS': 'load,h,o',
     },
+    'qwen397_native_cp': {
+        'FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE': '1',
+        'FLASHQLA_BLACKWELL_NATIVE': '1',
+        'FLASHQLA_BLACKWELL_NATIVE_KERNELS': 'fwd,kkt',
+        'FLASHQLA_BLACKWELL_FWD_POLICY': 'native',
+        'FLASHQLA_BLACKWELL_CP': '1',
+        'FLASHQLA_CP_MAX_LOCAL_CHUNKS': '16',
+        'FLASHQLA_CP_WARMUP_THRESHOLD': '-10.0',
+        'FLASHQLA_BLACKWELL_FWD_THREADS': '256',
+        'FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS': 'load,h,o',
+    },
+    'qwen397_native_cp_s8': {
+        'FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE': '1',
+        'FLASHQLA_BLACKWELL_NATIVE': '1',
+        'FLASHQLA_BLACKWELL_NATIVE_KERNELS': 'fwd,kkt',
+        'FLASHQLA_BLACKWELL_FWD_POLICY': 'native',
+        'FLASHQLA_BLACKWELL_CP': '1',
+        'FLASHQLA_CP_MAX_LOCAL_CHUNKS': '8',
+        'FLASHQLA_CP_WARMUP_THRESHOLD': '-10.0',
+        'FLASHQLA_BLACKWELL_FWD_THREADS': '256',
+        'FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS': 'load,h,o',
+    },
+    'qwen397_native_cp_s32': {
+        'FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE': '1',
+        'FLASHQLA_BLACKWELL_NATIVE': '1',
+        'FLASHQLA_BLACKWELL_NATIVE_KERNELS': 'fwd,kkt',
+        'FLASHQLA_BLACKWELL_FWD_POLICY': 'native',
+        'FLASHQLA_BLACKWELL_CP': '1',
+        'FLASHQLA_CP_MAX_LOCAL_CHUNKS': '32',
+        'FLASHQLA_CP_WARMUP_THRESHOLD': '-10.0',
+        'FLASHQLA_BLACKWELL_FWD_THREADS': '256',
+        'FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS': 'load,h,o',
+    },
+    'qwen397_native_cp_s64': {
+        'FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE': '1',
+        'FLASHQLA_BLACKWELL_NATIVE': '1',
+        'FLASHQLA_BLACKWELL_NATIVE_KERNELS': 'fwd,kkt',
+        'FLASHQLA_BLACKWELL_FWD_POLICY': 'native',
+        'FLASHQLA_BLACKWELL_CP': '1',
+        'FLASHQLA_CP_MAX_LOCAL_CHUNKS': '64',
+        'FLASHQLA_CP_WARMUP_THRESHOLD': '-10.0',
+        'FLASHQLA_BLACKWELL_FWD_THREADS': '256',
+        'FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS': 'load,h,o',
+    },
     'qwen397_native_cp_exact': {
         'FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE': '1',
         'FLASHQLA_BLACKWELL_NATIVE': '1',
@@ -164,6 +208,7 @@ ENV_TO_CLEAR = (
     "FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS",
     "FLASHQLA_BLACKWELL_FWD_POLICY",
     "FLASHQLA_AUTOCP",
+    "FLASHQLA_BLACKWELL_CP",
     "FLASHQLA_BLACKWELL_CP_EXACT",
     "FLASHQLA_CP_EXACT",
     "FLASHQLA_CP_WARMUP_THRESHOLD",
@@ -182,7 +227,7 @@ TOTAL_RE = re.compile(r"^total\s+(?P<fla>[0-9.]+|NaN)\s+(?P<qla>[0-9.]+|NaN)\s*$
 SPEEDUP_RE = re.compile(r"Speed up:\s+(?P<speedup>[0-9.]+)x")
 KERNEL_RE = re.compile(r"'(?P<kernel>tilelang_[^']+_kernel)'")
 PROFILE_RE = re.compile(
-    r"^\[fwd\]\s+(?P<name>csum|solve|wu|gdr|o)\s+"
+    r"^\[fwd\]\s+(?P<name>csum|solve|wu|gdr|o|cp-w|cp-h|cp-c)\s+"
     r"(?P<fla>[0-9.]+|NaN)\s+(?P<qla>[0-9.]+|NaN)\s*$"
 )
 
@@ -208,6 +253,12 @@ class RunResult:
     qla_gdr_ms: float | None
     fla_o_ms: float | None
     qla_o_ms: float | None
+    fla_cp_w_ms: float | None
+    qla_cp_w_ms: float | None
+    fla_cp_h_ms: float | None
+    qla_cp_h_ms: float | None
+    fla_cp_c_ms: float | None
+    qla_cp_c_ms: float | None
     status: str
     returncode: int | None
     error_tail: str
@@ -265,7 +316,8 @@ def _parse_output(text: str) -> tuple[list[dict[str, float | int | None]], list[
 
         profile_match = PROFILE_RE.match(line.strip())
         if profile_match:
-            pending_profile[profile_match.group("name")] = (
+            name = profile_match.group("name").replace("-", "_")
+            pending_profile[name] = (
                 _parse_float(profile_match.group("fla")),
                 _parse_float(profile_match.group("qla")),
             )
@@ -280,7 +332,7 @@ def _parse_output(text: str) -> tuple[list[dict[str, float | int | None]], list[
                 "qla_ms": pending_total[1],
                 "speedup": float(speedup_match.group("speedup")),
             }
-            for name in ("csum", "solve", "wu", "gdr", "o"):
+            for name in ("csum", "solve", "wu", "gdr", "o", "cp_w", "cp_h", "cp_c"):
                 values = pending_profile.get(name, (None, None))
                 row[f"fla_{name}_ms"] = values[0]
                 row[f"qla_{name}_ms"] = values[1]
@@ -400,7 +452,10 @@ def _run_one(
         "--nvh",
         str(nvh),
     ]
-    force_cp = env.get("FLASHQLA_BLACKWELL_CP_EXACT") == "1"
+    force_cp = (
+        env.get("FLASHQLA_BLACKWELL_CP") == "1"
+        or env.get("FLASHQLA_BLACKWELL_CP_EXACT") == "1"
+    )
     if args.no_cp and not force_cp:
         cmd.append("--no-cp")
     if args.no_h0:
@@ -469,6 +524,12 @@ def _run_one(
                 qla_gdr_ms=None,
                 fla_o_ms=None,
                 qla_o_ms=None,
+                fla_cp_w_ms=None,
+                qla_cp_w_ms=None,
+                fla_cp_h_ms=None,
+                qla_cp_h_ms=None,
+                fla_cp_c_ms=None,
+                qla_cp_c_ms=None,
                 status=status,
                 returncode=returncode,
                 error_tail=error_tail,
@@ -498,6 +559,12 @@ def _run_one(
             qla_gdr_ms=row["qla_gdr_ms"],
             fla_o_ms=row["fla_o_ms"],
             qla_o_ms=row["qla_o_ms"],
+            fla_cp_w_ms=row["fla_cp_w_ms"],
+            qla_cp_w_ms=row["qla_cp_w_ms"],
+            fla_cp_h_ms=row["fla_cp_h_ms"],
+            qla_cp_h_ms=row["qla_cp_h_ms"],
+            fla_cp_c_ms=row["fla_cp_c_ms"],
+            qla_cp_c_ms=row["qla_cp_c_ms"],
             status=status,
             returncode=returncode,
             error_tail=error_tail,
@@ -535,6 +602,12 @@ def _write_csv(path: Path, rows: list[RunResult]) -> None:
         "qla_gdr_ms",
         "fla_o_ms",
         "qla_o_ms",
+        "fla_cp_w_ms",
+        "qla_cp_w_ms",
+        "fla_cp_h_ms",
+        "qla_cp_h_ms",
+        "fla_cp_c_ms",
+        "qla_cp_c_ms",
         "status",
         "returncode",
         "error_tail",
@@ -649,6 +722,7 @@ def main() -> int:
             policy
             for policy in selected_policies
             if "fwd" in POLICIES[policy].get("FLASHQLA_BLACKWELL_NATIVE_KERNELS", "")
+            and POLICIES[policy].get("FLASHQLA_BLACKWELL_CP") != "1"
             and POLICIES[policy].get("FLASHQLA_BLACKWELL_CP_EXACT") != "1"
         ]
         if native_fwd_cp:

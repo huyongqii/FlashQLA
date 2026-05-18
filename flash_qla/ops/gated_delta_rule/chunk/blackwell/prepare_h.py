@@ -8,10 +8,10 @@ import tilelang.language as T
 from flash_qla.utils import prepare_chunk_offsets
 
 
-# Blackwell exact-CP state summary kernel. This keeps the proven FlashQLA/Hopper
+# Blackwell CP state summary kernel. This keeps the proven FlashQLA/Hopper
 # high-level state-summary dataflow, but lives in the Blackwell namespace and is
-# only used by the explicit FLASHQLA_BLACKWELL_CP_EXACT path. The performance
-# follow-up is to replace the large T.gemm sites here with tuned TCGEN05/TMEM.
+# only used by explicit FLASHQLA_BLACKWELL_CP paths. The performance follow-up
+# is to replace the large T.gemm sites here with tuned TCGEN05/TMEM.
 
 
 @tilelang.jit(
