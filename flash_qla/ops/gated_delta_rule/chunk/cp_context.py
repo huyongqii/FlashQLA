@@ -149,6 +149,12 @@ def intra_card_cp_preprocess(
     if not use_cp:
         return raw_h0, raw_cu_seqlens, None, None
 
+    threshold_env = os.environ.get("FLASHQLA_CP_WARMUP_THRESHOLD", "").strip()
+    if threshold_env:
+        warmup_threshold = float(threshold_env)
+    if os.environ.get("FLASHQLA_CP_EXACT", "") == "1":
+        warmup_threshold = float("-inf")
+
     num_warmup_chunks, fallback_mask = get_warmup_chunks(
         g=g,
         cu_seqlens=cp_cu_seqlens,
@@ -168,12 +174,70 @@ def intra_card_cp_preprocess(
         cu_seqlens=cp_cu_seqlens,
         num_warmup_chunks=num_warmup_chunks,
     )  # [cp_batch_size, num_v_heads, k_head_dim, v_head_dim]
-    cp_h0 = correct_initial_states(
-        raw_h0=raw_h0,
-        ht_buffer=ht,
-        mt_buffer=mt,
-        fallback_mask=fallback_mask,
-        seq_map_r2c=seq_map_r2c,
-    )
+    if os.environ.get("FLASHQLA_CP_CORRECT_H0_TORCH", "") == "1":
+        cp_h0 = _correct_initial_states_torch(
+            raw_h0=raw_h0,
+            ht_buffer=ht,
+            mt_buffer=mt,
+            fallback_mask=fallback_mask,
+            seq_map_r2c=seq_map_r2c,
+        )
+    else:
+        cp_h0 = correct_initial_states(
+            raw_h0=raw_h0,
+            ht_buffer=ht,
+            mt_buffer=mt,
+            fallback_mask=fallback_mask,
+            seq_map_r2c=seq_map_r2c,
+        )
 
     return cp_h0, cp_cu_seqlens, seq_map_c2r, raw_cu_seqlens
+
+
+def _correct_initial_states_torch(
+    raw_h0: torch.Tensor | None,
+    ht_buffer: torch.Tensor,
+    mt_buffer: torch.Tensor,
+    fallback_mask: torch.Tensor,
+    seq_map_r2c: torch.Tensor,
+) -> torch.Tensor:
+    """Debug-only PyTorch reference for CP h0 correction.
+
+    This intentionally mirrors ``tilelang_correct_h0`` and is gated by
+    FLASHQLA_CP_CORRECT_H0_TORCH=1. It is useful on new architectures when we
+    need to separate CP math issues from TileLang codegen/synchronization bugs.
+    """
+
+    cp_batch_size, num_heads, k_head_dim, v_head_dim = ht_buffer.shape
+    raw_batch_size = seq_map_r2c.numel() - 1
+    res_dtype = torch.float32 if raw_h0 is None else raw_h0.dtype
+    cp_h0 = torch.empty(
+        (cp_batch_size, num_heads, k_head_dim, v_head_dim),
+        dtype=res_dtype,
+        device=ht_buffer.device,
+    )
+
+    for raw_b in range(raw_batch_size):
+        start = int(seq_map_r2c[raw_b].item())
+        end = int(seq_map_r2c[raw_b + 1].item())
+        if raw_h0 is None:
+            state = torch.zeros(
+                (num_heads, k_head_dim, v_head_dim),
+                dtype=torch.float32,
+                device=ht_buffer.device,
+            )
+        else:
+            state = raw_h0[raw_b].to(torch.float32)
+        cp_h0[start] = state.to(res_dtype)
+
+        for cp_b in range(start, end - 1):
+            transformed = torch.matmul(
+                mt_buffer[cp_b].to(torch.float32),
+                state,
+            )
+            next_state = ht_buffer[cp_b].to(torch.float32)
+            use_transform = fallback_mask[cp_b].view(num_heads, 1, 1)
+            state = torch.where(use_transform, next_state + transformed, next_state)
+            cp_h0[cp_b + 1] = state.to(res_dtype)
+
+    return cp_h0
