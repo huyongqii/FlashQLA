@@ -312,4 +312,13 @@ def correct_initial_states(
             cp_h0,
         )
 
+    # Keep the first CP segment of each raw sequence exact. On Blackwell this
+    # also avoids any ambiguity in the TileLang correction kernel's initial
+    # state writeback, which directly affects early-token outputs.
+    raw_starts = seq_map_r2c[:-1].to(torch.long)
+    if use_raw_h0:
+        cp_h0[raw_starts].copy_(raw_h0)
+    else:
+        cp_h0[raw_starts].zero_()
+
     return cp_h0
