@@ -1,17 +1,12 @@
 # Copyright (c) 2026 The Qwen team, Alibaba Group.
 # Licensed under The MIT License [see LICENSE for details]
 
-import os
-
 import torch
 import tilelang
 import tilelang.language as T
 
 
-# Blackwell CP warmup/correction helpers. This keeps the FlashQLA high-level CP
-# dataflow local to the Blackwell namespace; the hot follow-up is to replace the
-# correct_h0 GEMM with a tuned TCGEN05/TMEM variant once the CP split policy is
-# validated on B200/B300.
+# Blackwell CP warmup/correction helpers.
 
 
 @tilelang.jit()
@@ -266,65 +261,6 @@ def tilelang_correct_h0(
     return tilelang_correct_h0_kernel
 
 
-@tilelang.jit()
-def tilelang_fix_start_h0(
-    H,
-    DK,
-    DV,
-    res_dtype,
-    seqlen_dtype,
-    use_raw_h0,
-    block_DV: int = 32,
-):
-    cp_batch_size = T.dynamic("cp_batch_size")
-    raw_batch_size = T.dynamic("raw_batch_size")
-
-    if use_raw_h0:
-
-        @T.prim_func
-        def tilelang_fix_start_h0_kernel(
-            raw_h0: T.Tensor([raw_batch_size, H, DK, DV], dtype=res_dtype),
-            seq_map_r2c: T.Tensor([raw_batch_size + 1], dtype=seqlen_dtype),
-            cp_h0: T.Tensor([cp_batch_size, H, DK, DV], dtype=res_dtype),
-        ):
-            with T.Kernel(
-                T.ceildiv(DV, block_DV) * H * raw_batch_size, threads=128
-            ) as (bbhv,):
-                bbh, bv = (
-                    bbhv // T.ceildiv(DV, block_DV),
-                    bbhv % T.ceildiv(DV, block_DV),
-                )
-                bb, bh = bbh // H, bbh % H
-                seq_start_idx = seq_map_r2c[bb]
-
-                for j_k, j_v in T.Parallel(DK, block_DV):
-                    cp_h0[seq_start_idx, bh, j_k, bv * block_DV + j_v] = raw_h0[
-                        bb, bh, j_k, bv * block_DV + j_v
-                    ]
-
-    else:
-
-        @T.prim_func
-        def tilelang_fix_start_h0_kernel(
-            seq_map_r2c: T.Tensor([raw_batch_size + 1], dtype=seqlen_dtype),
-            cp_h0: T.Tensor([cp_batch_size, H, DK, DV], dtype=res_dtype),
-        ):
-            with T.Kernel(
-                T.ceildiv(DV, block_DV) * H * raw_batch_size, threads=128
-            ) as (bbhv,):
-                bbh, bv = (
-                    bbhv // T.ceildiv(DV, block_DV),
-                    bbhv % T.ceildiv(DV, block_DV),
-                )
-                bb, bh = bbh // H, bbh % H
-                seq_start_idx = seq_map_r2c[bb]
-
-                for j_k, j_v in T.Parallel(DK, block_DV):
-                    cp_h0[seq_start_idx, bh, j_k, bv * block_DV + j_v] = 0.0
-
-    return tilelang_fix_start_h0_kernel
-
-
 def correct_initial_states(
     raw_h0: torch.Tensor
     | None,  # [raw_batch_size, num_v_heads, k_head_dim, v_head_dim]
@@ -383,27 +319,10 @@ def correct_initial_states(
             cp_h0,
         )
 
-    # Keep the first CP segment of each raw sequence exact. On Blackwell this
-    # also avoids any ambiguity in the TileLang correction kernel's initial
-    # state writeback, which directly affects early-token outputs.
-    if os.environ.get("FLASHQLA_BLACKWELL_CP_START_FIX_TL", "") == "1":
-        tilelang_fix_start_h0_kernel = tilelang_fix_start_h0(
-            H=num_heads,
-            DK=k_head_dim,
-            DV=v_head_dim,
-            res_dtype=res_dtype,
-            seqlen_dtype=seq_map_r2c.dtype,
-            use_raw_h0=use_raw_h0,
-        )
-        if use_raw_h0:
-            tilelang_fix_start_h0_kernel(raw_h0, seq_map_r2c, cp_h0)
-        else:
-            tilelang_fix_start_h0_kernel(seq_map_r2c, cp_h0)
+    raw_starts = seq_map_r2c[:-1].to(torch.long)
+    if use_raw_h0:
+        cp_h0.index_copy_(0, raw_starts, raw_h0)
     else:
-        raw_starts = seq_map_r2c[:-1].to(torch.long)
-        if use_raw_h0:
-            cp_h0.index_copy_(0, raw_starts, raw_h0)
-        else:
-            cp_h0.index_fill_(0, raw_starts, 0)
+        cp_h0.index_fill_(0, raw_starts, 0)
 
     return cp_h0

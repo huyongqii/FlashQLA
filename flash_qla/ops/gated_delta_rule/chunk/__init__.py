@@ -1,8 +1,6 @@
 # Copyright (c) 2026 The Qwen team, Alibaba Group.
 # Licensed under The MIT License [see LICENSE for details]
 
-import os
-
 import torch
 
 from flash_qla.utils import l2norm, assert_supported, is_blackwell
@@ -22,7 +20,6 @@ if is_blackwell(_cc):
         fused_gdr_h,
         kkt_solve,
     )
-    from .blackwell.policy import should_use_native_fwd
 from .cp_context import intra_card_cp_preprocess
 
 
@@ -40,102 +37,8 @@ def chunk_gated_delta_rule_fwd(
     auto_cp: bool = True,
 ):
     g = chunk_local_cumsum(g, chunk_size=64, cu_seqlens=cu_seqlens)
-    Hg, H = k.shape[-2], v.shape[-2]
-    use_blackwell_native_fwd = False
-    use_blackwell_cp = False
-    is_chunk_aligned_cu_seqlens = False
-    if is_blackwell(_cc):
-        use_blackwell_native_fwd, _ = should_use_native_fwd(H, Hg)
-        blackwell_cp_requested = (
-            os.environ.get("FLASHQLA_BLACKWELL_CP", "") == "1"
-            or os.environ.get("FLASHQLA_BLACKWELL_CP_EXACT", "") == "1"
-        )
-        use_blackwell_cp = auto_cp and use_blackwell_native_fwd and blackwell_cp_requested
-        if cu_seqlens is not None:
-            seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
-            is_valid_cu_seqlens = (
-                int(cu_seqlens[0].item()) == 0
-                and int(cu_seqlens[-1].item()) == k.shape[1]
-                and bool((seqlens > 0).all().item())
-            )
-            if use_blackwell_cp and not is_valid_cu_seqlens:
-                raise NotImplementedError(
-                    "Blackwell native CP currently supports only cu_seqlens "
-                    "that start at 0, end at the flattened token count, and "
-                    "contain non-empty sequences."
-                )
-            is_chunk_aligned_cu_seqlens = (
-                is_valid_cu_seqlens and bool((seqlens % 64 == 0).all().item())
-            )
-        if use_blackwell_cp and k.shape[0] > 1:
-            use_blackwell_cp = False
-        min_cp_chunks_env = os.environ.get("FLASHQLA_CP_MIN_CHUNKS", "").strip()
-        if use_blackwell_cp and min_cp_chunks_env:
-            min_cp_chunks = int(min_cp_chunks_env)
-            if min_cp_chunks < 1:
-                raise ValueError(
-                    "FLASHQLA_CP_MIN_CHUNKS must be a positive integer, "
-                    f"got {min_cp_chunks}"
-                )
-            if (k.shape[1] + 63) // 64 < min_cp_chunks:
-                use_blackwell_cp = False
-        if auto_cp and not blackwell_cp_requested:
-            raise NotImplementedError(
-                "Blackwell native intra-card CP is not implemented yet. Hopper "
-                "fallback is disabled on Blackwell; rerun with --no-cp or enable "
-                "FLASHQLA_BLACKWELL_CP=1."
-            )
-    pretransform_a = (
-        os.environ.get("FLASHQLA_BLACKWELL_PRETRANSFORM_A", "1") == "1"
-        and is_blackwell(_cc)
-        and use_blackwell_native_fwd
-        and not output_h
-    )
-    if use_blackwell_cp:
-        use_blackwell_dual_a = (
-            pretransform_a
-            and os.environ.get("FLASHQLA_BLACKWELL_CP_DUAL_A", "1") != "0"
-            and (cu_seqlens is None or is_chunk_aligned_cu_seqlens)
-        )
-        if use_blackwell_dual_a:
-            from .blackwell import kkt_solve_raw_and_transformed
-
-            A_for_cp, A = kkt_solve_raw_and_transformed(k=k, b=beta, g=g)
-        else:
-            A_for_cp = kkt_solve(k=k, b=beta, cu_seqlens=cu_seqlens)
-            A = (
-                kkt_solve(k=k, b=beta, g=g, cu_seqlens=cu_seqlens)
-                if pretransform_a
-                else None
-            )
-        initial_state, cu_seqlens, cp_seq_map, raw_cu_seqlens = (
-            intra_card_cp_preprocess(
-                k=k,
-                v=v,
-                a=A_for_cp,
-                g=g,
-                b=beta,
-                raw_h0=initial_state,
-                raw_cu_seqlens=cu_seqlens,
-            )
-        )
-        if A is None:
-            A = kkt_solve(
-                k=k,
-                b=beta,
-                g=g if pretransform_a else None,
-                cu_seqlens=cu_seqlens,
-            )
-    else:
-        kkt_kwargs = {
-            "k": k,
-            "b": beta,
-            "cu_seqlens": cu_seqlens,
-        }
-        if pretransform_a:
-            kkt_kwargs["g"] = g
-        A = kkt_solve(**kkt_kwargs)
-    if auto_cp and not use_blackwell_cp:
+    A = kkt_solve(k=k, b=beta, cu_seqlens=cu_seqlens)
+    if auto_cp:
         initial_state, cu_seqlens, cp_seq_map, raw_cu_seqlens = (
             intra_card_cp_preprocess(
                 k=k,
@@ -147,7 +50,7 @@ def chunk_gated_delta_rule_fwd(
                 raw_cu_seqlens=cu_seqlens,
             )
         )
-    elif not use_blackwell_cp:
+    else:
         cp_seq_map = None
         raw_cu_seqlens = None
     fwd_kwargs = {

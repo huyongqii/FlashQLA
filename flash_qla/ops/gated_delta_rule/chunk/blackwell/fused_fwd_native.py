@@ -7,16 +7,12 @@ import torch
 import tilelang
 import tilelang.language as T
 
-from flash_qla.ops.gated_delta_rule.chunk.blackwell.policy import should_use_native_fwd
-
 
 def _debug_enabled() -> bool:
     return os.environ.get("FLASHQLA_DEBUG_BLACKWELL_DISPATCH", "") == "1"
 
 
 _DEBUG_MESSAGES = set()
-_DEFAULT_SYNC_BARRIERS = frozenset(("load", "h", "o"))
-_VALID_SYNC_BARRIERS = frozenset(("load", "h", "o", "hscale"))
 
 
 def _debug(message: str):
@@ -28,75 +24,19 @@ def _debug(message: str):
         print(f"[FlashQLA Blackwell fwd native] {message}", flush=True)
 
 
-def _sync_barriers() -> set[str]:
-    value = os.environ.get("FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS")
-    if value is None:
-        return set(_DEFAULT_SYNC_BARRIERS)
-    value = value.strip().lower()
-    if value in ("", "none", "0", "off"):
-        return set()
-    if value in ("default", "safe", "all", "1", "on"):
-        return set(_DEFAULT_SYNC_BARRIERS)
-    aliases = {
-        "h_shared": "h",
-        "hshared": "h",
-        "h_scaled": "hscale",
-        "hscaled": "hscale",
-    }
-    barriers = set()
-    for item in value.split(","):
-        item = aliases.get(item.strip(), item.strip())
-        if item:
-            barriers.add(item)
-    unknown = barriers - _VALID_SYNC_BARRIERS
-    if unknown:
-        raise ValueError(
-            "Unknown FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS entries: "
-            f"{sorted(unknown)}. Valid entries are {sorted(_VALID_SYNC_BARRIERS)}"
-        )
-    return barriers
-
-
-def _tmem_width(block_DV: int) -> int:
-    value = os.environ.get("FLASHQLA_BLACKWELL_TMEM_WIDTH", "128").strip().lower()
-    if value in ("", "default", "128"):
-        width = 128
-    elif value in ("block", "block_dv", "exact"):
-        width = block_DV
-    else:
-        width = int(value)
-    if width < block_DV or width not in (block_DV, 128):
-        raise ValueError(
-            "FLASHQLA_BLACKWELL_TMEM_WIDTH must be 128 or one of "
-            f"block/block_dv/exact for the current native fwd path, got {value!r} "
-            f"with block_DV={block_DV}"
-        )
-    return width
-
-
 def _select_block_dv(real_batch_size: int, num_v_heads: int) -> int:
-    value = os.environ.get("FLASHQLA_BLACKWELL_BLOCK_DV")
-    if value:
-        return int(value)
-
     try:
         sm_count = torch.cuda.get_device_properties().multi_processor_count
     except Exception:
         sm_count = 148
-    ratio = float(os.environ.get("FLASHQLA_TARGET_CTA_RATIO", "0.7"))
+    ratio = 0.7
     target_num_ctas = max(1, int(sm_count * ratio))
     grid_size = real_batch_size * num_v_heads
-    min_block_dv = int(os.environ.get("FLASHQLA_BLACKWELL_MIN_BLOCK_DV", "64"))
-    if min_block_dv not in (32, 64, 128):
-        raise ValueError(
-            "FLASHQLA_BLACKWELL_MIN_BLOCK_DV must be 32, 64, or 128, "
-            f"got {min_block_dv}"
-        )
     if grid_size >= target_num_ctas:
         return 128
     if grid_size * 2 >= target_num_ctas:
         return 64
-    return min_block_dv
+    return 64
 
 
 @tilelang.jit(
@@ -114,6 +54,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
     accum_dtype,
     qkva_dtype,
     g_dtype,
+    b_dtype,
     h0_dtype,
     ht_dtype,
     o_dtype,
@@ -143,6 +84,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
         v_shape = (1, num_tokens, H, DV)
         a_shape = (1, num_tokens, H, chunk_size)
         g_shape = (1, num_tokens, H)
+        b_shape = (1, num_tokens, H)
         o_shape = (1, num_tokens, H, DV)
     else:
         q_shape = (batch_size, num_tokens, Hg, DK)
@@ -150,6 +92,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
         v_shape = (batch_size, num_tokens, H, DV)
         a_shape = (batch_size, num_tokens, H, chunk_size)
         g_shape = (batch_size, num_tokens, H)
+        b_shape = (batch_size, num_tokens, H)
         o_shape = (batch_size, num_tokens, H, DV)
     h0_shape = (batch_size, H, DK, DV)
     ht_shape = (raw_batch_size, H, DK, DV)
@@ -161,6 +104,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
         v: T.Tensor(v_shape, dtype=qkva_dtype),
         a: T.Tensor(a_shape, dtype=qkva_dtype),
         g: T.Tensor(g_shape, dtype=g_dtype),
+        b: T.Tensor(b_shape, dtype=b_dtype),
         h0: T.Tensor(h0_shape, dtype=h0_dtype),
         cu_seqlens: T.Tensor([batch_size + 1], dtype=seqlen_dtype),
         cp_seq_map: T.Tensor([batch_size], dtype=seqlen_dtype),
@@ -205,6 +149,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
             g_inv_exp_shared = T.alloc_shared(
                 (block_S), dtype=accum_dtype, scope="shared"
             )
+            b_shared = T.alloc_shared((block_S), dtype=accum_dtype, scope="shared")
             g_rev_exp_shared = T.alloc_shared(
                 (block_S), dtype=accum_dtype, scope="shared"
             )
@@ -259,6 +204,8 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     T.copy(a[batch_idx, left:right, bh, 0:block_S], a_shared)
                     for j_s in T.Parallel(block_S):
                         g_shared[j_s] = g[batch_idx, left + j_s, bh]
+                    for j_s in T.Parallel(block_S):
+                        b_shared[j_s] = b[batch_idx, left + j_s, bh]
                 else:
                     for j_s, j_k in T.Parallel(block_S, DK):
                         if left + j_s < seq_end_idx:
@@ -290,6 +237,11 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                             g_shared[j_s] = g[batch_idx, left + j_s, bh]
                         else:
                             g_shared[j_s] = g[batch_idx, seq_end_idx - 1, bh]
+                    for j_s in T.Parallel(block_S):
+                        if left + j_s < seq_end_idx:
+                            b_shared[j_s] = b[batch_idx, left + j_s, bh]
+                        else:
+                            b_shared[j_s] = 0
 
                 for j_s in T.Parallel(block_S):
                     g_exp_shared[j_s] = T.exp2(g_shared[j_s] * 1.442695)
@@ -303,6 +255,14 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                         g_exp_shared[block_S - 1] * g_inv_exp_shared[j_s],
                         0.0,
                     )
+                for j_s, j_t in T.Parallel(block_S, block_S):
+                    if j_s >= j_t:
+                        a_shared[j_s, j_t] *= T.exp2(
+                            (g_shared[j_s] - g_shared[j_t]) * 1.442695
+                        )
+                        a_shared[j_s, j_t] *= b_shared[j_t]
+                    else:
+                        a_shared[j_s, j_t] = 0
 
                 # h_shared holds the previous recurrent state for this chunk.
                 T.copy(h_fragment, h_shared)
@@ -450,22 +410,14 @@ def fused_gdr_fwd(
     batch_size, num_tokens, Hg, K = k.shape
     _, _, H, V = v.shape
     scale = scale or K ** (-0.5)
-    fwd_experiment = os.environ.get("FLASHQLA_BLACKWELL_FWD_EXPERIMENT", "").lower()
 
     unsupported_reasons = []
-    if os.environ.get("FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE", "") != "1":
-        unsupported_reasons.append("native_fwd_disabled")
     if output_h:
         unsupported_reasons.append("output_h")
     if cu_seqlens is not None:
         seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
         if bool((seqlens <= 0).any().item()):
             unsupported_reasons.append("varlen_empty")
-    if os.environ.get("FLASHQLA_BLACKWELL_PRETRANSFORM_A", "1") != "1":
-        unsupported_reasons.append("raw_a")
-    use_native_by_policy, policy_reason = should_use_native_fwd(H, Hg)
-    if not use_native_by_policy:
-        unsupported_reasons.append(policy_reason)
 
     if unsupported_reasons:
         reason = ",".join(unsupported_reasons)
@@ -530,32 +482,11 @@ def fused_gdr_fwd(
     block_DV = _select_block_dv(real_batch_size, H)
     if block_DV not in (32, 64, 128):
         raise ValueError(
-            "FLASHQLA_BLACKWELL_BLOCK_DV must be 32, 64, or 128 for the current "
-            f"TileLang 0.1.9 TCGEN05 path, got {block_DV}"
+            f"Blackwell native fwd selected invalid block_DV={block_DV}"
         )
-    if block_DV == 32 and os.environ.get("FLASHQLA_BLACKWELL_ALLOW_BLOCK_DV32", "") != "1":
-        raise ValueError(
-            "FLASHQLA_BLACKWELL_BLOCK_DV=32 is disabled for the current TileLang "
-            "0.1.9 TCGEN05 path because it lowers to unsupported bf16->fp32 MMA "
-            "tiles such as M64N32K128. Set FLASHQLA_BLACKWELL_ALLOW_BLOCK_DV32=1 "
-            "only when testing a TileLang/backend version that supports this tile."
-        )
-    tmem_width = _tmem_width(block_DV)
-    max_iters = int(os.environ.get("FLASHQLA_BLACKWELL_FWD_MAX_ITERS", "0"))
-    if max_iters > 0:
-        _debug(f"debug max_iters={max_iters}; output is partial and benchmark is invalid")
-    num_threads = int(os.environ.get("FLASHQLA_BLACKWELL_FWD_THREADS", "256"))
-    if num_threads not in (128, 256, 512):
-        raise ValueError(
-            "FLASHQLA_BLACKWELL_FWD_THREADS must be 128, 256, or 512 for the current "
-            f"native fwd path, got {num_threads}"
-        )
-    if fwd_experiment not in ("", "ag"):
-        raise ValueError(
-            "FLASHQLA_BLACKWELL_FWD_EXPERIMENT must be unset or 'ag' for "
-            f"the cleaned Blackwell native path, got {fwd_experiment!r}"
-        )
-    sync_barriers = _sync_barriers()
+    tmem_width = 128
+    max_iters = 0
+    num_threads = 256
     if cu_seqlens is None:
         has_ragged_tail = num_tokens % chunk_size != 0
     else:
@@ -563,7 +494,7 @@ def fused_gdr_fwd(
         has_ragged_tail = bool((seqlens % chunk_size != 0).any().item())
     _debug(
         f"threads={num_threads} block_DV={block_DV} tmem_width={tmem_width} "
-        "sync_barriers=" + ",".join(sorted(sync_barriers))
+        f"ragged_tail={has_ragged_tail}"
     )
     tilelang_fused_chunk_gdr_fwd_kernel = tilelang_fused_chunk_gdr_fwd_blackwell_ag(
         H,
@@ -574,6 +505,7 @@ def fused_gdr_fwd(
         scale,
         qkva_dtype=q.dtype,
         g_dtype=g.dtype,
+        b_dtype=b.dtype,
         h0_dtype=initial_state.dtype,
         ht_dtype=final_state.dtype,
         o_dtype=o.dtype,
@@ -584,10 +516,10 @@ def fused_gdr_fwd(
         store_o=output_o,
         is_varlen=is_varlen,
         max_iters=max_iters,
-        use_bar_load="load" in sync_barriers,
-        use_bar_h_shared="h" in sync_barriers,
-        use_bar_o="o" in sync_barriers,
-        use_bar_h_scaled=("hscale" in sync_barriers) or has_ragged_tail,
+        use_bar_load=True,
+        use_bar_h_shared=True,
+        use_bar_o=True,
+        use_bar_h_scaled=has_ragged_tail,
         is_cp=is_cp,
         num_threads=num_threads,
         block_DV=block_DV,
@@ -599,6 +531,7 @@ def fused_gdr_fwd(
         v,
         a,
         g,
+        b,
         initial_state,
         cu_seqlens,
         cp_seq_map,

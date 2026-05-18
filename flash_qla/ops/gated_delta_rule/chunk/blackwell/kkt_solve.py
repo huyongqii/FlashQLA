@@ -3,8 +3,6 @@
 
 from typing import Optional
 
-import os
-
 import torch
 import tilelang
 import tilelang.language as T
@@ -12,10 +10,6 @@ import tilelang.language as T
 from flash_qla.utils import prepare_chunk_indices
 
 
-# Blackwell native experiment:
-# Force TCGEN05 lowering for every tensor-core GEMM. If TileLang cannot lower
-# the current operand pattern to TCGEN05, compilation should fail rather than
-# silently falling back to HMMA.
 @tilelang.jit(
     # out_idx=[-1],
     pass_configs={
@@ -32,10 +26,8 @@ def tilelang_kkt_solve(
     accum_dtype,
     qkva_dtype,
     b_dtype,
-    g_dtype,
     seqlen_dtype,
     is_varlen,
-    transform_a,
 ):
     data_batch_size = T.dynamic("data_batch_size")
     real_batch_size = T.dynamic("real_batch_size")
@@ -46,7 +38,6 @@ def tilelang_kkt_solve(
     k_shape = (data_batch_size, num_tokens, Hg, DK)
     a_shape = (data_batch_size, num_tokens, H, chunk_size)
     b_shape = (data_batch_size, num_tokens, H)
-    g_shape = (data_batch_size, num_tokens, H)
 
     @T.macro
     def kernel_body(
@@ -60,7 +51,6 @@ def tilelang_kkt_solve(
         seq_end_idx,
         k,
         b,
-        g,
         a,
     ):
         left = seq_start_idx + chunk_idx * block_S
@@ -68,7 +58,6 @@ def tilelang_kkt_solve(
 
         k_shared = T.alloc_shared((block_S, DK), dtype=qkva_dtype)
         b_shared = T.alloc_shared((block_S), dtype=accum_dtype, scope="shared")
-        g_shared = T.alloc_shared((block_S), dtype=accum_dtype, scope="shared")
         a64_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
         a64_tmem = T.alloc_tmem((block_S, block_S), dtype=accum_dtype)
 
@@ -116,16 +105,6 @@ def tilelang_kkt_solve(
                         b_shared[j_s] = b[bb, left + j_s, bh]
                     else:
                         b_shared[j_s] = 0
-            if transform_a:
-                if right <= seq_end_idx:
-                    for j_s in T.Parallel(block_S):
-                        g_shared[j_s] = g[bb, left + j_s, bh]
-                else:
-                    for j_s in T.Parallel(block_S):
-                        if left + j_s < seq_end_idx:
-                            g_shared[j_s] = g[bb, left + j_s, bh]
-                        else:
-                            g_shared[j_s] = g[bb, seq_end_idx - 1, bh]
 
             T.barrier_wait(k_is_ready, 0)
 
@@ -229,12 +208,6 @@ def tilelang_kkt_solve(
                 a64_shared[32 + k_s, k_t] = a32o_fragment[k_s, k_t]
             for k_s, k_t in T.Parallel(32, 32):
                 a64_shared[k_s, 32 + k_t] = 0
-            if transform_a:
-                for j_s, j_t in T.Parallel(block_S, block_S):
-                    a64_shared[j_s, j_t] *= T.exp2(
-                        (g_shared[j_s] - g_shared[j_t]) * 1.442695
-                    )
-                    a64_shared[j_s, j_t] *= b_shared[j_t]
 
             T.barrier_arrive(a_is_ready)
 
@@ -276,7 +249,6 @@ def tilelang_kkt_solve(
         def tilelang_kkt_solve_kernel(
             k: T.Tensor(k_shape, dtype=qkva_dtype),
             b: T.Tensor(b_shape, dtype=b_dtype),
-            g: T.Tensor(g_shape, dtype=g_dtype),
             cu_seqlens: T.Tensor([real_batch_size + 1], dtype=seqlen_dtype),
             chunk_indices: T.Tensor([num_chunks, 2], dtype=seqlen_dtype),
             a: T.Tensor(a_shape, dtype=qkva_dtype),
@@ -307,7 +279,6 @@ def tilelang_kkt_solve(
                     seq_end_idx,
                     k,
                     b,
-                    g,
                     a,
                 )
 
@@ -317,7 +288,6 @@ def tilelang_kkt_solve(
         def tilelang_kkt_solve_kernel(
             k: T.Tensor(k_shape, dtype=qkva_dtype),
             b: T.Tensor(b_shape, dtype=b_dtype),
-            g: T.Tensor(g_shape, dtype=g_dtype),
             a: T.Tensor(a_shape, dtype=qkva_dtype),
             num_chunks: T.int32,
         ):
@@ -347,7 +317,6 @@ def tilelang_kkt_solve(
                     seq_end_idx,
                     k,
                     b,
-                    g,
                     a,
                 )
 
@@ -367,8 +336,6 @@ def tilelang_kkt_solve_fixed_fast(
     accum_dtype,
     qkva_dtype,
     b_dtype,
-    g_dtype,
-    transform_a,
 ):
     data_batch_size = T.dynamic("data_batch_size")
     num_tokens = T.dynamic("num_tokens")
@@ -378,13 +345,11 @@ def tilelang_kkt_solve_fixed_fast(
     k_shape = (data_batch_size, num_tokens, Hg, DK)
     a_shape = (data_batch_size, num_tokens, H, chunk_size)
     b_shape = (data_batch_size, num_tokens, H)
-    g_shape = (data_batch_size, num_tokens, H)
 
     @T.prim_func
     def tilelang_kkt_solve_fixed_fast_kernel(
         k: T.Tensor(k_shape, dtype=qkva_dtype),
         b: T.Tensor(b_shape, dtype=b_dtype),
-        g: T.Tensor(g_shape, dtype=g_dtype),
         a: T.Tensor(a_shape, dtype=qkva_dtype),
         num_chunks: T.int32,
     ):
@@ -398,7 +363,6 @@ def tilelang_kkt_solve_fixed_fast(
 
             k_shared = T.alloc_shared((block_S, DK), dtype=qkva_dtype)
             b_shared = T.alloc_shared((block_S), dtype=accum_dtype, scope="shared")
-            g_shared = T.alloc_shared((block_S), dtype=accum_dtype, scope="shared")
             a64_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
 
             a16i_row = T.alloc_fragment((4, 16), dtype=accum_dtype)
@@ -431,9 +395,6 @@ def tilelang_kkt_solve_fixed_fast(
                 T.copy(k[bb, left:right, bhg, 0:DK], k_shared)
                 for j_s in T.Parallel(block_S):
                     b_shared[j_s] = b[bb, left + j_s, bh]
-                if transform_a:
-                    for j_s in T.Parallel(block_S):
-                        g_shared[j_s] = g[bb, left + j_s, bh]
             else:
                 for j_s, j_k in T.Parallel(block_S, DK):
                     if left + j_s < num_tokens:
@@ -445,12 +406,6 @@ def tilelang_kkt_solve_fixed_fast(
                         b_shared[j_s] = b[bb, left + j_s, bh]
                     else:
                         b_shared[j_s] = 0
-                if transform_a:
-                    for j_s in T.Parallel(block_S):
-                        if left + j_s < num_tokens:
-                            g_shared[j_s] = g[bb, left + j_s, bh]
-                        else:
-                            g_shared[j_s] = g[bb, num_tokens - 1, bh]
             T.barrier_arrive(bar_load)
             T.barrier_wait(bar_load, 0)
 
@@ -540,12 +495,6 @@ def tilelang_kkt_solve_fixed_fast(
                 a64_shared[32 + k_s, k_t] = a32o_fragment[k_s, k_t]
             for k_s, k_t in T.Parallel(32, 32):
                 a64_shared[k_s, 32 + k_t] = 0
-            if transform_a:
-                for j_s, j_t in T.Parallel(block_S, block_S):
-                    a64_shared[j_s, j_t] *= T.exp2(
-                        (g_shared[j_s] - g_shared[j_t]) * 1.442695
-                    )
-                    a64_shared[j_s, j_t] *= b_shared[j_t]
             T.barrier_arrive(bar_store)
             T.barrier_wait(bar_store, 0)
 
@@ -559,271 +508,28 @@ def tilelang_kkt_solve_fixed_fast(
     return tilelang_kkt_solve_fixed_fast_kernel
 
 
-@tilelang.jit(
-    pass_configs={
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    },
-)
-def tilelang_kkt_solve_fixed_fast_dual(
-    H,
-    Hg,
-    DK,
-    chunk_size,
-    accum_dtype,
-    qkva_dtype,
-    b_dtype,
-    g_dtype,
-):
-    data_batch_size = T.dynamic("data_batch_size")
-    num_tokens = T.dynamic("num_tokens")
-    num_chunks = T.dynamic("num_chunks")
-    block_S = chunk_size
-
-    k_shape = (data_batch_size, num_tokens, Hg, DK)
-    a_shape = (data_batch_size, num_tokens, H, chunk_size)
-    b_shape = (data_batch_size, num_tokens, H)
-    g_shape = (data_batch_size, num_tokens, H)
-
-    @T.prim_func
-    def tilelang_kkt_solve_fixed_fast_dual_kernel(
-        k: T.Tensor(k_shape, dtype=qkva_dtype),
-        b: T.Tensor(b_shape, dtype=b_dtype),
-        g: T.Tensor(g_shape, dtype=g_dtype),
-        a_raw: T.Tensor(a_shape, dtype=qkva_dtype),
-        a_transformed: T.Tensor(a_shape, dtype=qkva_dtype),
-        num_chunks: T.int32,
-    ):
-        with T.Kernel(num_chunks * H, threads=128) as (bch,):
-            bc, bh = bch // H, bch % H
-            bhg = bh // (H // Hg)
-            bb = bc % data_batch_size
-            chunk_idx = bc // data_batch_size
-            left = chunk_idx * block_S
-            right = left + block_S
-
-            k_shared = T.alloc_shared((block_S, DK), dtype=qkva_dtype)
-            b_shared = T.alloc_shared((block_S), dtype=accum_dtype, scope="shared")
-            g_shared = T.alloc_shared((block_S), dtype=accum_dtype, scope="shared")
-            a64_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
-
-            a16i_row = T.alloc_fragment((4, 16), dtype=accum_dtype)
-            a16i_sum = T.alloc_fragment((4, 16), dtype=accum_dtype)
-
-            a16i_shared = T.alloc_shared((4, 17, 16), dtype=accum_dtype)
-            a16o_shared = T.alloc_shared((2, 17, 16), dtype=accum_dtype)
-            a16o_fragment = T.alloc_fragment((2, 16, 16), dtype=accum_dtype)
-
-            a32i_fragment = T.alloc_fragment((2, 32, 32), dtype=accum_dtype)
-            a32i0_shared = T.alloc_shared((32, 32), dtype=accum_dtype)
-            a32i1_shared = T.alloc_shared((32, 32), dtype=accum_dtype)
-            a32o_shared = T.alloc_shared((32, 32), dtype=accum_dtype)
-            a32o_fragment = T.alloc_fragment((32, 32), dtype=accum_dtype)
-
-            a64_shared = T.alloc_shared((block_S, block_S), dtype=qkva_dtype)
-
-            T.annotate_layout(
-                {
-                    a16i_shared: tilelang.layout.make_linear_layout(a16i_shared),
-                    a16o_shared: tilelang.layout.make_linear_layout(a16o_shared),
-                }
-            )
-
-            bar_load = T.alloc_barrier(arrive_count=128)
-            bar_a32 = T.alloc_barrier(arrive_count=128)
-            bar_store_raw = T.alloc_barrier(arrive_count=128)
-            bar_store_transformed = T.alloc_barrier(arrive_count=128)
-
-            if right <= num_tokens:
-                T.copy(k[bb, left:right, bhg, 0:DK], k_shared)
-                for j_s in T.Parallel(block_S):
-                    b_shared[j_s] = b[bb, left + j_s, bh]
-                for j_s in T.Parallel(block_S):
-                    g_shared[j_s] = g[bb, left + j_s, bh]
-            else:
-                for j_s, j_k in T.Parallel(block_S, DK):
-                    if left + j_s < num_tokens:
-                        k_shared[j_s, j_k] = k[bb, left + j_s, bhg, j_k]
-                    else:
-                        k_shared[j_s, j_k] = 0
-                for j_s in T.Parallel(block_S):
-                    if left + j_s < num_tokens:
-                        b_shared[j_s] = b[bb, left + j_s, bh]
-                    else:
-                        b_shared[j_s] = 0
-                for j_s in T.Parallel(block_S):
-                    if left + j_s < num_tokens:
-                        g_shared[j_s] = g[bb, left + j_s, bh]
-                    else:
-                        g_shared[j_s] = g[bb, num_tokens - 1, bh]
-            T.barrier_arrive(bar_load)
-            T.barrier_wait(bar_load, 0)
-
-            # Raw A = inv(I + StrictLower(beta * K @ K^T)).
-            T.gemm(k_shared, k_shared, a64_fragment, transpose_B=True, clear_accum=True)
-            for j_s, j_t in T.Parallel(block_S, block_S):
-                a64_fragment[j_s, j_t] *= b_shared[j_s]
-            for j_s, j_t in T.Parallel(block_S, block_S):
-                if j_s < j_t:
-                    a64_fragment[j_s, j_t] = 0
-                elif j_s == j_t:
-                    a64_fragment[j_s, j_t] = 1
-
-            for j_s, j_t in T.Parallel(block_S, block_S):
-                if j_s >= 32 and j_t < 32:
-                    a32o_shared[j_s - 32, j_t] = -a64_fragment[j_s, j_t]
-                elif (j_s // 16) == (j_t // 16) + 1:
-                    a16o_shared[j_s // 32, j_s % 16, j_t % 16] = -a64_fragment[
-                        j_s, j_t
-                    ]
-                elif (j_s // 16) == (j_t // 16):
-                    a16i_shared[j_s // 16, j_s % 16, j_t % 16] = a64_fragment[
-                        j_s, j_t
-                    ]
-
-            T.clear(a16i_row)
-            for k_s in T.unroll(1, 16):
-                for j_s, k_t in T.Parallel(4, 16):
-                    if k_t < k_s:
-                        a16i_row[j_s, k_t] = a16i_shared[j_s, k_s, k_t]
-                T.clear(a16i_sum)
-                for k_r in T.unroll(k_s):
-                    for j_s, k_t in T.Parallel(4, 16):
-                        a16i_sum[j_s, k_t] -= (
-                            a16i_shared[j_s, k_r, k_t] * a16i_row[j_s, k_r]
-                        )
-                for j_s, k_t in T.Parallel(4, 16):
-                    if k_t < k_s:
-                        a16i_shared[j_s, k_s, k_t] = a16i_sum[j_s, k_t]
-
-            T.clear(a16o_fragment)
-            for k_r in T.unroll(16):
-                for j_s, k_s, k_t in T.Parallel(2, 16, 16):
-                    a16o_fragment[j_s, k_s, k_t] += (
-                        a16i_shared[j_s * 2 + 1, k_s, k_r]
-                        * a16o_shared[j_s, k_r, k_t]
-                    )
-            for j_s, k_s, k_t in T.Parallel(2, 16, 16):
-                a16o_shared[j_s, k_t, k_s] = a16o_fragment[j_s, k_s, k_t]
-            T.clear(a16o_fragment)
-            for k_r in T.unroll(16):
-                for j_s, k_s, k_t in T.Parallel(2, 16, 16):
-                    a16o_fragment[j_s, k_s, k_t] += (
-                        a16o_shared[j_s, k_r, k_s]
-                        * a16i_shared[j_s * 2, k_r, k_t]
-                    )
-            T.copy(a16o_fragment, a16o_shared[:, 0:16, 0:16])
-
-            for j_s, k_s, k_t in T.Parallel(2, 32, 32):
-                if k_s < 16 and k_t >= 16:
-                    a32i_fragment[j_s, k_s, k_t] = 0
-            for j_s, k_s, k_t in T.Parallel(2, 32, 32):
-                if k_s >= 16 and k_t < 16:
-                    a32i_fragment[j_s, k_s, k_t] = a16o_shared[j_s, k_s - 16, k_t]
-            for j_s, k_s, k_t in T.Parallel(2, 32, 32):
-                if k_s // 16 == k_t // 16:
-                    a32i_fragment[j_s, k_s, k_t] = a16i_shared[
-                        j_s * 2 + k_s // 16, k_s % 16, k_t % 16
-                    ]
-            for j_s, k_s, k_t in T.Parallel(2, 32, 32):
-                if j_s == 0:
-                    a32i0_shared[k_s, k_t] = a32i_fragment[j_s, k_s, k_t]
-                else:
-                    a32i1_shared[k_s, k_t] = a32i_fragment[j_s, k_s, k_t]
-            T.barrier_arrive(bar_a32)
-            T.barrier_wait(bar_a32, 0)
-
-            T.gemm(a32i1_shared, a32o_shared, a32o_fragment, clear_accum=True)
-            T.copy(a32o_fragment, a32o_shared)
-            T.gemm(a32o_shared, a32i0_shared, a32o_fragment, clear_accum=True)
-
-            for j_s, k_s, k_t in T.Parallel(2, 32, 32):
-                a64_shared[j_s * 32 + k_s, j_s * 32 + k_t] = a32i_fragment[
-                    j_s, k_s, k_t
-                ]
-            for k_s, k_t in T.Parallel(32, 32):
-                a64_shared[32 + k_s, k_t] = a32o_fragment[k_s, k_t]
-            for k_s, k_t in T.Parallel(32, 32):
-                a64_shared[k_s, 32 + k_t] = 0
-            T.barrier_arrive(bar_store_raw)
-            T.barrier_wait(bar_store_raw, 0)
-
-            if right <= num_tokens:
-                T.copy(a64_shared, a_raw[bb, left:right, bh, 0:block_S])
-            else:
-                for j_s, j_t in T.Parallel(block_S, block_S):
-                    if left + j_s < num_tokens:
-                        a_raw[bb, left + j_s, bh, j_t] = a64_shared[j_s, j_t]
-
-            for j_s, j_t in T.Parallel(block_S, block_S):
-                a64_shared[j_s, j_t] *= T.exp2(
-                    (g_shared[j_s] - g_shared[j_t]) * 1.442695
-                )
-                a64_shared[j_s, j_t] *= b_shared[j_t]
-            T.barrier_arrive(bar_store_transformed)
-            T.barrier_wait(bar_store_transformed, 0)
-
-            if right <= num_tokens:
-                T.copy(a64_shared, a_transformed[bb, left:right, bh, 0:block_S])
-            else:
-                for j_s, j_t in T.Parallel(block_S, block_S):
-                    if left + j_s < num_tokens:
-                        a_transformed[bb, left + j_s, bh, j_t] = a64_shared[
-                            j_s, j_t
-                        ]
-
-    return tilelang_kkt_solve_fixed_fast_dual_kernel
-
-
-def kkt_solve_raw_and_transformed(
-    k: torch.Tensor,
-    b: torch.Tensor,
-    g: torch.Tensor,
-    chunk_size: int = 64,
-):
-    batch_size, num_tokens, Hg, K = k.shape
-    _, _, H = b.shape
-    assert K == 128
-    assert chunk_size == 64
-    assert g.shape == b.shape
-    num_chunks = batch_size * tilelang.cdiv(num_tokens, chunk_size)
-    a_raw = torch.empty(
-        (batch_size, num_tokens, H, chunk_size), dtype=k.dtype, device=k.device
-    )
-    a_transformed = torch.empty_like(a_raw)
-    tilelang_kkt_solve_kernel = tilelang_kkt_solve_fixed_fast_dual(
-        H,
-        Hg,
-        K,
-        chunk_size,
-        qkva_dtype=k.dtype,
-        b_dtype=b.dtype,
-        g_dtype=g.dtype,
-        accum_dtype="float32",
-    )
-    tilelang_kkt_solve_kernel(k, b, g, a_raw, a_transformed, num_chunks)
-    return a_raw, a_transformed
-
-
 def kkt_solve(
     k: torch.Tensor,
     b: torch.Tensor,
-    g: Optional[torch.Tensor] = None,
     chunk_size: int = 64,
     cu_seqlens: Optional[torch.LongTensor] = None,
 ):
-    experiment = os.environ.get("FLASHQLA_BLACKWELL_KKT_EXPERIMENT", "")
     batch_size, num_tokens, Hg, K = k.shape
     _, _, H = b.shape
     can_use_fixed_fast = cu_seqlens is None
     if cu_seqlens is not None:
         seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
+        is_single_sequence = cu_seqlens.numel() == 2
         can_use_fixed_fast = (
             int(cu_seqlens[0].item()) == 0
             and int(cu_seqlens[-1].item()) == num_tokens
             and bool((seqlens > 0).all().item())
-            and bool((seqlens % chunk_size == 0).all().item())
+            and (
+                is_single_sequence
+                or bool((seqlens % chunk_size == 0).all().item())
+            )
         )
-    if experiment != "tcgen05" and can_use_fixed_fast:
+    if can_use_fixed_fast:
         assert K == 128
         assert chunk_size == 64
         num_chunks = batch_size * tilelang.cdiv(num_tokens, chunk_size)
@@ -837,15 +543,13 @@ def kkt_solve(
             chunk_size,
             qkva_dtype=k.dtype,
             b_dtype=b.dtype,
-            g_dtype=(g.dtype if g is not None else b.dtype),
             accum_dtype="float32",
-            transform_a=g is not None,
         )
-        tilelang_kkt_solve_kernel(k, b, g if g is not None else b, a, num_chunks)
+        tilelang_kkt_solve_kernel(k, b, a, num_chunks)
         return a
-    # Ragged varlen cannot use the fixed-fast kernel because the final chunk
-    # needs masked beta/g loads and masked A stores. Use the varlen TCGEN05
-    # kernel automatically for that case.
+    # Multi-sequence ragged varlen cannot use the flattened fixed-fast kernel
+    # because chunks may cross sequence boundaries. Single-sequence ragged
+    # inputs are handled by fixed-fast tail masks above.
 
     assert K == 128
     assert chunk_size == 64
@@ -870,22 +574,19 @@ def kkt_solve(
         chunk_size,
         qkva_dtype=k.dtype,
         b_dtype=b.dtype,
-        g_dtype=(g.dtype if g is not None else b.dtype),
         seqlen_dtype=seqlen_dtype,
         accum_dtype="float32",
         is_varlen=is_varlen,
-        transform_a=g is not None,
     )
     if is_varlen:
         tilelang_kkt_solve_kernel(
             k,
             b,
-            g if g is not None else b,
             cu_seqlens,
             chunk_indices,
             a,
         )
     else:
-        tilelang_kkt_solve_kernel(k, b, g if g is not None else b, a, num_chunks)
+        tilelang_kkt_solve_kernel(k, b, a, num_chunks)
 
     return a

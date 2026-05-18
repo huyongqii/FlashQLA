@@ -60,70 +60,6 @@ FWD_SEQLEN_CONFIGS = [
     SeqLenConfig("1024x8", [1024] * 8),
 ]
 
-KERNEL_ENVS = {
-    "blackwell_cp": {
-        "FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE": "1",
-        "FLASHQLA_BLACKWELL_NATIVE": "1",
-        "FLASHQLA_BLACKWELL_NATIVE_KERNELS": "fwd,kkt",
-        "FLASHQLA_BLACKWELL_FWD_POLICY": "native",
-        "FLASHQLA_BLACKWELL_CP": "1",
-        "FLASHQLA_BLACKWELL_CP_DUAL_A": "1",
-        "FLASHQLA_BLACKWELL_CP_SUMMARY_DTYPE": "bf16",
-        "FLASHQLA_BLACKWELL_PREPARE_H_TCGEN05": "x",
-        "FLASHQLA_CP_MAX_LOCAL_CHUNKS": "32",
-        "FLASHQLA_CP_MIN_CHUNKS": "512",
-        "FLASHQLA_CP_WARMUP_THRESHOLD": "-1.0",
-        "FLASHQLA_BLACKWELL_FWD_THREADS": "256",
-        "FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS": "load,h,o",
-    },
-    "blackwell_cp_force_s8": {
-        "FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE": "1",
-        "FLASHQLA_BLACKWELL_NATIVE": "1",
-        "FLASHQLA_BLACKWELL_NATIVE_KERNELS": "fwd,kkt",
-        "FLASHQLA_BLACKWELL_FWD_POLICY": "native",
-        "FLASHQLA_BLACKWELL_CP": "1",
-        "FLASHQLA_BLACKWELL_CP_DUAL_A": "1",
-        "FLASHQLA_BLACKWELL_CP_SUMMARY_DTYPE": "bf16",
-        "FLASHQLA_BLACKWELL_PREPARE_H_TCGEN05": "x",
-        "FLASHQLA_AUTOCP": "1",
-        "FLASHQLA_CP_MAX_LOCAL_CHUNKS": "8",
-        "FLASHQLA_CP_MIN_CHUNKS": "1",
-        "FLASHQLA_CP_WARMUP_THRESHOLD": "-1.0",
-        "FLASHQLA_BLACKWELL_FWD_THREADS": "256",
-        "FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS": "load,h,o",
-    },
-}
-
-ENV_TO_CLEAR = (
-    "FLASHQLA_FORCE_ARCH",
-    "FLASHQLA_SUPPRESS_BLACKWELL_WARNING",
-    "FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE",
-    "FLASHQLA_BLACKWELL_NATIVE",
-    "FLASHQLA_BLACKWELL_NATIVE_KERNELS",
-    "FLASHQLA_BLACKWELL_BLOCK_DV",
-    "FLASHQLA_BLACKWELL_FWD_THREADS",
-    "FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS",
-    "FLASHQLA_BLACKWELL_FWD_POLICY",
-    "FLASHQLA_BLACKWELL_KKT_EXPERIMENT",
-    "FLASHQLA_BLACKWELL_CP",
-    "FLASHQLA_BLACKWELL_CP_EXACT",
-    "FLASHQLA_BLACKWELL_CP_DUAL_A",
-    "FLASHQLA_BLACKWELL_CP_SUMMARY_DTYPE",
-    "FLASHQLA_BLACKWELL_CP_START_FIX_TL",
-    "FLASHQLA_BLACKWELL_PREPARE_H_V2",
-    "FLASHQLA_BLACKWELL_PREPARE_H_TCGEN05",
-    "FLASHQLA_BLACKWELL_PRETRANSFORM_A",
-    "FLASHQLA_CP_EXACT",
-    "FLASHQLA_AUTOCP",
-    "FLASHQLA_CP_MAX_LOCAL_CHUNKS",
-    "FLASHQLA_CP_MIN_CHUNKS",
-    "FLASHQLA_CP_WARMUP_THRESHOLD",
-    "FLASHQLA_CP_CORRECT_H0_TORCH",
-    "FLASHQLA_BLOCK_DV",
-    "FLASHQLA_TARGET_CTA_RATIO",
-)
-
-
 def parse_env_overrides(items: List[str]) -> Dict[str, str]:
     result = {}
     for item in items:
@@ -137,15 +73,10 @@ def parse_env_overrides(items: List[str]) -> Dict[str, str]:
     return result
 
 
-def apply_kernel_env(kernel: str, extra_env: Dict[str, str]) -> Dict[str, str]:
-    for key in ENV_TO_CLEAR:
-        os.environ.pop(key, None)
-    os.environ.update(KERNEL_ENVS[kernel])
+def apply_env_overrides(extra_env: Dict[str, str]) -> Dict[str, str]:
     os.environ.update(extra_env)
     os.environ.setdefault("FLASHQLA_SUPPRESS_BLACKWELL_WARNING", "1")
-    visible = {key: os.environ[key] for key in sorted(KERNEL_ENVS[kernel])}
-    visible.update(extra_env)
-    return visible
+    return {key: os.environ[key] for key in sorted(extra_env)}
 
 
 def cleanup_cuda():
@@ -329,23 +260,17 @@ def fmt_ratio(base: float, other: float) -> str:
 
 def main():
     parser = argparse.ArgumentParser(description="Benchmark Qwen397 FlashQLA GDR Fwd")
-    parser.add_argument(
-        "--kernel",
-        choices=sorted(KERNEL_ENVS),
-        default="blackwell_cp",
-        help="Blackwell kernel env preset.",
-    )
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--repeats", type=int, default=100)
     parser.add_argument(
         "--env",
         action="append",
         default=[],
-        help="Extra env override applied after --kernel, e.g. --env FLASHQLA_CP_MIN_CHUNKS=1.",
+        help="Extra env override, e.g. --env FLASHQLA_CP_MIN_CHUNKS=1.",
     )
     args = parser.parse_args()
 
-    visible_env = apply_kernel_env(args.kernel, parse_env_overrides(args.env))
+    visible_env = apply_env_overrides(parse_env_overrides(args.env))
 
     from fla.ops.gated_delta_rule.chunk import chunk_gated_delta_rule_fwd as fla_fwd
     from flash_qla import chunk_gated_delta_rule_fwd as qla_fwd
@@ -358,8 +283,8 @@ def main():
     gpu_name = torch.cuda.get_device_properties(0).name
     print(f"GPU: {gpu_name}")
     print("Models: Qwen3.5 397B/122B TP2/TP4, d=128")
-    print(f"Kernel: {args.kernel}")
-    print(f"Env: {visible_env}")
+    if visible_env:
+        print(f"Env: {visible_env}")
     print(f"Config: Warmup={args.warmup}, Repeats={args.repeats}")
 
     libs = get_lib_versions()

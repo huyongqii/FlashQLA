@@ -19,23 +19,14 @@ from fla.ops.gated_delta_rule.chunk import (
 
 from flash_qla import chunk_gated_delta_rule_fwd as chunk_gated_delta_rule_fwd_qla
 from flash_qla import chunk_gated_delta_rule_bwd as chunk_gated_delta_rule_bwd_qla
-from flash_qla.utils import l2norm, pack, profile
+from flash_qla.utils import assert_supported, is_blackwell, l2norm, pack, profile
 
 from ref_gdr import chunk_gated_delta_rule_fwd as chunk_gated_delta_rule_fwd_ref
 from ref_gdr import chunk_gated_delta_rule_bwd as chunk_gated_delta_rule_bwd_ref
 
 
 def _blackwell_native_fwd_requested() -> bool:
-    kernels = {
-        item.strip().lower()
-        for item in os.environ.get("FLASHQLA_BLACKWELL_NATIVE_KERNELS", "").split(",")
-        if item.strip()
-    }
-    return (
-        os.environ.get("FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE", "") == "1"
-        and os.environ.get("FLASHQLA_BLACKWELL_NATIVE", "") == "1"
-        and ("fwd" in kernels or "all" in kernels)
-    )
+    return is_blackwell(assert_supported())
 
 
 def _profile_value(prof: dict[str, float], label: str, *kernel_groups):
@@ -416,7 +407,6 @@ def test_gated_delta_rule(
                 (
                     "tilelang_kkt_solve_kernel_kernel",
                     "tilelang_kkt_solve_fixed_fast_kernel_kernel",
-                    "tilelang_kkt_solve_fixed_fast_dual_kernel_kernel",
                 ),
             ),
             "[fwd] gdr": _profile_value(
@@ -433,7 +423,6 @@ def test_gated_delta_rule(
         if (
             "tilelang_get_warmup_chunks_kernel_kernel" in prof_qla.keys()
             or "tilelang_prepare_h_kernel_kernel" in prof_qla.keys()
-            or "tilelang_prepare_h_v2_kernel_kernel" in prof_qla.keys()
         ):
             result_fla["[fwd] cp-w"] = None
             result_fla["[fwd] cp-h"] = None
@@ -446,10 +435,7 @@ def test_gated_delta_rule(
             result_qla["[fwd] cp-h"] = _profile_value(
                 prof_qla,
                 "[fwd] FlashQLA cp-h",
-                (
-                    "tilelang_prepare_h_kernel_kernel",
-                    "tilelang_prepare_h_v2_kernel_kernel",
-                ),
+                "tilelang_prepare_h_kernel_kernel",
             )
             result_qla["[fwd] cp-c"] = _profile_value(
                 prof_qla, "[fwd] FlashQLA cp-c", "tilelang_correct_h0_kernel_kernel"
