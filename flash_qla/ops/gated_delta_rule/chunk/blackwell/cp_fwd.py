@@ -317,8 +317,8 @@ def correct_initial_states(
     # state writeback, which directly affects early-token outputs.
     raw_starts = seq_map_r2c[:-1].to(torch.long)
     if use_raw_h0:
-        cp_h0[raw_starts].copy_(raw_h0)
+        cp_h0.index_copy_(0, raw_starts, raw_h0)
     else:
-        cp_h0[raw_starts].zero_()
+        cp_h0.index_fill_(0, raw_starts, 0)
 
     return cp_h0
