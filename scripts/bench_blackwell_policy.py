@@ -353,13 +353,14 @@ def _parse_output(text: str) -> tuple[list[dict[str, float | int | None]], list[
     return rows, sorted(kernels)
 
 
-def _error_tail(text: str, max_lines: int = 12) -> str:
+def _error_tail(text: str, max_lines: int = 24) -> str:
     interesting = [
         line.strip()
         for line in text.splitlines()
         if line.strip()
         and (
             line.startswith("Shape:")
+            or line.lstrip().startswith("File ")
             or "fwd correctness repeat:" in line
             or line.startswith("s_qla:")
             or line.startswith("o_qla:")
@@ -373,6 +374,8 @@ def _error_tail(text: str, max_lines: int = 12) -> str:
             or "AssertionError" in line
             or "RuntimeError" in line
             or "ValueError" in line
+            or "AttributeError" in line
+            or "OutOfMemoryError" in line
             or "timeout" in line.lower()
         )
     ]

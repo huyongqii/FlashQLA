@@ -12,6 +12,13 @@ from flash_qla.utils import (
 )
 
 
+def _prepare_chunk_offsets_tensor(cu_seqlens: torch.Tensor, chunk_size: int) -> torch.Tensor:
+    chunk_offsets = prepare_chunk_offsets(cu_seqlens, chunk_size)
+    if isinstance(chunk_offsets, tuple):
+        chunk_offsets = chunk_offsets[0]
+    return chunk_offsets
+
+
 def torch_cumsum(
     x: torch.Tensor,  # [B, T, H]
     cu_seqlens: torch.Tensor = None,
@@ -203,7 +210,7 @@ def torch_chunk_gdr_fwd(
 
     if cu_seqlens is not None:
         vn = pack(vn, cu_seqlens)
-        h = pack(h, prepare_chunk_offsets(cu_seqlens, chunk_size))
+        h = pack(h, _prepare_chunk_offsets_tensor(cu_seqlens, chunk_size))
 
     return h, vn, last_state
 
@@ -223,7 +230,7 @@ def torch_chunk_o_fwd(
         k = unpack(k, cu_seqlens)
         v = unpack(v, cu_seqlens)
         g = unpack(g, cu_seqlens)
-        h = unpack(h, prepare_chunk_offsets(cu_seqlens, chunk_size))
+        h = unpack(h, _prepare_chunk_offsets_tensor(cu_seqlens, chunk_size))
 
     batch_size, num_tokens, num_k_heads, head_dim_k = k.shape
     _, _, num_v_heads, head_dim_v = v.shape
@@ -379,7 +386,7 @@ def torch_chunk_gdr_bwd(
     dv = dv.reshape((batch_size, -1, num_v_heads, head_dim_v))[:, :num_tokens]
     if cu_seqlens is not None:
         dv = pack(dv, cu_seqlens)
-        dh = pack(dh, prepare_chunk_offsets(cu_seqlens, chunk_size))
+        dh = pack(dh, _prepare_chunk_offsets_tensor(cu_seqlens, chunk_size))
     return dh, dh0, dv
 
 
@@ -405,8 +412,8 @@ def torch_chunk_dqkwg_bwd(
         g = unpack(g, cu_seqlens)
         do = unpack(do, cu_seqlens)
         dv = unpack(dv, cu_seqlens)
-        h = unpack(h, prepare_chunk_offsets(cu_seqlens, chunk_size))
-        dh = unpack(dh, prepare_chunk_offsets(cu_seqlens, chunk_size))
+        h = unpack(h, _prepare_chunk_offsets_tensor(cu_seqlens, chunk_size))
+        dh = unpack(dh, _prepare_chunk_offsets_tensor(cu_seqlens, chunk_size))
 
     batch_size, num_tokens, num_k_heads, head_dim_k = k.shape
     _, _, num_v_heads, head_dim_v = do.shape
