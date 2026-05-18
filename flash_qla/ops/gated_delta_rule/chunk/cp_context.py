@@ -185,12 +185,6 @@ def intra_card_cp_preprocess(
             chunk_size=chunk_size,
             threshold=warmup_threshold,
         )
-        use_ht_only_summary = (
-            os.environ.get("FLASHQLA_BLACKWELL_CP_HT_ONLY_SUMMARY", "") == "1"
-        )
-        has_fallback = True
-        if use_ht_only_summary:
-            has_fallback = bool(fallback_mask.any().item())
 
         _, ht, mt = fused_gdr_h(
             k=k,
@@ -200,18 +194,10 @@ def intra_card_cp_preprocess(
             b=b,
             initial_state=None,
             output_final_state=True,
-            output_final_correction=has_fallback,
             output_h=False,
             cu_seqlens=cp_cu_seqlens,
             num_warmup_chunks=num_warmup_chunks,
         )
-        if use_ht_only_summary and not has_fallback:
-            cp_h0 = _correct_initial_states_no_fallback(
-                raw_h0=raw_h0,
-                ht_buffer=ht,
-                seq_map_r2c=seq_map_r2c,
-            )
-            return cp_h0, cp_cu_seqlens, seq_map_c2r, raw_cu_seqlens
         if os.environ.get("FLASHQLA_CP_CORRECT_H0_TORCH", "") == "1":
             cp_h0 = _correct_initial_states_torch(
                 raw_h0=raw_h0,
@@ -291,35 +277,6 @@ def intra_card_cp_preprocess(
         )
 
     return cp_h0, cp_cu_seqlens, seq_map_c2r, raw_cu_seqlens
-
-
-def _correct_initial_states_no_fallback(
-    raw_h0: torch.Tensor | None,
-    ht_buffer: torch.Tensor,
-    seq_map_r2c: torch.Tensor,
-) -> torch.Tensor:
-    """Fast CP h0 construction when every segment uses ht directly.
-
-    This is only valid when fallback_mask is all false. In that case segment
-    i+1 starts from ht[i], and raw sequence starts use raw_h0 or zero.
-    """
-
-    cp_batch_size, num_heads, k_head_dim, v_head_dim = ht_buffer.shape
-    res_dtype = torch.float32 if raw_h0 is None else raw_h0.dtype
-    cp_h0 = torch.empty(
-        (cp_batch_size, num_heads, k_head_dim, v_head_dim),
-        dtype=res_dtype,
-        device=ht_buffer.device,
-    )
-    if cp_batch_size > 1:
-        cp_h0[1:].copy_(ht_buffer[:-1].to(res_dtype))
-
-    raw_starts = seq_map_r2c[:-1].to(torch.long)
-    if raw_h0 is None:
-        cp_h0.index_fill_(0, raw_starts, 0)
-    else:
-        cp_h0.index_copy_(0, raw_starts, raw_h0.to(res_dtype))
-    return cp_h0
 
 
 def _correct_initial_states_torch(
