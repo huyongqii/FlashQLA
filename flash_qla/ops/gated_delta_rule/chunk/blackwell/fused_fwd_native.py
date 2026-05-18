@@ -120,9 +120,11 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
     h0_dtype,
     ht_dtype,
     o_dtype,
+    seqlen_dtype,
     use_initial_state,
     store_final_state,
     store_o,
+    is_varlen,
     max_iters,
     use_bar_load,
     use_bar_h_shared,
@@ -136,14 +138,22 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
     num_tokens = T.dynamic("num_tokens")
     block_S = chunk_size
 
-    q_shape = (batch_size, num_tokens, Hg, DK)
-    k_shape = (batch_size, num_tokens, Hg, DK)
-    v_shape = (batch_size, num_tokens, H, DV)
-    a_shape = (batch_size, num_tokens, H, chunk_size)
-    g_shape = (batch_size, num_tokens, H)
+    if is_varlen:
+        q_shape = (1, num_tokens, Hg, DK)
+        k_shape = (1, num_tokens, Hg, DK)
+        v_shape = (1, num_tokens, H, DV)
+        a_shape = (1, num_tokens, H, chunk_size)
+        g_shape = (1, num_tokens, H)
+        o_shape = (1, num_tokens, H, DV)
+    else:
+        q_shape = (batch_size, num_tokens, Hg, DK)
+        k_shape = (batch_size, num_tokens, Hg, DK)
+        v_shape = (batch_size, num_tokens, H, DV)
+        a_shape = (batch_size, num_tokens, H, chunk_size)
+        g_shape = (batch_size, num_tokens, H)
+        o_shape = (batch_size, num_tokens, H, DV)
     h0_shape = (batch_size, H, DK, DV)
     ht_shape = (batch_size, H, DK, DV)
-    o_shape = (batch_size, num_tokens, H, DV)
 
     @T.prim_func
     def tilelang_fused_chunk_gdr_fwd_blackwell_ag_kernel(
@@ -153,6 +163,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
         a: T.Tensor(a_shape, dtype=qkva_dtype),
         g: T.Tensor(g_shape, dtype=g_dtype),
         h0: T.Tensor(h0_shape, dtype=h0_dtype),
+        cu_seqlens: T.Tensor([batch_size + 1], dtype=seqlen_dtype),
         o: T.Tensor(o_shape, dtype=o_dtype),
         ht: T.Tensor(ht_shape, dtype=ht_dtype),
     ):
@@ -162,6 +173,12 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
             bbh, bv = bbhv // T.ceildiv(DV, block_DV), bbhv % T.ceildiv(DV, block_DV)
             bb, bh = bbh // H, bbh % H
             bhg = bh // (H // Hg)
+            batch_idx = T.alloc_var("int32")
+            seq_start_idx = T.alloc_var("int32")
+            seq_end_idx = T.alloc_var("int32")
+            batch_idx = 0 if is_varlen else bb
+            seq_start_idx = cu_seqlens[bb] if is_varlen else 0
+            seq_end_idx = cu_seqlens[bb + 1] if is_varlen else num_tokens
 
             q_shared = T.alloc_shared((block_S, DK), dtype=qkva_dtype)
             k_shared = T.alloc_shared((block_S, DK), dtype=qkva_dtype)
@@ -209,7 +226,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
 
             T.use_swizzle(10)
 
-            num_iters = T.ceildiv(num_tokens, block_S)
+            num_iters = T.ceildiv(seq_end_idx - seq_start_idx, block_S)
             if max_iters > 0 and num_iters > max_iters:
                 num_iters = max_iters
 
@@ -219,17 +236,17 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                 T.clear(h_fragment)
 
             for i_s in T.serial(num_iters):
-                left = i_s * block_S
+                left = seq_start_idx + i_s * block_S
                 right = left + block_S
                 mbar_slot = i_s % 8
                 mbar_phase = (i_s // 8) % 2
 
-                T.copy(q[bb, left:right, bhg, 0:DK], q_shared)
-                T.copy(k[bb, left:right, bhg, 0:DK], k_shared)
-                T.copy(v[bb, left:right, bh, bv * block_DV : (bv + 1) * block_DV], v_shared)
-                T.copy(a[bb, left:right, bh, 0:block_S], a_shared)
+                T.copy(q[batch_idx, left:right, bhg, 0:DK], q_shared)
+                T.copy(k[batch_idx, left:right, bhg, 0:DK], k_shared)
+                T.copy(v[batch_idx, left:right, bh, bv * block_DV : (bv + 1) * block_DV], v_shared)
+                T.copy(a[batch_idx, left:right, bh, 0:block_S], a_shared)
                 for j_s in T.Parallel(block_S):
-                    g_shared[j_s] = g[bb, left + j_s, bh]
+                    g_shared[j_s] = g[batch_idx, left + j_s, bh]
 
                 for j_s in T.Parallel(block_S):
                     g_exp_shared[j_s] = T.exp2(g_shared[j_s] * 1.442695)
@@ -331,7 +348,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                 T.copy(tmp_tmem[:, 0:block_DV], o_fragment)
 
                 if store_o:
-                    T.copy(o_fragment, o[bb, left:right, bh, bv * block_DV : (bv + 1) * block_DV])
+                    T.copy(o_fragment, o[batch_idx, left:right, bh, bv * block_DV : (bv + 1) * block_DV])
 
                 # S = g_last * S + K^T @ V'
                 g_last_local[0] = g_exp_shared[block_S - 1]
@@ -387,10 +404,12 @@ def fused_gdr_fwd(
         fallback_reasons.append("output_h")
     if cp_seq_map is not None:
         fallback_reasons.append("cp_seq_map")
-    if cu_seqlens is not None:
-        fallback_reasons.append("varlen")
     if num_tokens % chunk_size != 0:
         fallback_reasons.append("ragged_tokens")
+    if cu_seqlens is not None:
+        seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
+        if bool((seqlens % chunk_size != 0).any().item()):
+            fallback_reasons.append("varlen_ragged")
     if os.environ.get("FLASHQLA_BLACKWELL_PRETRANSFORM_A", "1") != "1":
         fallback_reasons.append("raw_a")
     use_native_by_policy, policy_reason = should_use_native_fwd(H, Hg)
@@ -418,13 +437,21 @@ def fused_gdr_fwd(
         )
 
     _debug(
-        f"using native fixed-length fwd H={H} Hg={Hg} tokens={num_tokens} "
+        f"using native fwd H={H} Hg={Hg} tokens={num_tokens} "
+        f"varlen={cu_seqlens is not None} "
         f"output_final_state={output_final_state} output_o={output_o}"
     )
     assert K == V == 128
     assert chunk_size == 64
 
-    real_batch_size = batch_size
+    is_varlen = cu_seqlens is not None
+    if is_varlen:
+        real_batch_size = len(cu_seqlens) - 1
+        seqlen_dtype = cu_seqlens.dtype
+    else:
+        real_batch_size = batch_size
+        cu_seqlens = torch.empty((batch_size + 1), dtype=torch.int32, device=k.device)
+        seqlen_dtype = torch.int32
     use_initial_state = initial_state is not None
     if initial_state is None:
         initial_state = torch.empty(
@@ -482,10 +509,12 @@ def fused_gdr_fwd(
         h0_dtype=initial_state.dtype,
         ht_dtype=final_state.dtype,
         o_dtype=o.dtype,
+        seqlen_dtype=seqlen_dtype,
         accum_dtype="float32",
         use_initial_state=use_initial_state,
         store_final_state=output_final_state,
         store_o=output_o,
+        is_varlen=is_varlen,
         max_iters=max_iters,
         use_bar_load="load" in sync_barriers,
         use_bar_h_shared="h" in sync_barriers,
@@ -502,6 +531,7 @@ def fused_gdr_fwd(
         a,
         g,
         initial_state,
+        cu_seqlens,
         o,
         final_state,
     )

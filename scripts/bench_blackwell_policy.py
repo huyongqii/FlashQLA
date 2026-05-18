@@ -245,6 +245,7 @@ class RunResult:
     shape: str
     nkh: int
     nvh: int
+    batch_size: int | None
     t: int | None
     fla_ms: float | None
     qla_ms: float | None
@@ -289,6 +290,7 @@ def _parse_float(value: str) -> float | None:
 def _parse_output(text: str) -> tuple[list[dict[str, float | int | None]], list[str]]:
     rows: list[dict[str, float | int | None]] = []
     kernels: set[str] = set()
+    current_b: int | None = None
     current_t: int | None = None
     pending_total: tuple[float | None, float | None] | None = None
     pending_profile: dict[str, tuple[float | None, float | None]] = {}
@@ -296,6 +298,7 @@ def _parse_output(text: str) -> tuple[list[dict[str, float | int | None]], list[
     for line in text.splitlines():
         shape_match = SHAPE_RE.search(line)
         if shape_match:
+            current_b = int(shape_match.group("b"))
             current_t = int(shape_match.group("t"))
             pending_total = None
             pending_profile = {}
@@ -324,6 +327,7 @@ def _parse_output(text: str) -> tuple[list[dict[str, float | int | None]], list[
         if speedup_match and current_t is not None and pending_total is not None:
             row = {
                 "t": current_t,
+                "batch_size": current_b,
                 "fla_ms": pending_total[0],
                 "qla_ms": pending_total[1],
                 "speedup": float(speedup_match.group("speedup")),
@@ -496,6 +500,7 @@ def _run_one(
                 shape=shape,
                 nkh=nkh,
                 nvh=nvh,
+                batch_size=None,
                 t=None,
                 fla_ms=None,
                 qla_ms=None,
@@ -518,12 +523,13 @@ def _run_one(
             )
         ]
 
-    return [
+    results = [
         RunResult(
             policy=policy,
             shape=shape,
             nkh=nkh,
             nvh=nvh,
+            batch_size=row["batch_size"],
             t=int(row["t"]),
             fla_ms=row["fla_ms"],
             qla_ms=row["qla_ms"],
@@ -546,6 +552,12 @@ def _run_one(
         )
         for row in parsed
     ]
+    if status != "ok" and len(results) > 1:
+        for row in results[:-1]:
+            row.status = "ok"
+            row.returncode = 0
+            row.error_tail = ""
+    return results
 
 
 def _write_csv(path: Path, rows: list[RunResult]) -> None:
@@ -554,6 +566,7 @@ def _write_csv(path: Path, rows: list[RunResult]) -> None:
         "shape",
         "nkh",
         "nvh",
+        "batch_size",
         "t",
         "fla_ms",
         "qla_ms",
@@ -588,7 +601,11 @@ def _print_summary(rows: list[RunResult]) -> None:
 
     print("\nSummary", flush=True)
     for (policy, shape), group in sorted(grouped.items()):
-        speedups = [row.speedup for row in group if row.speedup is not None]
+        speedups = [
+            row.speedup
+            for row in group
+            if row.speedup is not None and row.status == "ok"
+        ]
         if not speedups:
             status = ",".join(sorted({row.status for row in group}))
             print(f"{policy:16s} {shape:6s} status={status}", flush=True)
@@ -606,9 +623,10 @@ def _print_summary(rows: list[RunResult]) -> None:
     if failed:
         print("\nFailures", flush=True)
         for row in failed:
+            batch = f" b={row.batch_size}" if row.batch_size is not None else ""
             print(
                 f"{row.policy:16s} {row.shape:6s} "
-                f"t={row.t if row.t is not None else 'unknown'} "
+                f"t={row.t if row.t is not None else 'unknown'}{batch} "
                 f"status={row.status} rc={row.returncode} "
                 f"tail={row.error_tail}",
                 flush=True,
