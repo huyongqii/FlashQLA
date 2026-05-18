@@ -129,6 +129,7 @@ def tilelang_precompute_p_blackwell(
             bc, bhg = bchg // Hg, bchg % Hg
             bb, chunk_idx = bc // num_p_chunks, bc % num_p_chunks
             left = chunk_idx * block_S
+            right = left + block_S
 
             q_shared = T.alloc_shared((block_S, DK), dtype=qkva_dtype)
             k_shared = T.alloc_shared((block_S, DK), dtype=qkva_dtype)
