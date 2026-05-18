@@ -82,6 +82,11 @@ FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS=load,h \
 python tests/test_gdr.py --set profile --skip-bwd --no-cp
 ```
 
+`FLASHQLA_BLACKWELL_TMEM_WIDTH` defaults to `128`. Use
+`FLASHQLA_BLACKWELL_TMEM_WIDTH=exact` to test exact `block_DV`-wide TMEM
+accumulators. The exact path is kept as an A/B option because B300 measurements
+did not show a structural win for Qwen397 TP2/TP4/TP8.
+
 Do not benchmark this native path with `--with-cp` yet. The existing CP
 preprocess/fused-output combination is not a valid Blackwell native performance
 path for the current forward kernel: repeated correctness runs show final state
