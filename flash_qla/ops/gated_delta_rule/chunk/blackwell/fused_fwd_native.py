@@ -388,9 +388,9 @@ def fused_gdr_fwd(
         fallback_reasons.append("output_h")
     is_varlen = cu_seqlens is not None
     is_cp = cp_seq_map is not None
-    if is_cp and os.environ.get("FLASHQLA_BLACKWELL_NATIVE_CP", "") != "1":
+    if is_cp:
         fallback_reasons.append("cp_seq_map")
-    elif is_varlen and not is_cp:
+    if is_varlen:
         fallback_reasons.append("varlen")
     if num_tokens % chunk_size != 0:
         fallback_reasons.append("ragged_tokens")

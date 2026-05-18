@@ -40,14 +40,6 @@ def chunk_gated_delta_rule_fwd(
     use_blackwell_native_fwd = False
     if is_blackwell(_cc):
         use_blackwell_native_fwd, _ = should_use_native_fwd(H, Hg)
-    enable_blackwell_native_cp = (
-        os.environ.get("FLASHQLA_BLACKWELL_NATIVE_CP", "") == "1"
-        and is_blackwell(_cc)
-        and use_blackwell_native_fwd
-        and cu_seqlens is None
-        and not output_h
-        and auto_cp
-    )
     pretransform_a = (
         os.environ.get("FLASHQLA_BLACKWELL_PRETRANSFORM_A", "1") == "1"
         and is_blackwell(_cc)
@@ -61,7 +53,7 @@ def chunk_gated_delta_rule_fwd(
         "b": beta,
         "cu_seqlens": cu_seqlens,
     }
-    if pretransform_a and not enable_blackwell_native_cp:
+    if pretransform_a:
         kkt_kwargs["g"] = g
     A = kkt_solve(**kkt_kwargs)
     if os.environ.get("FLASHQLA_BLACKWELL_PRECOMPUTE_P", "") == "1":
@@ -70,19 +62,7 @@ def chunk_gated_delta_rule_fwd(
             "corrupted final_state on B200. Use the default pretransform-A path "
             "while the P-reuse design is reworked."
         )
-    if enable_blackwell_native_cp:
-        initial_state, cu_seqlens, cp_seq_map, raw_cu_seqlens = (
-            intra_card_cp_preprocess(
-                k=k,
-                v=v,
-                a=A,
-                g=g,
-                b=beta,
-                raw_h0=initial_state,
-                raw_cu_seqlens=cu_seqlens,
-            )
-        )
-    elif auto_cp:
+    if auto_cp:
         initial_state, cu_seqlens, cp_seq_map, raw_cu_seqlens = (
             intra_card_cp_preprocess(
                 k=k,

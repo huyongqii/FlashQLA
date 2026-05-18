@@ -59,17 +59,6 @@ POLICIES = {
         'FLASHQLA_BLACKWELL_FWD_THREADS': '256',
         'FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS': 'load,h',
     },
-    'qwen397_native_cp': {
-        'FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE': '1',
-        'FLASHQLA_BLACKWELL_NATIVE': '1',
-        'FLASHQLA_BLACKWELL_NATIVE_KERNELS': 'fwd,kkt',
-        'FLASHQLA_BLACKWELL_FWD_POLICY': 'native',
-        'FLASHQLA_BLACKWELL_NATIVE_CP': '1',
-        'FLASHQLA_AUTOCP': '1',
-        'FLASHQLA_BLACKWELL_BLOCK_DV': '64',
-        'FLASHQLA_BLACKWELL_FWD_THREADS': '256',
-        'FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS': 'load,h',
-    },
     'qwen397_native_512': {
         'FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE': '1',
         'FLASHQLA_BLACKWELL_NATIVE': '1',
@@ -151,7 +140,6 @@ ENV_TO_CLEAR = (
     "FLASHQLA_BLACKWELL_FWD_THREADS",
     "FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS",
     "FLASHQLA_BLACKWELL_FWD_POLICY",
-    "FLASHQLA_BLACKWELL_NATIVE_CP",
     "FLASHQLA_AUTOCP",
     "FLASHQLA_BLACKWELL_FWD_EXPERIMENT",
     "FLASHQLA_BLACKWELL_FWD_MAX_ITERS",
@@ -569,6 +557,19 @@ def main() -> int:
         raise ValueError(f"Unknown policies: {unknown_policies}. Valid: {sorted(POLICIES)}")
     if unknown_shapes:
         raise ValueError(f"Unknown shapes: {unknown_shapes}. Valid: {sorted(SHAPES)}")
+    if not args.no_cp:
+        unsupported_cp = [
+            policy
+            for policy in selected_policies
+            if "fwd" in POLICIES[policy].get("FLASHQLA_BLACKWELL_NATIVE_KERNELS", "")
+            and POLICIES[policy].get("FLASHQLA_BLACKWELL_FWD_POLICY", "native") != "compat"
+        ]
+        if unsupported_cp:
+            raise ValueError(
+                "--with-cp is not supported for Blackwell native forward policies "
+                f"{unsupported_cp}. Use the default --no-cp path for current "
+                "native benchmarks; CP needs a separate state-prefix rewrite."
+            )
 
     log_dir = Path(args.log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)

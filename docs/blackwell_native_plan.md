@@ -82,25 +82,12 @@ FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS=load,h \
 python tests/test_gdr.py --set profile --skip-bwd --no-cp
 ```
 
-The first structural optimization after the stable no-CP baseline is the
-opt-in native CP path:
-
-```bash
-python scripts/bench_blackwell_policy.py \
-  --policies qwen397_native,qwen397_native_cp \
-  --shapes tp8,tp4,tp2 \
-  --set profile \
-  --with-cp \
-  --correctness-repeats 20 \
-  --timeout 300 \
-  --out blackwell_qwen397_native_cp_smoke_b300.csv \
-  --log-dir blackwell_qwen397_native_cp_smoke_b300_logs
-```
-
-`qwen397_native_cp` intentionally computes raw A for CP state-prefix preparation
-and transformed A for native forward. This adds KKT work, but it lets the fused
-forward run over multiple CP segments instead of a single long serial scan per
-head/DV block.
+Do not benchmark this native path with `--with-cp` yet. The existing CP
+preprocess/fused-output combination is not a valid Blackwell native performance
+path for the current forward kernel: repeated correctness runs show final state
+can be close while output is wrong at early chunks. CP must be reintroduced as a
+separate state-prefix design, not by passing the current CP sequence map into
+the AG kernel.
 
 ## Forward GEMM Sites
 
