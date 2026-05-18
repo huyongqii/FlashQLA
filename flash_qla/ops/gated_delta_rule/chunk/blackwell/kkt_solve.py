@@ -728,9 +728,15 @@ def kkt_solve(
     cu_seqlens: Optional[torch.LongTensor] = None,
 ):
     experiment = os.environ.get("FLASHQLA_BLACKWELL_KKT_EXPERIMENT", "")
-    if experiment != "tcgen05" and cu_seqlens is None:
-        batch_size, num_tokens, Hg, K = k.shape
-        _, _, H = b.shape
+    batch_size, num_tokens, Hg, K = k.shape
+    _, _, H = b.shape
+    is_single_fixed_cu_seqlens = (
+        cu_seqlens is not None
+        and cu_seqlens.numel() == 2
+        and int(cu_seqlens[0].item()) == 0
+        and int(cu_seqlens[1].item()) == num_tokens
+    )
+    if experiment != "tcgen05" and (cu_seqlens is None or is_single_fixed_cu_seqlens):
         assert K == 128
         assert chunk_size == 64
         num_chunks = batch_size * tilelang.cdiv(num_tokens, chunk_size)
@@ -757,8 +763,6 @@ def kkt_solve(
             "disabled on Blackwell."
         )
 
-    batch_size, num_tokens, Hg, K = k.shape
-    _, _, H = b.shape
     assert K == 128
     assert chunk_size == 64
 

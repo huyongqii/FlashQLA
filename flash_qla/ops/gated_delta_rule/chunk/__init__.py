@@ -43,6 +43,7 @@ def chunk_gated_delta_rule_fwd(
     Hg, H = k.shape[-2], v.shape[-2]
     use_blackwell_native_fwd = False
     use_blackwell_cp = False
+    is_single_fixed_cu_seqlens = False
     if is_blackwell(_cc):
         use_blackwell_native_fwd, _ = should_use_native_fwd(H, Hg)
         blackwell_cp_requested = (
@@ -50,13 +51,13 @@ def chunk_gated_delta_rule_fwd(
             or os.environ.get("FLASHQLA_BLACKWELL_CP_EXACT", "") == "1"
         )
         use_blackwell_cp = auto_cp and use_blackwell_native_fwd and blackwell_cp_requested
-        if use_blackwell_cp and cu_seqlens is not None:
-            is_single_fixed_seq = (
+        if cu_seqlens is not None:
+            is_single_fixed_cu_seqlens = (
                 cu_seqlens.numel() == 2
                 and int(cu_seqlens[0].item()) == 0
                 and int(cu_seqlens[1].item()) == k.shape[1]
             )
-            if not is_single_fixed_seq:
+            if use_blackwell_cp and not is_single_fixed_cu_seqlens:
                 raise NotImplementedError(
                     "Blackwell native CP currently supports only fixed-length "
                     "inputs or cu_seqlens=[0, T]."
@@ -83,7 +84,7 @@ def chunk_gated_delta_rule_fwd(
         os.environ.get("FLASHQLA_BLACKWELL_PRETRANSFORM_A", "1") == "1"
         and is_blackwell(_cc)
         and use_blackwell_native_fwd
-        and cu_seqlens is None
+        and (cu_seqlens is None or is_single_fixed_cu_seqlens)
         and not output_h
     )
     if use_blackwell_cp:
