@@ -427,12 +427,30 @@ def tilelang_kkt_solve_fixed_fast(
             bar_a32 = T.alloc_barrier(arrive_count=128)
             bar_store = T.alloc_barrier(arrive_count=128)
 
-            T.copy(k[bb, left:right, bhg, 0:DK], k_shared)
-            for j_s in T.Parallel(block_S):
-                b_shared[j_s] = b[bb, left + j_s, bh]
-            if transform_a:
+            if right <= num_tokens:
+                T.copy(k[bb, left:right, bhg, 0:DK], k_shared)
                 for j_s in T.Parallel(block_S):
-                    g_shared[j_s] = g[bb, left + j_s, bh]
+                    b_shared[j_s] = b[bb, left + j_s, bh]
+                if transform_a:
+                    for j_s in T.Parallel(block_S):
+                        g_shared[j_s] = g[bb, left + j_s, bh]
+            else:
+                for j_s, j_k in T.Parallel(block_S, DK):
+                    if left + j_s < num_tokens:
+                        k_shared[j_s, j_k] = k[bb, left + j_s, bhg, j_k]
+                    else:
+                        k_shared[j_s, j_k] = 0
+                for j_s in T.Parallel(block_S):
+                    if left + j_s < num_tokens:
+                        b_shared[j_s] = b[bb, left + j_s, bh]
+                    else:
+                        b_shared[j_s] = 0
+                if transform_a:
+                    for j_s in T.Parallel(block_S):
+                        if left + j_s < num_tokens:
+                            g_shared[j_s] = g[bb, left + j_s, bh]
+                        else:
+                            g_shared[j_s] = g[bb, num_tokens - 1, bh]
             T.barrier_arrive(bar_load)
             T.barrier_wait(bar_load, 0)
 
@@ -531,7 +549,12 @@ def tilelang_kkt_solve_fixed_fast(
             T.barrier_arrive(bar_store)
             T.barrier_wait(bar_store, 0)
 
-            T.copy(a64_shared, a[bb, left:right, bh, 0:block_S])
+            if right <= num_tokens:
+                T.copy(a64_shared, a[bb, left:right, bh, 0:block_S])
+            else:
+                for j_s, j_t in T.Parallel(block_S, block_S):
+                    if left + j_s < num_tokens:
+                        a[bb, left + j_s, bh, j_t] = a64_shared[j_s, j_t]
 
     return tilelang_kkt_solve_fixed_fast_kernel
 
@@ -610,11 +633,28 @@ def tilelang_kkt_solve_fixed_fast_dual(
             bar_store_raw = T.alloc_barrier(arrive_count=128)
             bar_store_transformed = T.alloc_barrier(arrive_count=128)
 
-            T.copy(k[bb, left:right, bhg, 0:DK], k_shared)
-            for j_s in T.Parallel(block_S):
-                b_shared[j_s] = b[bb, left + j_s, bh]
-            for j_s in T.Parallel(block_S):
-                g_shared[j_s] = g[bb, left + j_s, bh]
+            if right <= num_tokens:
+                T.copy(k[bb, left:right, bhg, 0:DK], k_shared)
+                for j_s in T.Parallel(block_S):
+                    b_shared[j_s] = b[bb, left + j_s, bh]
+                for j_s in T.Parallel(block_S):
+                    g_shared[j_s] = g[bb, left + j_s, bh]
+            else:
+                for j_s, j_k in T.Parallel(block_S, DK):
+                    if left + j_s < num_tokens:
+                        k_shared[j_s, j_k] = k[bb, left + j_s, bhg, j_k]
+                    else:
+                        k_shared[j_s, j_k] = 0
+                for j_s in T.Parallel(block_S):
+                    if left + j_s < num_tokens:
+                        b_shared[j_s] = b[bb, left + j_s, bh]
+                    else:
+                        b_shared[j_s] = 0
+                for j_s in T.Parallel(block_S):
+                    if left + j_s < num_tokens:
+                        g_shared[j_s] = g[bb, left + j_s, bh]
+                    else:
+                        g_shared[j_s] = g[bb, num_tokens - 1, bh]
             T.barrier_arrive(bar_load)
             T.barrier_wait(bar_load, 0)
 
@@ -707,7 +747,12 @@ def tilelang_kkt_solve_fixed_fast_dual(
             T.barrier_arrive(bar_store_raw)
             T.barrier_wait(bar_store_raw, 0)
 
-            T.copy(a64_shared, a_raw[bb, left:right, bh, 0:block_S])
+            if right <= num_tokens:
+                T.copy(a64_shared, a_raw[bb, left:right, bh, 0:block_S])
+            else:
+                for j_s, j_t in T.Parallel(block_S, block_S):
+                    if left + j_s < num_tokens:
+                        a_raw[bb, left + j_s, bh, j_t] = a64_shared[j_s, j_t]
 
             for j_s, j_t in T.Parallel(block_S, block_S):
                 a64_shared[j_s, j_t] *= T.exp2(
@@ -717,7 +762,14 @@ def tilelang_kkt_solve_fixed_fast_dual(
             T.barrier_arrive(bar_store_transformed)
             T.barrier_wait(bar_store_transformed, 0)
 
-            T.copy(a64_shared, a_transformed[bb, left:right, bh, 0:block_S])
+            if right <= num_tokens:
+                T.copy(a64_shared, a_transformed[bb, left:right, bh, 0:block_S])
+            else:
+                for j_s, j_t in T.Parallel(block_S, block_S):
+                    if left + j_s < num_tokens:
+                        a_transformed[bb, left + j_s, bh, j_t] = a64_shared[
+                            j_s, j_t
+                        ]
 
     return tilelang_kkt_solve_fixed_fast_dual_kernel
 
@@ -762,7 +814,7 @@ def kkt_solve(
     experiment = os.environ.get("FLASHQLA_BLACKWELL_KKT_EXPERIMENT", "")
     batch_size, num_tokens, Hg, K = k.shape
     _, _, H = b.shape
-    can_use_fixed_fast = cu_seqlens is None and num_tokens % chunk_size == 0
+    can_use_fixed_fast = cu_seqlens is None
     if cu_seqlens is not None:
         seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
         can_use_fixed_fast = (
