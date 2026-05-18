@@ -89,11 +89,17 @@ def _select_block_dv(real_batch_size: int, num_v_heads: int) -> int:
     ratio = float(os.environ.get("FLASHQLA_TARGET_CTA_RATIO", "0.7"))
     target_num_ctas = max(1, int(sm_count * ratio))
     grid_size = real_batch_size * num_v_heads
+    min_block_dv = int(os.environ.get("FLASHQLA_BLACKWELL_MIN_BLOCK_DV", "64"))
+    if min_block_dv not in (32, 64, 128):
+        raise ValueError(
+            "FLASHQLA_BLACKWELL_MIN_BLOCK_DV must be 32, 64, or 128, "
+            f"got {min_block_dv}"
+        )
     if grid_size >= target_num_ctas:
         return 128
     if grid_size * 2 >= target_num_ctas:
         return 64
-    return 32
+    return min_block_dv
 
 
 @tilelang.jit(
