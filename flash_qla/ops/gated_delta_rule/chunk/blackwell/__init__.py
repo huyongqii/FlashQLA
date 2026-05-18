@@ -22,18 +22,12 @@ _NATIVE_KERNELS = {
     for item in os.environ.get("FLASHQLA_BLACKWELL_NATIVE_KERNELS", "").split(",")
     if item.strip()
 }
-_FWD_EXPERIMENT = os.environ.get("FLASHQLA_BLACKWELL_FWD_EXPERIMENT", "").strip().lower()
 
 if _USE_EXPERIMENTAL_NATIVE:
     if "fwd" in _NATIVE_KERNELS or "all" in _NATIVE_KERNELS:
-        if _FWD_EXPERIMENT in ("pipeline", "cp_pipeline"):
-            from .fused_fwd import fused_gdr_fwd as _native_fused_gdr_fwd
+        from .fused_fwd_native import fused_gdr_fwd as _native_fused_gdr_fwd
 
-            _NATIVE_FWD_NAME = "pipeline"
-        else:
-            from .fused_fwd_native import fused_gdr_fwd as _native_fused_gdr_fwd
-
-            _NATIVE_FWD_NAME = "ag"
+        _NATIVE_FWD_NAME = "ag"
     else:
         _native_fused_gdr_fwd = None
         _NATIVE_FWD_NAME = "none"
@@ -48,7 +42,6 @@ else:
 
 
 HAS_NATIVE_BLACKWELL_KERNELS = _USE_EXPERIMENTAL_NATIVE
-_DEBUG_EMITTED = False
 _DEBUG_MESSAGES = set()
 
 
