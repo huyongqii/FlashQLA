@@ -457,7 +457,7 @@ def fused_gdr_fwd(
         unsupported_reasons.append("native_fwd_disabled")
     if output_h:
         unsupported_reasons.append("output_h")
-    if num_tokens % chunk_size != 0:
+    if cu_seqlens is None and num_tokens % chunk_size != 0:
         unsupported_reasons.append("ragged_tokens")
     if cu_seqlens is not None:
         seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
