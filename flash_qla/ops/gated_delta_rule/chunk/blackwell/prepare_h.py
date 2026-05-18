@@ -65,10 +65,9 @@ def tilelang_prepare_h(
     ht_shape = (batch_size, H, DK, DV)
     m_shape = (batch_size, H, DK, DK)
     tcgen05_mode = os.environ.get("FLASHQLA_BLACKWELL_PREPARE_H_TCGEN05", "").lower()
-    use_tcgen05_all = tcgen05_mode in ("1", "all", "xys")
+    use_tcgen05_all = tcgen05_mode in ("1", "all", "xy")
     use_tcgen05_x = use_tcgen05_all or tcgen05_mode in ("x", "xy")
     use_tcgen05_y = use_tcgen05_all or tcgen05_mode in ("y", "xy")
-    use_tcgen05_s = use_tcgen05_all or tcgen05_mode == "s"
 
     @T.prim_func
     def tilelang_prepare_h_kernel(
@@ -136,17 +135,25 @@ def tilelang_prepare_h(
                 (block_S), dtype=accum_dtype, scope="shared"
             )
             if use_tcgen05_x:
+                k_shared_L = T.alloc_shared((block_S, DK // 2), dtype=qkva_dtype)
+                k_shared_R = T.alloc_shared((block_S, DK // 2), dtype=qkva_dtype)
                 x_tmem_L = T.alloc_tmem((block_S, DK // 2), dtype=accum_dtype)
                 x_tmem_R = T.alloc_tmem((block_S, DK // 2), dtype=accum_dtype)
             if use_tcgen05_y:
+                h_shared_L = T.alloc_shared((DK, DV // 2), dtype=qkva_dtype)
+                h_shared_R = T.alloc_shared((DK, DV // 2), dtype=qkva_dtype)
                 y_tmem_L = T.alloc_tmem((block_S, DV // 2), dtype=accum_dtype)
                 y_tmem_R = T.alloc_tmem((block_S, DV // 2), dtype=accum_dtype)
-            if use_tcgen05_s:
-                h_tmem = T.alloc_tmem((DK, DV), dtype=accum_dtype)
 
             h_fragment = T.alloc_fragment((DK, DV), dtype=accum_dtype)
             x_fragment = T.alloc_fragment((block_S, DK), dtype=accum_dtype)
             y_fragment = T.alloc_fragment((block_S, DV), dtype=accum_dtype)
+            if use_tcgen05_x:
+                x_fragment_L = T.alloc_fragment((block_S, DK // 2), dtype=accum_dtype)
+                x_fragment_R = T.alloc_fragment((block_S, DK // 2), dtype=accum_dtype)
+            if use_tcgen05_y:
+                y_fragment_L = T.alloc_fragment((block_S, DV // 2), dtype=accum_dtype)
+                y_fragment_R = T.alloc_fragment((block_S, DV // 2), dtype=accum_dtype)
             m_fragment_L = T.alloc_fragment((DK, DK // 2), dtype=accum_dtype)
             m_fragment_R = T.alloc_fragment((DK, DK // 2), dtype=accum_dtype)
             z_fragment_L = T.alloc_fragment((block_S, DK // 2), dtype=accum_dtype)
@@ -170,9 +177,6 @@ def tilelang_prepare_h(
             if use_tcgen05_y:
                 mbar_y_L = T.alloc_barrier(arrive_count=[1] * 8)
                 mbar_y_R = T.alloc_barrier(arrive_count=[1] * 8)
-            if use_tcgen05_s:
-                mbar_s_L = T.alloc_barrier(arrive_count=[1] * 8)
-                mbar_s_R = T.alloc_barrier(arrive_count=[1] * 8)
 
             T.use_swizzle(10)
 
@@ -219,35 +223,13 @@ def tilelang_prepare_h(
                     # [STAGE = i_s % num_stages] 2
                     T.barrier_wait(bar_2, i_s % 2)
                     # S += X^T @ Y
-                    if use_tcgen05_s:
-                        T.copy(h_fragment, h_tmem)
-                        T.tcgen05_gemm(
-                            x_shared,
-                            y_shared[:, 0 : DV // 2],
-                            h_tmem[:, 0 : DV // 2],
-                            transpose_A=True,
-                            clear_accum=False,
-                            mbar=mbar_s_L[i_s % 8],
-                        )
-                        T.mbarrier_wait_parity(mbar_s_L[i_s % 8], (i_s // 8) % 2)
-                        T.tcgen05_gemm(
-                            x_shared,
-                            y_shared[:, DV // 2 : DV],
-                            h_tmem[:, DV // 2 : DV],
-                            transpose_A=True,
-                            clear_accum=False,
-                            mbar=mbar_s_R[i_s % 8],
-                        )
-                        T.mbarrier_wait_parity(mbar_s_R[i_s % 8], (i_s // 8) % 2)
-                        T.copy(h_tmem, h_fragment)
-                    else:
-                        T.gemm(
-                            x_shared,
-                            y_shared,
-                            h_fragment,
-                            transpose_A=True,
-                            clear_accum=False,
-                        )
+                    T.gemm(
+                        x_shared,
+                        y_shared,
+                        h_fragment,
+                        transpose_A=True,
+                        clear_accum=False,
+                    )
                     T.barrier_arrive(bar_3)
 
                     T.barrier_arrive(data_is_free[i_s % num_stages])
@@ -279,26 +261,36 @@ def tilelang_prepare_h(
                     T.barrier_wait(bar_0, i_s % 2)
                     # X = A^T @ K
                     if use_tcgen05_x:
+                        for j_s, j_k in T.Parallel(block_S, DK // 2):
+                            k_shared_L[j_s, j_k] = k_shared[
+                                i_s % num_stages, j_s, j_k
+                            ]
+                            k_shared_R[j_s, j_k] = k_shared[
+                                i_s % num_stages, j_s, j_k + DK // 2
+                            ]
                         T.tcgen05_gemm(
                             a_shared[i_s % num_stages, :, :],
-                            k_shared[i_s % num_stages, :, 0 : DK // 2],
+                            k_shared_L,
                             x_tmem_L,
                             transpose_A=True,
                             clear_accum=True,
                             mbar=mbar_x_L[i_s % 8],
                         )
                         T.mbarrier_wait_parity(mbar_x_L[i_s % 8], (i_s // 8) % 2)
-                        T.copy(x_tmem_L, x_fragment[:, 0 : DK // 2])
+                        T.copy(x_tmem_L, x_fragment_L)
                         T.tcgen05_gemm(
                             a_shared[i_s % num_stages, :, :],
-                            k_shared[i_s % num_stages, :, DK // 2 : DK],
+                            k_shared_R,
                             x_tmem_R,
                             transpose_A=True,
                             clear_accum=True,
                             mbar=mbar_x_R[i_s % 8],
                         )
                         T.mbarrier_wait_parity(mbar_x_R[i_s % 8], (i_s // 8) % 2)
-                        T.copy(x_tmem_R, x_fragment[:, DK // 2 : DK])
+                        T.copy(x_tmem_R, x_fragment_R)
+                        for j_s, j_k in T.Parallel(block_S, DK // 2):
+                            x_fragment[j_s, j_k] = x_fragment_L[j_s, j_k]
+                            x_fragment[j_s, j_k + DK // 2] = x_fragment_R[j_s, j_k]
                     else:
                         T.gemm(
                             a_shared[i_s % num_stages, :, :],
@@ -385,24 +377,30 @@ def tilelang_prepare_h(
                     T.barrier_wait(bar_1, i_s % 2)
                     # U = K @ S
                     if use_tcgen05_y:
+                        for j_k, j_v in T.Parallel(DK, DV // 2):
+                            h_shared_L[j_k, j_v] = h_shared[j_k, j_v]
+                            h_shared_R[j_k, j_v] = h_shared[j_k, j_v + DV // 2]
                         T.tcgen05_gemm(
                             k_shared[i_s % num_stages, :, :],
-                            h_shared[:, 0 : DV // 2],
+                            h_shared_L,
                             y_tmem_L,
                             clear_accum=True,
                             mbar=mbar_y_L[i_s % 8],
                         )
                         T.mbarrier_wait_parity(mbar_y_L[i_s % 8], (i_s // 8) % 2)
-                        T.copy(y_tmem_L, y_fragment[:, 0 : DV // 2])
+                        T.copy(y_tmem_L, y_fragment_L)
                         T.tcgen05_gemm(
                             k_shared[i_s % num_stages, :, :],
-                            h_shared[:, DV // 2 : DV],
+                            h_shared_R,
                             y_tmem_R,
                             clear_accum=True,
                             mbar=mbar_y_R[i_s % 8],
                         )
                         T.mbarrier_wait_parity(mbar_y_R[i_s % 8], (i_s // 8) % 2)
-                        T.copy(y_tmem_R, y_fragment[:, DV // 2 : DV])
+                        T.copy(y_tmem_R, y_fragment_R)
+                        for j_s, j_v in T.Parallel(block_S, DV // 2):
+                            y_fragment[j_s, j_v] = y_fragment_L[j_s, j_v]
+                            y_fragment[j_s, j_v + DV // 2] = y_fragment_R[j_s, j_v]
                     else:
                         T.gemm(
                             k_shared[i_s % num_stages, :, :],
