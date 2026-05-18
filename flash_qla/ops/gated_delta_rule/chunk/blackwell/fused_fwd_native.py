@@ -104,6 +104,62 @@ def _select_block_dv(real_batch_size: int, num_v_heads: int) -> int:
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     },
 )
+def tilelang_precompute_p_blackwell(
+    Hg,
+    DK,
+    chunk_size,
+    accum_dtype,
+    qkva_dtype,
+):
+    batch_size = T.dynamic("batch_size")
+    num_tokens = T.dynamic("num_tokens")
+    num_chunks = T.dynamic("num_chunks")
+    block_S = chunk_size
+
+    q_shape = (batch_size, num_tokens, Hg, DK)
+    p_shape = (batch_size, num_chunks, Hg, block_S, block_S)
+
+    @T.prim_func
+    def tilelang_precompute_p_blackwell_kernel(
+        q: T.Tensor(q_shape, dtype=qkva_dtype),
+        k: T.Tensor(q_shape, dtype=qkva_dtype),
+        p: T.Tensor(p_shape, dtype=qkva_dtype),
+        num_chunks: T.int32,
+    ):
+        with T.Kernel(batch_size * num_chunks * Hg, threads=128) as (bchg,):
+            bc, bhg = bchg // Hg, bchg % Hg
+            bb, chunk_idx = bc // num_chunks, bc % num_chunks
+            left = chunk_idx * block_S
+            right = left + block_S
+
+            q_shared = T.alloc_shared((block_S, DK), dtype=qkva_dtype)
+            k_shared = T.alloc_shared((block_S, DK), dtype=qkva_dtype)
+            p_tmem = T.alloc_tmem((block_S, block_S), dtype=accum_dtype)
+            p_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
+            mbar_p = T.alloc_barrier(arrive_count=1)
+
+            T.copy(q[bb, left:right, bhg, 0:DK], q_shared)
+            T.copy(k[bb, left:right, bhg, 0:DK], k_shared)
+            T.tcgen05_gemm(
+                q_shared,
+                k_shared,
+                p_tmem,
+                transpose_B=True,
+                clear_accum=True,
+                mbar=mbar_p,
+            )
+            T.mbarrier_wait_parity(mbar_p, 0)
+            T.copy(p_tmem, p_fragment)
+            T.copy(p_fragment, p[bb, chunk_idx, bhg, 0:block_S, 0:block_S])
+
+    return tilelang_precompute_p_blackwell_kernel
+
+
+@tilelang.jit(
+    pass_configs={
+        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
+    },
+)
 def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
     H,
     Hg,
@@ -127,12 +183,14 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
     use_bar_h_shared,
     use_bar_o,
     use_bar_h_scaled,
+    use_precomputed_p,
     num_threads=128,
     block_DV=64,
     tmem_width=128,
 ):
     batch_size = T.dynamic("batch_size")
     num_tokens = T.dynamic("num_tokens")
+    num_p_chunks = T.dynamic("num_p_chunks")
     block_S = chunk_size
 
     if is_varlen:
@@ -159,6 +217,9 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
         v: T.Tensor(v_shape, dtype=qkva_dtype),
         a: T.Tensor(a_shape, dtype=qkva_dtype),
         g: T.Tensor(g_shape, dtype=g_dtype),
+        p: T.Tensor(
+            (batch_size, num_p_chunks, Hg, block_S, block_S), dtype=qkva_dtype
+        ),
         h0: T.Tensor(h0_shape, dtype=h0_dtype),
         cu_seqlens: T.Tensor([batch_size + 1], dtype=seqlen_dtype),
         o: T.Tensor(o_shape, dtype=o_dtype),
@@ -296,17 +357,23 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     v_fragment[j_s, j_v] *= g_rev_exp_shared[j_s]
                     vn_shared[j_s, j_v] = v_fragment[j_s, j_v]
 
-                # P = Q @ K^T
-                T.tcgen05_gemm(
-                    q_shared,
-                    k_shared,
-                    p_tmem,
-                    transpose_B=True,
-                    clear_accum=True,
-                    mbar=mbar_p[mbar_slot],
-                )
-                T.mbarrier_wait_parity(mbar_p[mbar_slot], mbar_phase)
-                T.copy(p_tmem, p_fragment)
+                # P = Q @ K^T. For small-Hv Qwen397 TP2 this matrix is shared
+                # by multiple value heads; the optional precompute path avoids
+                # recomputing it once per (head, DV block).
+                if use_precomputed_p:
+                    T.copy(p[bb, i_s, bhg, 0:block_S, 0:block_S], p_shared)
+                    T.copy(p_shared, p_fragment)
+                else:
+                    T.tcgen05_gemm(
+                        q_shared,
+                        k_shared,
+                        p_tmem,
+                        transpose_B=True,
+                        clear_accum=True,
+                        mbar=mbar_p[mbar_slot],
+                    )
+                    T.mbarrier_wait_parity(mbar_p[mbar_slot], mbar_phase)
+                    T.copy(p_tmem, p_fragment)
 
                 # O = Q @ S
                 T.tcgen05_gemm(
@@ -452,6 +519,28 @@ def fused_gdr_fwd(
     )
     h = torch.empty((batch_size, 0, H, K, V), dtype=k.dtype, device=k.device)
     o = torch.empty_like(v)
+    use_precomputed_p = os.environ.get("FLASHQLA_BLACKWELL_PRECOMPUTE_P", "") == "1"
+    if use_precomputed_p:
+        num_chunks = tilelang.cdiv(num_tokens, chunk_size)
+        p = torch.empty(
+            (batch_size, num_chunks, Hg, chunk_size, chunk_size),
+            dtype=q.dtype,
+            device=q.device,
+        )
+        tilelang_precompute_p_kernel = tilelang_precompute_p_blackwell(
+            Hg,
+            K,
+            chunk_size,
+            accum_dtype="float32",
+            qkva_dtype=q.dtype,
+        )
+        tilelang_precompute_p_kernel(q, k, p, num_chunks)
+    else:
+        p = torch.empty(
+            (batch_size, 1, Hg, chunk_size, chunk_size),
+            dtype=q.dtype,
+            device=q.device,
+        )
 
     block_DV = _select_block_dv(real_batch_size, H)
     if block_DV not in (32, 64, 128):
@@ -509,6 +598,7 @@ def fused_gdr_fwd(
         use_bar_h_shared="h" in sync_barriers,
         use_bar_o="o" in sync_barriers,
         use_bar_h_scaled="hscale" in sync_barriers,
+        use_precomputed_p=use_precomputed_p,
         num_threads=num_threads,
         block_DV=block_DV,
         tmem_width=tmem_width,
@@ -519,6 +609,7 @@ def fused_gdr_fwd(
         v,
         a,
         g,
+        p,
         initial_state,
         cu_seqlens,
         o,

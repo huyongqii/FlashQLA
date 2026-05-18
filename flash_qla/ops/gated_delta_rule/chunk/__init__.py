@@ -213,12 +213,6 @@ def chunk_gated_delta_rule_fwd(
     if pretransform_a:
         kkt_kwargs["g"] = g
     A = kkt_solve(**kkt_kwargs)
-    if os.environ.get("FLASHQLA_BLACKWELL_PRECOMPUTE_P", "") == "1":
-        raise RuntimeError(
-            "FLASHQLA_BLACKWELL_PRECOMPUTE_P=1 is disabled: the first prototype "
-            "corrupted final_state on B200. Use the default pretransform-A path "
-            "while the P-reuse design is reworked."
-        )
     segmented_result = None
     if is_blackwell(_cc) and use_blackwell_native_fwd:
         segmented_result = _try_blackwell_segmented_fwd(
