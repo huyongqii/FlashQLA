@@ -416,15 +416,11 @@ def fused_gdr_fwd(
     if num_tokens % chunk_size != 0:
         unsupported_reasons.append("ragged_tokens")
     if cu_seqlens is not None:
-        is_cp_invocation = cp_seq_map is not None and raw_cu_seqlens is not None
-        if not is_cp_invocation and os.environ.get("FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE_VARLEN", "") != "1":
-            unsupported_reasons.append("varlen_native_disabled")
-        else:
-            seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
-            if bool((seqlens % chunk_size != 0).any().item()):
-                unsupported_reasons.append("varlen_ragged")
-            if not is_cp_invocation:
-                unsupported_reasons.append("varlen_pretransform_a_unimplemented")
+        seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
+        if bool((seqlens <= 0).any().item()):
+            unsupported_reasons.append("varlen_empty")
+        if bool((seqlens % chunk_size != 0).any().item()):
+            unsupported_reasons.append("varlen_ragged")
     if os.environ.get("FLASHQLA_BLACKWELL_PRETRANSFORM_A", "1") != "1":
         unsupported_reasons.append("raw_a")
     use_native_by_policy, policy_reason = should_use_native_fwd(H, Hg)
@@ -452,6 +448,12 @@ def fused_gdr_fwd(
     if is_varlen:
         real_batch_size = len(cu_seqlens) - 1
         seqlen_dtype = cu_seqlens.dtype
+        if int(cu_seqlens[0].item()) != 0 or int(cu_seqlens[-1].item()) != num_tokens:
+            raise ValueError(
+                "cu_seqlens must start at 0 and end at the flattened token count "
+                f"{num_tokens}, got start={int(cu_seqlens[0].item())} "
+                f"end={int(cu_seqlens[-1].item())}."
+            )
     else:
         real_batch_size = batch_size
         cu_seqlens = torch.empty((batch_size + 1), dtype=torch.int32, device=k.device)
@@ -468,6 +470,12 @@ def fused_gdr_fwd(
     else:
         raw_batch_size = raw_cu_seqlens.shape[0] - 1
     use_initial_state = initial_state is not None
+    if initial_state is not None and initial_state.shape[0] != real_batch_size:
+        raise ValueError(
+            "initial_state batch dimension must match the active sequence batch "
+            f"for Blackwell native fwd, expected {real_batch_size}, got "
+            f"{initial_state.shape[0]}."
+        )
     if initial_state is None:
         initial_state = torch.empty(
             (real_batch_size, H, K, V), dtype=torch.float32, device=k.device

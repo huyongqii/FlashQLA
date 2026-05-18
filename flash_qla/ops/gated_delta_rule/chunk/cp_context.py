@@ -158,6 +158,7 @@ def intra_card_cp_preprocess(
             )
         if batch_size > 1:
             return raw_h0, raw_cu_seqlens, None, None
+        raw_cu_was_none = raw_cu_seqlens is None
         if raw_cu_seqlens is None:
             device_idx = device.index
             if device_idx is None:
@@ -170,7 +171,7 @@ def intra_card_cp_preprocess(
             num_v_heads,
         )
         if not use_cp:
-            return raw_h0, None, None, None
+            return raw_h0, None if raw_cu_was_none else raw_cu_seqlens, None, None
 
         threshold_env = os.environ.get("FLASHQLA_CP_WARMUP_THRESHOLD", "").strip()
         if threshold_env:
