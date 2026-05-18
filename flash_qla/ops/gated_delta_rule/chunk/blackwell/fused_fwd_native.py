@@ -556,6 +556,11 @@ def fused_gdr_fwd(
             f"the cleaned Blackwell native path, got {fwd_experiment!r}"
         )
     sync_barriers = _sync_barriers()
+    if cu_seqlens is None:
+        has_ragged_tail = num_tokens % chunk_size != 0
+    else:
+        seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
+        has_ragged_tail = bool((seqlens % chunk_size != 0).any().item())
     _debug(
         f"threads={num_threads} block_DV={block_DV} tmem_width={tmem_width} "
         "sync_barriers=" + ",".join(sorted(sync_barriers))
@@ -582,7 +587,7 @@ def fused_gdr_fwd(
         use_bar_load="load" in sync_barriers,
         use_bar_h_shared="h" in sync_barriers,
         use_bar_o="o" in sync_barriers,
-        use_bar_h_scaled="hscale" in sync_barriers,
+        use_bar_h_scaled=("hscale" in sync_barriers) or has_ragged_tail,
         is_cp=is_cp,
         num_threads=num_threads,
         block_DV=block_DV,
