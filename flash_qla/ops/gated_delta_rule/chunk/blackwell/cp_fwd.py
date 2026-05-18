@@ -114,6 +114,7 @@ def tilelang_correct_h0(
     H,
     DK,
     DV,
+    max_cp_segments,
     res_dtype,
     accum_dtype,
     buffer_dtype,
@@ -149,28 +150,32 @@ def tilelang_correct_h0(
             cp_h0[seq_start_idx, bh, 0:DK, bv * block_DV : (bv + 1) * block_DV],
         )
 
-        for i_s in T.Pipelined(num_iters - 1, num_stages=2):
-            if fallback_mask[seq_start_idx + i_s, bh]:
-                T.copy(h_fragment, hd_shared)
-            T.copy(
-                ht_buffer[
-                    seq_start_idx + i_s, bh, 0:DK, bv * block_DV : (bv + 1) * block_DV
-                ],
-                h_shared,
-            )
-            T.copy(h_shared, h_fragment)
-            if fallback_mask[seq_start_idx + i_s, bh]:
-                T.copy(mt_buffer[seq_start_idx + i_s, bh, 0:DK, 0:DK], m_shared)
-                T.gemm(m_shared, hd_shared, h_fragment, clear_accum=False)
-            T.copy(
-                h_fragment,
-                cp_h0[
-                    seq_start_idx + i_s + 1,
-                    bh,
-                    0:DK,
-                    bv * block_DV : (bv + 1) * block_DV,
-                ],
-            )
+        for i_s in T.Pipelined(max_cp_segments - 1, num_stages=2):
+            if i_s < num_iters - 1:
+                if fallback_mask[seq_start_idx + i_s, bh]:
+                    T.copy(h_fragment, hd_shared)
+                T.copy(
+                    ht_buffer[
+                        seq_start_idx + i_s,
+                        bh,
+                        0:DK,
+                        bv * block_DV : (bv + 1) * block_DV,
+                    ],
+                    h_shared,
+                )
+                T.copy(h_shared, h_fragment)
+                if fallback_mask[seq_start_idx + i_s, bh]:
+                    T.copy(mt_buffer[seq_start_idx + i_s, bh, 0:DK, 0:DK], m_shared)
+                    T.gemm(m_shared, hd_shared, h_fragment, clear_accum=False)
+                T.copy(
+                    h_fragment,
+                    cp_h0[
+                        seq_start_idx + i_s + 1,
+                        bh,
+                        0:DK,
+                        bv * block_DV : (bv + 1) * block_DV,
+                    ],
+                )
 
     if use_raw_h0:
 
@@ -328,11 +333,13 @@ def correct_initial_states(
     fallback_mask: torch.Tensor,  # [cp_batch_size, num_v_heads]
     seq_map_r2c: torch.Tensor,  # [raw_batch_size + 1]
 ):
-    if seq_map_r2c.dtype != torch.int64:
-        seq_map_r2c = seq_map_r2c.to(torch.int64)
     cp_batch_size = fallback_mask.shape[0]
     _, num_heads, k_head_dim, v_head_dim = ht_buffer.shape
     assert k_head_dim == v_head_dim == 128
+    max_cp_segments = max(
+        1,
+        int((seq_map_r2c[1:] - seq_map_r2c[:-1]).max().item()),
+    )
 
     if raw_h0 is None:
         res_dtype = torch.float32
@@ -345,6 +352,7 @@ def correct_initial_states(
         H=num_heads,
         DK=k_head_dim,
         DV=v_head_dim,
+        max_cp_segments=max_cp_segments,
         res_dtype=res_dtype,
         accum_dtype="float32",
         buffer_dtype=ht_buffer.dtype,
