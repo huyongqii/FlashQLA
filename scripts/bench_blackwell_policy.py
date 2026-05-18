@@ -92,7 +92,7 @@ POLICIES = {
         'FLASHQLA_BLACKWELL_CP': '1',
         'FLASHQLA_CP_MAX_LOCAL_CHUNKS': '32',
         'FLASHQLA_CP_MIN_CHUNKS': '512',
-        'FLASHQLA_CP_WARMUP_THRESHOLD': '-2.0',
+        'FLASHQLA_CP_WARMUP_THRESHOLD': '-1.0',
         'FLASHQLA_BLACKWELL_FWD_THREADS': '256',
         'FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS': 'load,h,o',
     },
@@ -116,7 +116,7 @@ POLICIES = {
         'FLASHQLA_BLACKWELL_CP': '1',
         'FLASHQLA_CP_MAX_LOCAL_CHUNKS': '32',
         'FLASHQLA_CP_MIN_CHUNKS': '512',
-        'FLASHQLA_CP_WARMUP_THRESHOLD': '-2.0',
+        'FLASHQLA_CP_WARMUP_THRESHOLD': '-1.0',
         'FLASHQLA_BLACKWELL_FWD_THREADS': '256',
         'FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS': 'load,h,o',
     },
@@ -761,6 +761,30 @@ def _avg(values: list[float]) -> float | None:
     return sum(values) / len(values)
 
 
+def _qla_other_ms(row: RunResult) -> float | None:
+    if row.qla_ms is None:
+        return None
+    accounted = 0.0
+    saw_component = False
+    for value in (
+        row.qla_csum_ms,
+        row.qla_solve_ms,
+        row.qla_wu_ms,
+        row.qla_gdr_ms,
+        row.qla_o_ms,
+        row.qla_cp_w_ms,
+        row.qla_cp_h_ms,
+        row.qla_cp_c_ms,
+    ):
+        if value is None:
+            continue
+        accounted += value
+        saw_component = True
+    if not saw_component:
+        return None
+    return max(row.qla_ms - accounted, 0.0)
+
+
 def _sort_row(row: RunResult) -> tuple[str, int, int, str]:
     return (
         row.shape,
@@ -780,9 +804,15 @@ def _build_tables(rows: list[RunResult]) -> tuple[str, str]:
         ok_rows = [row for row in group if row.status == "ok" and row.speedup is not None]
         speedups = [row.speedup for row in ok_rows if row.speedup is not None]
         qla_ms = [row.qla_ms for row in ok_rows if row.qla_ms is not None]
+        qla_solve_ms = [
+            row.qla_solve_ms for row in ok_rows if row.qla_solve_ms is not None
+        ]
         qla_gdr_ms = [row.qla_gdr_ms for row in ok_rows if row.qla_gdr_ms is not None]
         qla_cp_h_ms = [row.qla_cp_h_ms for row in ok_rows if row.qla_cp_h_ms is not None]
         qla_cp_c_ms = [row.qla_cp_c_ms for row in ok_rows if row.qla_cp_c_ms is not None]
+        qla_other_ms = [
+            other_ms for row in ok_rows if (other_ms := _qla_other_ms(row)) is not None
+        ]
         aggregate_rows.append(
             [
                 policy,
@@ -792,9 +822,11 @@ def _build_tables(rows: list[RunResult]) -> tuple[str, str]:
                 _fmt(min(speedups) if speedups else None, suffix="x"),
                 _fmt(max(speedups) if speedups else None, suffix="x"),
                 _fmt(_avg(qla_ms), suffix="ms"),
+                _fmt(_avg(qla_solve_ms), suffix="ms"),
                 _fmt(_avg(qla_gdr_ms), suffix="ms"),
                 _fmt(_avg(qla_cp_h_ms), suffix="ms"),
                 _fmt(_avg(qla_cp_c_ms), suffix="ms"),
+                _fmt(_avg(qla_other_ms), suffix="ms"),
             ]
         )
 
@@ -809,10 +841,12 @@ def _build_tables(rows: list[RunResult]) -> tuple[str, str]:
                 _fmt(row.speedup, suffix="x"),
                 _fmt(row.fla_ms, suffix="ms"),
                 _fmt(row.qla_ms, suffix="ms"),
+                _fmt(row.qla_solve_ms, suffix="ms"),
                 _fmt(row.qla_gdr_ms, suffix="ms"),
                 _fmt(row.qla_cp_w_ms, suffix="ms"),
                 _fmt(row.qla_cp_h_ms, suffix="ms"),
                 _fmt(row.qla_cp_c_ms, suffix="ms"),
+                _fmt(_qla_other_ms(row), suffix="ms"),
                 _fmt_status(row),
             ]
         )
@@ -855,9 +889,11 @@ def _build_tables(rows: list[RunResult]) -> tuple[str, str]:
             "min",
             "max",
             "qla",
+            "solve",
             "gdr",
             "cp_h",
             "cp_c",
+            "other",
         ],
         aggregate_rows,
     )
@@ -870,10 +906,12 @@ def _build_tables(rows: list[RunResult]) -> tuple[str, str]:
             "speed",
             "fla",
             "qla",
+            "solve",
             "gdr",
             "cp_w",
             "cp_h",
             "cp_c",
+            "other",
             "status",
         ],
         case_rows,
