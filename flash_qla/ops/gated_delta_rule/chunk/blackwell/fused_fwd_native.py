@@ -160,7 +160,6 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
             v_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
             p_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
             g_last_local = T.alloc_local((1), dtype=accum_dtype)
-            p_shared = T.alloc_shared((block_S, block_S), dtype=qkva_dtype)
 
             # Keep TMEM allocations reusable. Blackwell TCGEN05 accepts wider
             # output tiles than this kernel stores; expose the width so exact
@@ -168,6 +167,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
             h_tmem = T.alloc_tmem((DK, tmem_width), dtype=accum_dtype)
             tmp_tmem = T.alloc_tmem((block_S, tmem_width), dtype=accum_dtype)
             p_tmem = T.alloc_tmem((block_S, block_S), dtype=accum_dtype)
+            pg_tmem = T.alloc_tmem((block_S, block_S), dtype=qkva_dtype)
 
             mbar_u = T.alloc_barrier(arrive_count=[1] * 8)
             mbar_v = T.alloc_barrier(arrive_count=[1] * 8)
@@ -335,7 +335,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                         )
                     else:
                         p_fragment[j_s, j_t] = 0
-                T.copy(p_fragment, p_shared)
+                T.copy(p_fragment, pg_tmem)
                 for j_s, j_v in T.Parallel(block_S, block_DV):
                     o_fragment[j_s, j_v] *= scale * g_exp_shared[j_s]
                 T.copy(o_fragment, tmp_tmem[:, 0:block_DV])
@@ -343,7 +343,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     T.barrier_arrive(bar_o)
                     T.barrier_wait(bar_o, i_s % 2)
                 T.tcgen05_gemm(
-                    p_shared,
+                    pg_tmem,
                     vd_shared,
                     tmp_tmem[:, 0:block_DV],
                     clear_accum=False,
