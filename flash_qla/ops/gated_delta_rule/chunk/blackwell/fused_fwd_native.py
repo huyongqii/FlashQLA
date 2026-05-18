@@ -75,6 +75,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
     accum_dtype,
     qkva_dtype,
     g_dtype,
+    b_dtype,
     h0_dtype,
     ht_dtype,
     o_dtype,
@@ -83,6 +84,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
     store_o,
     is_varlen,
     is_cp,
+    transform_a,
     seqlen_dtype,
     max_iters,
     use_bar_load,
@@ -104,6 +106,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
         v_shape = (1, num_tokens, H, DV)
         a_shape = (1, num_tokens, H, chunk_size)
         g_shape = (1, num_tokens, H)
+        b_shape = (1, num_tokens, H)
         o_shape = (1, num_tokens, H, DV)
     else:
         q_shape = (batch_size, num_tokens, Hg, DK)
@@ -111,6 +114,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
         v_shape = (batch_size, num_tokens, H, DV)
         a_shape = (batch_size, num_tokens, H, chunk_size)
         g_shape = (batch_size, num_tokens, H)
+        b_shape = (batch_size, num_tokens, H)
         o_shape = (batch_size, num_tokens, H, DV)
     h0_shape = (real_batch_size, H, DK, DV)
     ht_shape = (raw_batch_size, H, DK, DV)
@@ -122,6 +126,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
         v: T.Tensor(v_shape, dtype=qkva_dtype),
         a: T.Tensor(a_shape, dtype=qkva_dtype),
         g: T.Tensor(g_shape, dtype=g_dtype),
+        b: T.Tensor(b_shape, dtype=b_dtype),
         h0: T.Tensor(h0_shape, dtype=h0_dtype),
         cu_seqlens: T.Tensor([real_batch_size + 1], dtype=seqlen_dtype),
         cp_seq_map: T.Tensor([real_batch_size], dtype=seqlen_dtype),
@@ -167,6 +172,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
             g_rev_exp_shared = T.alloc_shared(
                 (block_S), dtype=accum_dtype, scope="shared"
             )
+            b_shared = T.alloc_shared((block_S), dtype=accum_dtype, scope="shared")
 
             h_fragment = T.alloc_fragment((DK, block_DV), dtype=accum_dtype)
             o_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
@@ -217,6 +223,9 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                 T.copy(a[data_bb, left:right, bh, 0:block_S], a_shared)
                 for j_s in T.Parallel(block_S):
                     g_shared[j_s] = g[data_bb, left + j_s, bh]
+                if transform_a:
+                    for j_s in T.Parallel(block_S):
+                        b_shared[j_s] = b[data_bb, left + j_s, bh]
 
                 for j_s in T.Parallel(block_S):
                     g_exp_shared[j_s] = T.exp2(g_shared[j_s] * 1.442695)
@@ -253,6 +262,11 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     v_shared[j_s, j_v] = u_fragment[j_s, j_v]
 
                 # Vd = Ag @ W
+                if transform_a:
+                    for j_s, j_t in T.Parallel(block_S, block_S):
+                        a_shared[j_s, j_t] *= (
+                            g_exp_shared[j_s] * g_inv_exp_shared[j_t] * b_shared[j_t]
+                        )
                 T.tcgen05_gemm(
                     a_shared,
                     v_shared,
@@ -374,10 +388,15 @@ def fused_gdr_fwd(
         fallback_reasons.append("output_h")
     is_varlen = cu_seqlens is not None
     is_cp = cp_seq_map is not None
+    if is_cp and os.environ.get("FLASHQLA_BLACKWELL_NATIVE_CP", "") != "1":
+        fallback_reasons.append("cp_seq_map")
+    elif is_varlen and not is_cp:
+        fallback_reasons.append("varlen")
     if num_tokens % chunk_size != 0:
         fallback_reasons.append("ragged_tokens")
     if os.environ.get("FLASHQLA_BLACKWELL_PRETRANSFORM_A", "1") != "1":
         fallback_reasons.append("raw_a")
+    transform_a = is_cp
     use_native_by_policy, policy_reason = should_use_native_fwd(H, Hg)
     if not use_native_by_policy:
         fallback_reasons.append(policy_reason)
@@ -462,6 +481,7 @@ def fused_gdr_fwd(
         scale,
         qkva_dtype=q.dtype,
         g_dtype=g.dtype,
+        b_dtype=b.dtype,
         h0_dtype=initial_state.dtype,
         ht_dtype=final_state.dtype,
         o_dtype=o.dtype,
@@ -471,6 +491,7 @@ def fused_gdr_fwd(
         store_o=output_o,
         is_varlen=is_varlen,
         is_cp=is_cp,
+        transform_a=transform_a,
         seqlen_dtype=seqlen_dtype,
         max_iters=max_iters,
         use_bar_load="load" in sync_barriers,
@@ -486,6 +507,7 @@ def fused_gdr_fwd(
         v,
         a,
         g,
+        b,
         initial_state,
         cu_seqlens,
         cp_seq_map,

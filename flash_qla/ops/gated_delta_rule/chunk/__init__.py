@@ -54,7 +54,7 @@ def chunk_gated_delta_rule_fwd(
         and use_blackwell_native_fwd
         and cu_seqlens is None
         and not output_h
-        and (not auto_cp or enable_blackwell_native_cp)
+        and not auto_cp
     )
     kkt_kwargs = {
         "k": k,
@@ -82,8 +82,6 @@ def chunk_gated_delta_rule_fwd(
                 raw_cu_seqlens=cu_seqlens,
             )
         )
-        if pretransform_a:
-            A = kkt_solve(k=k, b=beta, g=g, cu_seqlens=None)
     elif auto_cp:
         initial_state, cu_seqlens, cp_seq_map, raw_cu_seqlens = (
             intra_card_cp_preprocess(
