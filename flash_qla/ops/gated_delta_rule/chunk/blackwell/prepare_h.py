@@ -265,6 +265,7 @@ def tilelang_prepare_h(
                             k_shared_L[j_s, j_k] = k_shared[
                                 i_s % num_stages, j_s, j_k
                             ]
+                        for j_s, j_k in T.Parallel(block_S, DK // 2):
                             k_shared_R[j_s, j_k] = k_shared[
                                 i_s % num_stages, j_s, j_k + DK // 2
                             ]
@@ -290,6 +291,7 @@ def tilelang_prepare_h(
                         T.copy(x_tmem_R, x_fragment_R)
                         for j_s, j_k in T.Parallel(block_S, DK // 2):
                             x_fragment[j_s, j_k] = x_fragment_L[j_s, j_k]
+                        for j_s, j_k in T.Parallel(block_S, DK // 2):
                             x_fragment[j_s, j_k + DK // 2] = x_fragment_R[j_s, j_k]
                     else:
                         T.gemm(
@@ -379,6 +381,7 @@ def tilelang_prepare_h(
                     if use_tcgen05_y:
                         for j_k, j_v in T.Parallel(DK, DV // 2):
                             h_shared_L[j_k, j_v] = h_shared[j_k, j_v]
+                        for j_k, j_v in T.Parallel(DK, DV // 2):
                             h_shared_R[j_k, j_v] = h_shared[j_k, j_v + DV // 2]
                         T.tcgen05_gemm(
                             k_shared[i_s % num_stages, :, :],
@@ -400,6 +403,7 @@ def tilelang_prepare_h(
                         T.copy(y_tmem_R, y_fragment_R)
                         for j_s, j_v in T.Parallel(block_S, DV // 2):
                             y_fragment[j_s, j_v] = y_fragment_L[j_s, j_v]
+                        for j_s, j_v in T.Parallel(block_S, DV // 2):
                             y_fragment[j_s, j_v + DV // 2] = y_fragment_R[j_s, j_v]
                     else:
                         T.gemm(
