@@ -278,8 +278,11 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                         else:
                             v_shared[j_s, j_v] = 0
                     for j_s, j_t in T.Parallel(block_S, block_S):
-                        if left + j_s < seq_end_idx and left + j_t < seq_end_idx:
-                            a_shared[j_s, j_t] = a[batch_idx, left + j_s, bh, j_t]
+                        if left + j_s < seq_end_idx:
+                            if left + j_t < seq_end_idx:
+                                a_shared[j_s, j_t] = a[batch_idx, left + j_s, bh, j_t]
+                            else:
+                                a_shared[j_s, j_t] = 0
                         else:
                             a_shared[j_s, j_t] = 0
                     for j_s in T.Parallel(block_S):
@@ -389,17 +392,18 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                 T.mbarrier_wait_parity(mbar_o1[mbar_slot], mbar_phase)
                 T.copy(tmp_tmem[:, 0:block_DV], o_fragment)
 
-                if store_o and right <= seq_end_idx:
-                    T.copy(o_fragment, o[batch_idx, left:right, bh, bv * block_DV : (bv + 1) * block_DV])
-                elif store_o:
-                    for j_s, j_v in T.Parallel(block_S, block_DV):
-                        if left + j_s < seq_end_idx:
-                            o[
-                                batch_idx,
-                                left + j_s,
-                                bh,
-                                bv * block_DV + j_v,
-                            ] = o_fragment[j_s, j_v]
+                if store_o:
+                    if right <= seq_end_idx:
+                        T.copy(o_fragment, o[batch_idx, left:right, bh, bv * block_DV : (bv + 1) * block_DV])
+                    else:
+                        for j_s, j_v in T.Parallel(block_S, block_DV):
+                            if left + j_s < seq_end_idx:
+                                o[
+                                    batch_idx,
+                                    left + j_s,
+                                    bh,
+                                    bv * block_DV + j_v,
+                                ] = o_fragment[j_s, j_v]
 
                 # S = g_last * S + K^T @ V'
                 g_last_local[0] = g_exp_shared[block_S - 1]
