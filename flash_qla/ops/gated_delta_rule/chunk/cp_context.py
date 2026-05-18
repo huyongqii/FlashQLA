@@ -96,6 +96,15 @@ def _calc_cp_seqs(
 
     Be = sum(num_chunks) / max(num_chunks)
     use_cp = Be * H <= 40 or (Be * H <= 56 and max(num_chunks) >= 128)
+    min_chunks_env = os.environ.get("FLASHQLA_CP_MIN_CHUNKS", "").strip()
+    if min_chunks_env:
+        min_chunks = int(min_chunks_env)
+        if min_chunks < 1:
+            raise ValueError(
+                "FLASHQLA_CP_MIN_CHUNKS must be a positive integer, "
+                f"got {min_chunks}"
+            )
+        use_cp = use_cp and max(num_chunks) >= min_chunks
 
     # Allow forcibly disabling/enabling CP for benchmarking on new archs.
     _cp_env = os.environ.get("FLASHQLA_AUTOCP", "").strip()

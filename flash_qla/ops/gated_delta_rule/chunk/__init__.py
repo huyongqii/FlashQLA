@@ -54,7 +54,19 @@ def chunk_gated_delta_rule_fwd(
             raise NotImplementedError(
                 "Blackwell native CP currently supports fixed-length inputs only."
             )
-        if auto_cp and not use_blackwell_cp:
+        if use_blackwell_cp and k.shape[0] > 1:
+            use_blackwell_cp = False
+        min_cp_chunks_env = os.environ.get("FLASHQLA_CP_MIN_CHUNKS", "").strip()
+        if use_blackwell_cp and min_cp_chunks_env:
+            min_cp_chunks = int(min_cp_chunks_env)
+            if min_cp_chunks < 1:
+                raise ValueError(
+                    "FLASHQLA_CP_MIN_CHUNKS must be a positive integer, "
+                    f"got {min_cp_chunks}"
+                )
+            if (k.shape[1] + 63) // 64 < min_cp_chunks:
+                use_blackwell_cp = False
+        if auto_cp and not blackwell_cp_requested:
             raise NotImplementedError(
                 "Blackwell native intra-card CP is not implemented yet. Hopper "
                 "fallback is disabled on Blackwell; rerun with --no-cp or enable "
