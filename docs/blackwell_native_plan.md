@@ -163,8 +163,12 @@ The current AG baseline already implements the first stable fixed-length
 TCGEN05 path. The next large optimization should not be another local reorder or
 barrier sweep. It should address the B300 occupancy issue directly:
 
-1. Define a per-segment summary for the recurrent state update:
-   `S_out = alpha * S_in + delta`.
+1. Define a per-segment affine summary for the recurrent state update:
+   `S_out = M @ S_in + D`.
+   The `M` term is required because each chunk computes
+   `v_new = u - W @ S_in`; a scalar decay-only prefix is not mathematically
+   sufficient. This matches why the Hopper `prepare_h` path carries an
+   `mt` matrix.
 2. Compute summaries for multiple chunk ranges in parallel.
 3. Prefix-scan those summaries to recover each segment's initial state.
 4. Run the existing AG forward on each segment with the recovered state.
@@ -182,14 +186,19 @@ overlap inside one CTA.
 For Qwen397-style no-CP fixed-length inference, the current native path is
 competitive for TP1 but slower for small value-head counts:
 
-- TP1/Hv64: about `1.06x-1.11x` FLA.
-- TP2/Hv32: about `0.75x-0.79x` FLA.
-- TP4/Hv16: about `0.67x-0.70x` FLA.
-- TP8/Hv8: about `0.64x-0.67x` FLA.
+- TP1/Hv64: about `1.08x-1.09x` FLA.
+- TP2/Hv32: about `0.79x-0.82x` FLA.
+- TP4/Hv16: about `0.71x-0.73x` FLA.
+- TP8/Hv8: about `0.68x-0.69x` FLA.
 
 The kernel breakdown shows KKT is not the main bottleneck. The fused GDR stage
 dominates, and for small head counts the problem is insufficient parallel work
 on B300 rather than a single obvious TCGEN05 micro-tuning issue.
+
+The `FLASHQLA_BLACKWELL_TMEM_WIDTH=exact` experiment is neutral to slightly
+worse for small-head Qwen397 shapes. Keep it as a policy comparison, but do not
+treat it as the main branch. The main branch should now move to an affine
+state-prefix design that increases chunk-level parallelism for TP2/TP4/TP8.
 
 For dispatch debugging:
 
