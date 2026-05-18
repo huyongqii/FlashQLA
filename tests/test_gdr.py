@@ -429,7 +429,10 @@ def test_gated_delta_rule(
             ),
             "[fwd] o": 0.0,
         }
-        if "tilelang_get_warmup_chunks_kernel_kernel" in prof_qla.keys():
+        if (
+            "tilelang_get_warmup_chunks_kernel_kernel" in prof_qla.keys()
+            or "tilelang_prepare_h_kernel_kernel" in prof_qla.keys()
+        ):
             result_fla["[fwd] cp-w"] = None
             result_fla["[fwd] cp-h"] = None
             result_fla["[fwd] cp-c"] = None

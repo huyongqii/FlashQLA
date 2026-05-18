@@ -42,12 +42,23 @@ def chunk_gated_delta_rule_fwd(
     g = chunk_local_cumsum(g, chunk_size=64, cu_seqlens=cu_seqlens)
     Hg, H = k.shape[-2], v.shape[-2]
     use_blackwell_native_fwd = False
+    use_blackwell_exact_cp = False
     if is_blackwell(_cc):
         use_blackwell_native_fwd, _ = should_use_native_fwd(H, Hg)
-        if auto_cp:
+        use_blackwell_exact_cp = (
+            auto_cp
+            and use_blackwell_native_fwd
+            and os.environ.get("FLASHQLA_BLACKWELL_CP_EXACT", "") == "1"
+        )
+        if use_blackwell_exact_cp and cu_seqlens is not None:
+            raise NotImplementedError(
+                "Blackwell exact CP currently supports fixed-length B=1 inputs only."
+            )
+        if auto_cp and not use_blackwell_exact_cp:
             raise NotImplementedError(
                 "Blackwell native intra-card CP is not implemented yet. Hopper "
-                "fallback is disabled on Blackwell; rerun with --no-cp."
+                "fallback is disabled on Blackwell; rerun with --no-cp or enable "
+                "FLASHQLA_BLACKWELL_CP_EXACT=1."
             )
     pretransform_a = (
         os.environ.get("FLASHQLA_BLACKWELL_PRETRANSFORM_A", "1") == "1"
@@ -55,17 +66,31 @@ def chunk_gated_delta_rule_fwd(
         and use_blackwell_native_fwd
         and cu_seqlens is None
         and not output_h
-        and not auto_cp
     )
-    kkt_kwargs = {
-        "k": k,
-        "b": beta,
-        "cu_seqlens": cu_seqlens,
-    }
-    if pretransform_a:
-        kkt_kwargs["g"] = g
-    A = kkt_solve(**kkt_kwargs)
-    if auto_cp:
+    if use_blackwell_exact_cp:
+        A_for_cp = kkt_solve(k=k, b=beta, cu_seqlens=cu_seqlens)
+        initial_state, cu_seqlens, cp_seq_map, raw_cu_seqlens = (
+            intra_card_cp_preprocess(
+                k=k,
+                v=v,
+                a=A_for_cp,
+                g=g,
+                b=beta,
+                raw_h0=initial_state,
+                raw_cu_seqlens=cu_seqlens,
+            )
+        )
+        A = kkt_solve(k=k, b=beta, g=g if pretransform_a else None, cu_seqlens=None)
+    else:
+        kkt_kwargs = {
+            "k": k,
+            "b": beta,
+            "cu_seqlens": cu_seqlens,
+        }
+        if pretransform_a:
+            kkt_kwargs["g"] = g
+        A = kkt_solve(**kkt_kwargs)
+    if auto_cp and not use_blackwell_exact_cp:
         initial_state, cu_seqlens, cp_seq_map, raw_cu_seqlens = (
             intra_card_cp_preprocess(
                 k=k,
@@ -77,7 +102,7 @@ def chunk_gated_delta_rule_fwd(
                 raw_cu_seqlens=cu_seqlens,
             )
         )
-    else:
+    elif not use_blackwell_exact_cp:
         cp_seq_map = None
         raw_cu_seqlens = None
     fwd_kwargs = {

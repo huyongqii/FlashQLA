@@ -84,6 +84,17 @@ POLICIES = {
         'FLASHQLA_BLACKWELL_FWD_THREADS': '256',
         'FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS': 'load,h,o',
     },
+    'qwen397_native_cp_exact': {
+        'FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE': '1',
+        'FLASHQLA_BLACKWELL_NATIVE': '1',
+        'FLASHQLA_BLACKWELL_NATIVE_KERNELS': 'fwd,kkt',
+        'FLASHQLA_BLACKWELL_FWD_POLICY': 'native',
+        'FLASHQLA_BLACKWELL_CP_EXACT': '1',
+        'FLASHQLA_CP_EXACT': '1',
+        'FLASHQLA_CP_MAX_LOCAL_CHUNKS': '16',
+        'FLASHQLA_BLACKWELL_FWD_THREADS': '256',
+        'FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS': 'load,h,o',
+    },
     'qwen397_native_512': {
         'FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE': '1',
         'FLASHQLA_BLACKWELL_NATIVE': '1',
@@ -153,6 +164,7 @@ ENV_TO_CLEAR = (
     "FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS",
     "FLASHQLA_BLACKWELL_FWD_POLICY",
     "FLASHQLA_AUTOCP",
+    "FLASHQLA_BLACKWELL_CP_EXACT",
     "FLASHQLA_CP_EXACT",
     "FLASHQLA_CP_WARMUP_THRESHOLD",
     "FLASHQLA_CP_CORRECT_H0_TORCH",
@@ -388,7 +400,8 @@ def _run_one(
         "--nvh",
         str(nvh),
     ]
-    if args.no_cp:
+    force_cp = env.get("FLASHQLA_BLACKWELL_CP_EXACT") == "1"
+    if args.no_cp and not force_cp:
         cmd.append("--no-cp")
     if args.no_h0:
         cmd.append("--no-h0")
@@ -636,6 +649,7 @@ def main() -> int:
             policy
             for policy in selected_policies
             if "fwd" in POLICIES[policy].get("FLASHQLA_BLACKWELL_NATIVE_KERNELS", "")
+            and POLICIES[policy].get("FLASHQLA_BLACKWELL_CP_EXACT") != "1"
         ]
         if native_fwd_cp:
             print(

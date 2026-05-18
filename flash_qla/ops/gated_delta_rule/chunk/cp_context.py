@@ -11,7 +11,9 @@ from flash_qla.utils import tensor_cache, assert_supported, is_blackwell
 
 _cc = assert_supported()
 if is_blackwell(_cc):
-    get_warmup_chunks = fused_gdr_h = correct_initial_states = None
+    from .blackwell.prepare_h import fused_gdr_h
+
+    get_warmup_chunks = correct_initial_states = None
 else:
     from .hopper import get_warmup_chunks, fused_gdr_h, correct_initial_states
 
@@ -136,17 +138,68 @@ def intra_card_cp_preprocess(
     device = k.device
 
     if is_blackwell(_cc):
-        raise NotImplementedError(
-            "Blackwell native intra-card CP is not implemented yet. Hopper "
-            "fallback is disabled on Blackwell; run with --no-cp or implement "
-            "Blackwell-native get_warmup_chunks/fused_gdr_h/correct_h0."
+        if os.environ.get("FLASHQLA_BLACKWELL_CP_EXACT", "") != "1":
+            raise NotImplementedError(
+                "Blackwell native intra-card CP is experimental and must be "
+                "enabled explicitly with FLASHQLA_BLACKWELL_CP_EXACT=1."
+            )
+        if batch_size > 1:
+            return raw_h0, raw_cu_seqlens, None, None
+        if raw_cu_seqlens is None:
+            device_idx = device.index
+            if device_idx is None:
+                device_idx = torch.cuda.current_device()
+            raw_cu_seqlens = _create_cu_seqlens(batch_size, num_tokens, device_idx)
+
+        use_cp, cp_cu_seqlens, seq_map_r2c, seq_map_c2r, ht_mask = _calc_cp_seqs(
+            raw_cu_seqlens,
+            chunk_size,
+            num_v_heads,
         )
+        if not use_cp:
+            return raw_h0, None, None, None
+
+        segment_chunks = (cp_cu_seqlens[1:] - cp_cu_seqlens[:-1]) // chunk_size
+        num_warmup_chunks = torch.where(
+            ht_mask[:, None],
+            torch.zeros(
+                (segment_chunks.numel(), num_v_heads),
+                dtype=cp_cu_seqlens.dtype,
+                device=device,
+            ),
+            segment_chunks[:, None].expand(-1, num_v_heads),
+        ).contiguous()
+        fallback_mask = (~ht_mask)[:, None].expand(-1, num_v_heads).contiguous()
+
+        _, ht, mt = fused_gdr_h(
+            k=k,
+            v=v,
+            a=a,
+            g=g,
+            b=b,
+            initial_state=None,
+            output_final_state=True,
+            output_h=False,
+            cu_seqlens=cp_cu_seqlens,
+            num_warmup_chunks=num_warmup_chunks,
+        )
+        cp_h0 = _correct_initial_states_torch(
+            raw_h0=raw_h0,
+            ht_buffer=ht,
+            mt_buffer=mt,
+            fallback_mask=fallback_mask,
+            seq_map_r2c=seq_map_r2c,
+        )
+        return cp_h0, cp_cu_seqlens, seq_map_c2r, raw_cu_seqlens
 
     if batch_size > 1:
         return raw_h0, raw_cu_seqlens, None, None
 
     if raw_cu_seqlens is None:
-        raw_cu_seqlens = _create_cu_seqlens(batch_size, num_tokens, device.index)
+        device_idx = device.index
+        if device_idx is None:
+            device_idx = torch.cuda.current_device()
+        raw_cu_seqlens = _create_cu_seqlens(batch_size, num_tokens, device_idx)
 
     use_cp, cp_cu_seqlens, seq_map_r2c, seq_map_c2r, ht_mask = _calc_cp_seqs(
         raw_cu_seqlens,

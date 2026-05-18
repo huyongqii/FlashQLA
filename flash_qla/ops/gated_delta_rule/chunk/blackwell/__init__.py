@@ -35,9 +35,11 @@ if _USE_EXPERIMENTAL_NATIVE:
         from .kkt_solve import kkt_solve as _native_kkt_solve
     else:
         _native_kkt_solve = None
+    from .prepare_h import fused_gdr_h as _native_fused_gdr_h
 else:
     _native_fused_gdr_fwd = None
     _native_kkt_solve = None
+    _native_fused_gdr_h = None
     _NATIVE_FWD_NAME = "none"
 
 
@@ -85,6 +87,9 @@ def fused_gdr_fwd(*args, **kwargs):
 
 
 def fused_gdr_h(*args, **kwargs):
+    if _native_fused_gdr_h is not None:
+        _debug_dispatch("fused_gdr_h=native_prepare_h")
+        return _native_fused_gdr_h(*args, **kwargs)
     _unsupported("fused_gdr_h")
 
 
