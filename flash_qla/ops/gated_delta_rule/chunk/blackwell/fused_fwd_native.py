@@ -407,9 +407,13 @@ def fused_gdr_fwd(
     if num_tokens % chunk_size != 0:
         fallback_reasons.append("ragged_tokens")
     if cu_seqlens is not None:
-        seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
-        if bool((seqlens % chunk_size != 0).any().item()):
-            fallback_reasons.append("varlen_ragged")
+        if os.environ.get("FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE_VARLEN", "") != "1":
+            fallback_reasons.append("varlen_native_disabled")
+        else:
+            seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
+            if bool((seqlens % chunk_size != 0).any().item()):
+                fallback_reasons.append("varlen_ragged")
+            fallback_reasons.append("varlen_pretransform_a_unimplemented")
     if os.environ.get("FLASHQLA_BLACKWELL_PRETRANSFORM_A", "1") != "1":
         fallback_reasons.append("raw_a")
     use_native_by_policy, policy_reason = should_use_native_fwd(H, Hg)
