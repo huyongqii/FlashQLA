@@ -222,7 +222,9 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
             p_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
             g_last_local = T.alloc_local((1), dtype=accum_dtype)
             if use_ts_pv:
-                p_operand_tmem = T.alloc_tmem((block_S, block_S), dtype=qkva_dtype)
+                p_operand_shared = T.alloc_shared((block_S, DK), dtype=qkva_dtype)
+                p_operand_tmem = T.alloc_tmem((block_S, DK), dtype=qkva_dtype)
+                vd_ts_shared = T.alloc_shared((DK, block_DV), dtype=qkva_dtype)
             else:
                 p_shared = T.alloc_shared((block_S, block_S), dtype=qkva_dtype)
 
@@ -351,7 +353,17 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     else:
                         p_fragment[j_s, j_t] = 0
                 if use_ts_pv:
-                    T.copy(p_fragment, p_operand_tmem)
+                    for j_s, j_t in T.Parallel(block_S, DK):
+                        if j_t < block_S:
+                            p_operand_shared[j_s, j_t] = p_fragment[j_s, j_t]
+                        else:
+                            p_operand_shared[j_s, j_t] = 0
+                    for j_s, j_v in T.Parallel(DK, block_DV):
+                        if j_s < block_S:
+                            vd_ts_shared[j_s, j_v] = vd_shared[j_s, j_v]
+                        else:
+                            vd_ts_shared[j_s, j_v] = 0
+                    T.copy(p_operand_shared, p_operand_tmem)
                 else:
                     T.copy(p_fragment, p_shared)
                 for j_s, j_v in T.Parallel(block_S, block_DV):
@@ -363,8 +375,8 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                 if use_ts_pv:
                     T.tcgen05_gemm(
                         p_operand_tmem,
-                        vd_shared,
-                        tmp_tmem[:, 0:block_DV],
+                        vd_ts_shared,
+                        tmp_tmem,
                         clear_accum=False,
                         mbar=mbar_o1[mbar_slot],
                     )
@@ -514,6 +526,13 @@ def fused_gdr_fwd(
             "only when testing a TileLang/backend version that supports this tile."
         )
     tmem_width = _tmem_width(block_DV)
+    use_ts_pv = _use_ts_pv()
+    if use_ts_pv and block_DV != 128:
+        raise ValueError(
+            "FLASHQLA_BLACKWELL_FWD_TS_PV requires block_DV=128 on the current "
+            "TileLang 0.1.9 backend because TCGEN05 TS infers 64x128 operand/store "
+            f"atoms, got block_DV={block_DV}."
+        )
     max_iters = int(os.environ.get("FLASHQLA_BLACKWELL_FWD_MAX_ITERS", "0"))
     if max_iters > 0:
         _debug(f"debug max_iters={max_iters}; output is partial and benchmark is invalid")
@@ -529,7 +548,6 @@ def fused_gdr_fwd(
             f"the cleaned Blackwell native path, got {fwd_experiment!r}"
         )
     sync_barriers = _sync_barriers()
-    use_ts_pv = _use_ts_pv()
     _debug(
         f"threads={num_threads} block_DV={block_DV} tmem_width={tmem_width} "
         f"ts_pv={use_ts_pv} sync_barriers=" + ",".join(sorted(sync_barriers))
