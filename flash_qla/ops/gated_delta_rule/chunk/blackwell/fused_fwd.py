@@ -668,7 +668,9 @@ def fused_gdr_fwd(
         block_DV = 32
 
     # Allow manual override for autotuning on new architectures (e.g. B200/B300).
-    _override = os.environ.get("FLASHQLA_BLOCK_DV", "")
+    _override = os.environ.get("FLASHQLA_BLACKWELL_BLOCK_DV", "")
+    if not _override:
+        _override = os.environ.get("FLASHQLA_BLOCK_DV", "")
     if _override:
         block_DV = int(_override)
 

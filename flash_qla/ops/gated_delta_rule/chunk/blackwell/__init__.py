@@ -22,12 +22,21 @@ _NATIVE_KERNELS = {
     for item in os.environ.get("FLASHQLA_BLACKWELL_NATIVE_KERNELS", "").split(",")
     if item.strip()
 }
+_FWD_EXPERIMENT = os.environ.get("FLASHQLA_BLACKWELL_FWD_EXPERIMENT", "").strip().lower()
 
 if _USE_EXPERIMENTAL_NATIVE:
     if "fwd" in _NATIVE_KERNELS or "all" in _NATIVE_KERNELS:
-        from .fused_fwd_native import fused_gdr_fwd as _native_fused_gdr_fwd
+        if _FWD_EXPERIMENT in ("pipeline", "cp_pipeline"):
+            from .fused_fwd import fused_gdr_fwd as _native_fused_gdr_fwd
+
+            _NATIVE_FWD_NAME = "pipeline"
+        else:
+            from .fused_fwd_native import fused_gdr_fwd as _native_fused_gdr_fwd
+
+            _NATIVE_FWD_NAME = "ag"
     else:
         _native_fused_gdr_fwd = None
+        _NATIVE_FWD_NAME = "none"
     if "kkt" in _NATIVE_KERNELS or "all" in _NATIVE_KERNELS:
         from .kkt_solve import kkt_solve as _native_kkt_solve
     else:
@@ -35,6 +44,7 @@ if _USE_EXPERIMENTAL_NATIVE:
 else:
     _native_fused_gdr_fwd = None
     _native_kkt_solve = None
+    _NATIVE_FWD_NAME = "none"
 
 
 HAS_NATIVE_BLACKWELL_KERNELS = _USE_EXPERIMENTAL_NATIVE
@@ -76,7 +86,7 @@ def kkt_solve(*args, **kwargs):
 
 def fused_gdr_fwd(*args, **kwargs):
     if _native_fused_gdr_fwd is not None:
-        _debug_dispatch("fused_gdr_fwd=native_candidate")
+        _debug_dispatch(f"fused_gdr_fwd=native_{_NATIVE_FWD_NAME}")
         return _native_fused_gdr_fwd(*args, **kwargs)
     _unsupported("fused_gdr_fwd")
 

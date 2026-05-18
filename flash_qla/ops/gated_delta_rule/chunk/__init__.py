@@ -45,6 +45,10 @@ def _debug_blackwell_segment(message: str):
         print(f"[FlashQLA Blackwell segment fwd] {message}", flush=True)
 
 
+def _blackwell_fwd_experiment() -> str:
+    return os.environ.get("FLASHQLA_BLACKWELL_FWD_EXPERIMENT", "").strip().lower()
+
+
 def _compose_segment_initial_states_torch(
     initial_state: torch.Tensor | None,
     ht: torch.Tensor,
@@ -204,6 +208,7 @@ def chunk_gated_delta_rule_fwd(
         and cu_seqlens is None
         and not output_h
         and not auto_cp
+        and _blackwell_fwd_experiment() not in ("pipeline", "cp_pipeline")
     )
     kkt_kwargs = {
         "k": k,
