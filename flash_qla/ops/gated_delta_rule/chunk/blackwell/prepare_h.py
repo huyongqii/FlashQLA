@@ -1,6 +1,8 @@
 # Copyright (c) 2026 The Qwen team, Alibaba Group.
 # Licensed under The MIT License [see LICENSE for details]
 
+import os
+
 import torch
 import tilelang
 import tilelang.language as T
@@ -512,10 +514,16 @@ def fused_gdr_h(
             (real_batch_size, H, K, V), dtype=torch.float32, device=k.device
         )
     h = torch.empty((batch_size, num_chunks, H, K, V), dtype=k.dtype, device=k.device)
-    # Keep Blackwell exact-CP summaries in fp32. The prefix composition step
-    # repeatedly applies M @ S across CP segments; storing M/H in bf16 is too
-    # lossy for the strict correctness checks we use while bringing CP up.
-    ht_dtype = torch.float32
+    summary_dtype = os.environ.get("FLASHQLA_BLACKWELL_CP_SUMMARY_DTYPE", "fp32").lower()
+    if summary_dtype in ("fp32", "float32"):
+        ht_dtype = torch.float32
+    elif summary_dtype in ("bf16", "bfloat16"):
+        ht_dtype = torch.bfloat16
+    else:
+        raise ValueError(
+            "FLASHQLA_BLACKWELL_CP_SUMMARY_DTYPE must be fp32 or bf16, "
+            f"got {summary_dtype!r}"
+        )
     final_state = torch.empty(
         (real_batch_size, H, K, V), dtype=ht_dtype, device=k.device
     )

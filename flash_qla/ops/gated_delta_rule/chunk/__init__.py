@@ -82,7 +82,7 @@ def chunk_gated_delta_rule_fwd(
     if use_blackwell_cp:
         use_blackwell_dual_a = (
             pretransform_a
-            and os.environ.get("FLASHQLA_BLACKWELL_CP_DUAL_A", "") == "1"
+            and os.environ.get("FLASHQLA_BLACKWELL_CP_DUAL_A", "1") != "0"
         )
         if use_blackwell_dual_a:
             from .blackwell import kkt_solve_raw_and_transformed
