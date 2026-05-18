@@ -603,13 +603,19 @@ def _make_filtered_settings(
     return name, target
 
 
-def _make_env(policy: str, correctness_repeats: int | None) -> dict[str, str]:
+def _make_env(policy: str, args: argparse.Namespace) -> dict[str, str]:
     env = os.environ.copy()
     for key in ENV_TO_CLEAR:
         env.pop(key, None)
     env.update(POLICIES[policy])
-    if correctness_repeats is not None:
-        env["FLASHQLA_CORRECTNESS_REPEATS"] = str(correctness_repeats)
+    if args.force_autocp:
+        env["FLASHQLA_AUTOCP"] = "1"
+    if args.cp_min_chunks is not None:
+        env["FLASHQLA_CP_MIN_CHUNKS"] = str(args.cp_min_chunks)
+    if args.cp_max_local_chunks is not None:
+        env["FLASHQLA_CP_MAX_LOCAL_CHUNKS"] = str(args.cp_max_local_chunks)
+    if args.correctness_repeats is not None:
+        env["FLASHQLA_CORRECTNESS_REPEATS"] = str(args.correctness_repeats)
     return env
 
 
@@ -622,7 +628,7 @@ def _run_one(
     args: argparse.Namespace,
     log_dir: Path,
 ) -> list[RunResult]:
-    env = _make_env(policy, args.correctness_repeats)
+    env = _make_env(policy, args)
     cmd = [
         sys.executable,
         "tests/test_gdr.py",
@@ -651,7 +657,14 @@ def _run_one(
     print("=" * 80, flush=True)
     print(f"policy={policy} shape={shape} Hk={nkh} Hv={nvh}", flush=True)
     print("cmd=" + " ".join(cmd), flush=True)
-    visible_env = {key: env[key] for key in sorted(POLICIES[policy])}
+    visible_keys = set(POLICIES[policy])
+    if args.force_autocp:
+        visible_keys.add("FLASHQLA_AUTOCP")
+    if args.cp_min_chunks is not None:
+        visible_keys.add("FLASHQLA_CP_MIN_CHUNKS")
+    if args.cp_max_local_chunks is not None:
+        visible_keys.add("FLASHQLA_CP_MAX_LOCAL_CHUNKS")
+    visible_env = {key: env[key] for key in sorted(visible_keys) if key in env}
     if args.correctness_repeats is not None:
         visible_env["FLASHQLA_CORRECTNESS_REPEATS"] = str(args.correctness_repeats)
     print(f"env={visible_env}", flush=True)
@@ -1108,6 +1121,23 @@ def main() -> int:
     parser.add_argument("--no-cp", action="store_true", default=True)
     parser.add_argument("--with-cp", action="store_false", dest="no_cp")
     parser.add_argument(
+        "--force-autocp",
+        action="store_true",
+        help="Set FLASHQLA_AUTOCP=1 after policy envs, forcing CP in the preprocess gate.",
+    )
+    parser.add_argument(
+        "--cp-min-chunks",
+        type=int,
+        default=None,
+        help="Override FLASHQLA_CP_MIN_CHUNKS after policy envs.",
+    )
+    parser.add_argument(
+        "--cp-max-local-chunks",
+        type=int,
+        default=None,
+        help="Override FLASHQLA_CP_MAX_LOCAL_CHUNKS after policy envs.",
+    )
+    parser.add_argument(
         "--no-h0",
         action="store_true",
         help="Pass --no-h0 to tests/test_gdr.py to isolate initial-state issues.",
@@ -1115,6 +1145,10 @@ def main() -> int:
     parser.add_argument("--hide-acc", action="store_true")
     parser.add_argument("--hide-lat", action="store_true")
     args = parser.parse_args()
+    if args.cp_min_chunks is not None and args.cp_min_chunks < 1:
+        raise ValueError("--cp-min-chunks must be positive")
+    if args.cp_max_local_chunks is not None and args.cp_max_local_chunks < 1:
+        raise ValueError("--cp-max-local-chunks must be positive")
 
     selected_policies = _split_csv(args.policies)
     if args.with_hopper and "hopper_compat" not in selected_policies:
