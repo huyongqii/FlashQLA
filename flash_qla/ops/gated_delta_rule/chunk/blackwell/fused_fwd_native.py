@@ -104,6 +104,81 @@ def _select_block_dv(real_batch_size: int, num_v_heads: int) -> int:
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     },
 )
+def tilelang_precompute_qk_p_blackwell(
+    Hg,
+    DK,
+    chunk_size,
+    qkva_dtype,
+    seqlen_dtype,
+    is_varlen,
+):
+    batch_size = T.dynamic("batch_size")
+    num_tokens = T.dynamic("num_tokens")
+    max_chunks = T.dynamic("max_chunks")
+    block_S = chunk_size
+
+    if is_varlen:
+        q_shape = (1, num_tokens, Hg, DK)
+        k_shape = (1, num_tokens, Hg, DK)
+    else:
+        q_shape = (batch_size, num_tokens, Hg, DK)
+        k_shape = (batch_size, num_tokens, Hg, DK)
+    p_shape = (batch_size, max_chunks, Hg, block_S, block_S)
+
+    @T.prim_func
+    def tilelang_precompute_qk_p_blackwell_kernel(
+        q: T.Tensor(q_shape, dtype=qkva_dtype),
+        k: T.Tensor(k_shape, dtype=qkva_dtype),
+        cu_seqlens: T.Tensor([batch_size + 1], dtype=seqlen_dtype),
+        p_cache: T.Tensor(p_shape, dtype=qkva_dtype),
+    ):
+        with T.Kernel(batch_size * max_chunks * Hg, threads=128) as (bid,):
+            bhg = bid % Hg
+            chunk_id = (bid // Hg) % max_chunks
+            bb = bid // (Hg * max_chunks)
+            batch_idx = T.alloc_var("int32")
+            seq_start_idx = T.alloc_var("int32")
+            seq_end_idx = T.alloc_var("int32")
+            left = T.alloc_var("int32")
+            right = T.alloc_var("int32")
+
+            batch_idx = 0 if is_varlen else bb
+            seq_start_idx = cu_seqlens[bb] if is_varlen else 0
+            seq_end_idx = cu_seqlens[bb + 1] if is_varlen else num_tokens
+            left = seq_start_idx + chunk_id * block_S
+            right = left + block_S
+
+            q_shared = T.alloc_shared((block_S, DK), dtype=qkva_dtype)
+            k_shared = T.alloc_shared((block_S, DK), dtype=qkva_dtype)
+            p_fragment = T.alloc_fragment((block_S, block_S), dtype="float32")
+            p_tmem = T.alloc_tmem((block_S, block_S), dtype="float32")
+            mbar_p = T.alloc_barrier(arrive_count=1)
+
+            T.use_swizzle(10)
+
+            if left < seq_end_idx:
+                T.copy(q[batch_idx, left:right, bhg, 0:DK], q_shared)
+                T.copy(k[batch_idx, left:right, bhg, 0:DK], k_shared)
+                T.tcgen05_gemm(
+                    q_shared,
+                    k_shared,
+                    p_tmem,
+                    transpose_B=True,
+                    clear_accum=True,
+                    mbar=mbar_p,
+                )
+                T.mbarrier_wait_parity(mbar_p, 0)
+                T.copy(p_tmem, p_fragment)
+                T.copy(p_fragment, p_cache[bb, chunk_id, bhg, 0:block_S, 0:block_S])
+
+    return tilelang_precompute_qk_p_blackwell_kernel
+
+
+@tilelang.jit(
+    pass_configs={
+        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
+    },
+)
 def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
     H,
     Hg,
@@ -131,6 +206,8 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
     num_threads=128,
     block_DV=64,
     tmem_width=128,
+    use_p_cache=False,
+    max_p_chunks=1,
 ):
     batch_size = T.dynamic("batch_size")
     raw_batch_size = T.dynamic("raw_batch_size")
@@ -153,6 +230,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
         o_shape = (batch_size, num_tokens, H, DV)
     h0_shape = (batch_size, H, DK, DV)
     ht_shape = (raw_batch_size, H, DK, DV)
+    p_cache_shape = (batch_size, max_p_chunks, Hg, block_S, block_S)
 
     @T.prim_func
     def tilelang_fused_chunk_gdr_fwd_blackwell_ag_kernel(
@@ -165,6 +243,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
         cu_seqlens: T.Tensor([batch_size + 1], dtype=seqlen_dtype),
         cp_seq_map: T.Tensor([batch_size], dtype=seqlen_dtype),
         raw_cu_seqlens: T.Tensor([raw_batch_size + 1], dtype=seqlen_dtype),
+        p_cache: T.Tensor(p_cache_shape, dtype=qkva_dtype),
         o: T.Tensor(o_shape, dtype=o_dtype),
         ht: T.Tensor(ht_shape, dtype=ht_dtype),
     ):
@@ -310,17 +389,23 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     v_fragment[j_s, j_v] *= g_rev_exp_shared[j_s]
                     vn_shared[j_s, j_v] = v_fragment[j_s, j_v]
 
-                # P = Q @ K^T.
-                T.tcgen05_gemm(
-                    q_shared,
-                    k_shared,
-                    p_tmem,
-                    transpose_B=True,
-                    clear_accum=True,
-                    mbar=mbar_p[mbar_slot],
-                )
-                T.mbarrier_wait_parity(mbar_p[mbar_slot], mbar_phase)
-                T.copy(p_tmem, p_fragment)
+                if use_p_cache:
+                    T.copy(
+                        p_cache[bb, i_s, bhg, 0:block_S, 0:block_S],
+                        p_fragment,
+                    )
+                else:
+                    # P = Q @ K^T.
+                    T.tcgen05_gemm(
+                        q_shared,
+                        k_shared,
+                        p_tmem,
+                        transpose_B=True,
+                        clear_accum=True,
+                        mbar=mbar_p[mbar_slot],
+                    )
+                    T.mbarrier_wait_parity(mbar_p[mbar_slot], mbar_phase)
+                    T.copy(p_tmem, p_fragment)
 
                 # O = Q @ S
                 T.tcgen05_gemm(
@@ -507,9 +592,43 @@ def fused_gdr_fwd(
             "FLASHQLA_BLACKWELL_FWD_EXPERIMENT must be unset or 'ag' for "
             f"the cleaned Blackwell native path, got {fwd_experiment!r}"
         )
+    use_p_cache = os.environ.get("FLASHQLA_BLACKWELL_GDR_PRECOMPUTE_P", "") == "1"
+    if use_p_cache and is_varlen and not is_cp:
+        raise NotImplementedError(
+            "FLASHQLA_BLACKWELL_GDR_PRECOMPUTE_P currently supports fixed-length "
+            "or Blackwell CP varlen invocations only."
+        )
+    if use_p_cache and is_cp:
+        max_p_chunks_env = os.environ.get("FLASHQLA_CP_MAX_LOCAL_CHUNKS", "").strip()
+        if not max_p_chunks_env:
+            raise ValueError(
+                "FLASHQLA_BLACKWELL_GDR_PRECOMPUTE_P with CP requires "
+                "FLASHQLA_CP_MAX_LOCAL_CHUNKS so the P cache stays bounded."
+            )
+        max_p_chunks = int(max_p_chunks_env)
+    elif use_p_cache:
+        max_p_chunks = tilelang.cdiv(num_tokens, chunk_size)
+    else:
+        max_p_chunks = 1
+    p_cache = torch.empty(
+        (real_batch_size, max_p_chunks, Hg, chunk_size, chunk_size),
+        dtype=q.dtype,
+        device=q.device,
+    )
+    if use_p_cache:
+        tilelang_precompute_qk_p_kernel = tilelang_precompute_qk_p_blackwell(
+            Hg,
+            K,
+            chunk_size,
+            qkva_dtype=q.dtype,
+            seqlen_dtype=seqlen_dtype,
+            is_varlen=is_varlen,
+        )
+        tilelang_precompute_qk_p_kernel(q, k, cu_seqlens, p_cache)
     sync_barriers = _sync_barriers()
     _debug(
         f"threads={num_threads} block_DV={block_DV} tmem_width={tmem_width} "
+        f"p_cache={use_p_cache} "
         "sync_barriers=" + ",".join(sorted(sync_barriers))
     )
     tilelang_fused_chunk_gdr_fwd_kernel = tilelang_fused_chunk_gdr_fwd_blackwell_ag(
@@ -539,6 +658,8 @@ def fused_gdr_fwd(
         num_threads=num_threads,
         block_DV=block_DV,
         tmem_width=tmem_width,
+        use_p_cache=use_p_cache,
+        max_p_chunks=max_p_chunks,
     )
     tilelang_fused_chunk_gdr_fwd_kernel(
         q,
@@ -550,6 +671,7 @@ def fused_gdr_fwd(
         cu_seqlens,
         cp_seq_map,
         raw_cu_seqlens,
+        p_cache,
         o,
         final_state,
     )
