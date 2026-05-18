@@ -32,8 +32,10 @@ def tilelang_kkt_solve(
     accum_dtype,
     qkva_dtype,
     b_dtype,
+    g_dtype,
     seqlen_dtype,
     is_varlen,
+    transform_a,
 ):
     data_batch_size = T.dynamic("data_batch_size")
     real_batch_size = T.dynamic("real_batch_size")
@@ -44,6 +46,7 @@ def tilelang_kkt_solve(
     k_shape = (data_batch_size, num_tokens, Hg, DK)
     a_shape = (data_batch_size, num_tokens, H, chunk_size)
     b_shape = (data_batch_size, num_tokens, H)
+    g_shape = (data_batch_size, num_tokens, H)
 
     @T.macro
     def kernel_body(
@@ -57,6 +60,7 @@ def tilelang_kkt_solve(
         seq_end_idx,
         k,
         b,
+        g,
         a,
     ):
         left = seq_start_idx + chunk_idx * block_S
@@ -64,6 +68,7 @@ def tilelang_kkt_solve(
 
         k_shared = T.alloc_shared((block_S, DK), dtype=qkva_dtype)
         b_shared = T.alloc_shared((block_S), dtype=accum_dtype, scope="shared")
+        g_shared = T.alloc_shared((block_S), dtype=accum_dtype, scope="shared")
         a64_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
         a64_tmem = T.alloc_tmem((block_S, block_S), dtype=accum_dtype)
 
@@ -111,6 +116,16 @@ def tilelang_kkt_solve(
                         b_shared[j_s] = b[bb, left + j_s, bh]
                     else:
                         b_shared[j_s] = 0
+            if transform_a:
+                if right <= seq_end_idx:
+                    for j_s in T.Parallel(block_S):
+                        g_shared[j_s] = g[bb, left + j_s, bh]
+                else:
+                    for j_s in T.Parallel(block_S):
+                        if left + j_s < seq_end_idx:
+                            g_shared[j_s] = g[bb, left + j_s, bh]
+                        else:
+                            g_shared[j_s] = g[bb, seq_end_idx - 1, bh]
 
             T.barrier_wait(k_is_ready, 0)
 
@@ -214,6 +229,12 @@ def tilelang_kkt_solve(
                 a64_shared[32 + k_s, k_t] = a32o_fragment[k_s, k_t]
             for k_s, k_t in T.Parallel(32, 32):
                 a64_shared[k_s, 32 + k_t] = 0
+            if transform_a:
+                for j_s, j_t in T.Parallel(block_S, block_S):
+                    a64_shared[j_s, j_t] *= T.exp2(
+                        (g_shared[j_s] - g_shared[j_t]) * 1.442695
+                    )
+                    a64_shared[j_s, j_t] *= b_shared[j_t]
 
             T.barrier_arrive(a_is_ready)
 
@@ -222,7 +243,14 @@ def tilelang_kkt_solve(
 
             if tx < 128 + 32:
                 # Load K
-                T.copy(k[bb, left:right, bhg, 0:DK], k_shared)
+                if right <= seq_end_idx:
+                    T.copy(k[bb, left:right, bhg, 0:DK], k_shared)
+                else:
+                    for j_s, j_k in T.Parallel(block_S, DK):
+                        if left + j_s < seq_end_idx:
+                            k_shared[j_s, j_k] = k[bb, left + j_s, bhg, j_k]
+                        else:
+                            k_shared[j_s, j_k] = 0
 
                 T.barrier_arrive(k_is_ready)
 
@@ -248,6 +276,7 @@ def tilelang_kkt_solve(
         def tilelang_kkt_solve_kernel(
             k: T.Tensor(k_shape, dtype=qkva_dtype),
             b: T.Tensor(b_shape, dtype=b_dtype),
+            g: T.Tensor(g_shape, dtype=g_dtype),
             cu_seqlens: T.Tensor([real_batch_size + 1], dtype=seqlen_dtype),
             chunk_indices: T.Tensor([num_chunks, 2], dtype=seqlen_dtype),
             a: T.Tensor(a_shape, dtype=qkva_dtype),
@@ -278,6 +307,7 @@ def tilelang_kkt_solve(
                     seq_end_idx,
                     k,
                     b,
+                    g,
                     a,
                 )
 
@@ -287,6 +317,7 @@ def tilelang_kkt_solve(
         def tilelang_kkt_solve_kernel(
             k: T.Tensor(k_shape, dtype=qkva_dtype),
             b: T.Tensor(b_shape, dtype=b_dtype),
+            g: T.Tensor(g_shape, dtype=g_dtype),
             a: T.Tensor(a_shape, dtype=qkva_dtype),
             num_chunks: T.int32,
         ):
@@ -316,6 +347,7 @@ def tilelang_kkt_solve(
                     seq_end_idx,
                     k,
                     b,
+                    g,
                     a,
                 )
 
@@ -759,12 +791,9 @@ def kkt_solve(
         )
         tilelang_kkt_solve_kernel(k, b, g if g is not None else b, a, num_chunks)
         return a
-    if experiment != "tcgen05":
-        raise NotImplementedError(
-            "Blackwell native kkt_solve for cu_seqlens requires "
-            "FLASHQLA_BLACKWELL_KKT_EXPERIMENT=tcgen05. Hopper fallback is "
-            "disabled on Blackwell."
-        )
+    # Ragged varlen cannot use the fixed-fast kernel because the final chunk
+    # needs masked beta/g loads and masked A stores. Use the varlen TCGEN05
+    # kernel automatically for that case.
 
     assert K == 128
     assert chunk_size == 64
@@ -789,13 +818,22 @@ def kkt_solve(
         chunk_size,
         qkva_dtype=k.dtype,
         b_dtype=b.dtype,
+        g_dtype=(g.dtype if g is not None else b.dtype),
         seqlen_dtype=seqlen_dtype,
         accum_dtype="float32",
         is_varlen=is_varlen,
+        transform_a=g is not None,
     )
     if is_varlen:
-        tilelang_kkt_solve_kernel(k, b, cu_seqlens, chunk_indices, a)
+        tilelang_kkt_solve_kernel(
+            k,
+            b,
+            g if g is not None else b,
+            cu_seqlens,
+            chunk_indices,
+            a,
+        )
     else:
-        tilelang_kkt_solve_kernel(k, b, a, num_chunks)
+        tilelang_kkt_solve_kernel(k, b, g if g is not None else b, a, num_chunks)
 
     return a

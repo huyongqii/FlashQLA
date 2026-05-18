@@ -252,12 +252,41 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                 mbar_slot = i_s % 8
                 mbar_phase = (i_s // 8) % 2
 
-                T.copy(q[batch_idx, left:right, bhg, 0:DK], q_shared)
-                T.copy(k[batch_idx, left:right, bhg, 0:DK], k_shared)
-                T.copy(v[batch_idx, left:right, bh, bv * block_DV : (bv + 1) * block_DV], v_shared)
-                T.copy(a[batch_idx, left:right, bh, 0:block_S], a_shared)
-                for j_s in T.Parallel(block_S):
-                    g_shared[j_s] = g[batch_idx, left + j_s, bh]
+                if right <= seq_end_idx:
+                    T.copy(q[batch_idx, left:right, bhg, 0:DK], q_shared)
+                    T.copy(k[batch_idx, left:right, bhg, 0:DK], k_shared)
+                    T.copy(v[batch_idx, left:right, bh, bv * block_DV : (bv + 1) * block_DV], v_shared)
+                    T.copy(a[batch_idx, left:right, bh, 0:block_S], a_shared)
+                    for j_s in T.Parallel(block_S):
+                        g_shared[j_s] = g[batch_idx, left + j_s, bh]
+                else:
+                    for j_s, j_k in T.Parallel(block_S, DK):
+                        if left + j_s < seq_end_idx:
+                            q_shared[j_s, j_k] = q[batch_idx, left + j_s, bhg, j_k]
+                            k_shared[j_s, j_k] = k[batch_idx, left + j_s, bhg, j_k]
+                        else:
+                            q_shared[j_s, j_k] = 0
+                            k_shared[j_s, j_k] = 0
+                    for j_s, j_v in T.Parallel(block_S, block_DV):
+                        if left + j_s < seq_end_idx:
+                            v_shared[j_s, j_v] = v[
+                                batch_idx,
+                                left + j_s,
+                                bh,
+                                bv * block_DV + j_v,
+                            ]
+                        else:
+                            v_shared[j_s, j_v] = 0
+                    for j_s, j_t in T.Parallel(block_S, block_S):
+                        if left + j_s < seq_end_idx and left + j_t < seq_end_idx:
+                            a_shared[j_s, j_t] = a[batch_idx, left + j_s, bh, j_t]
+                        else:
+                            a_shared[j_s, j_t] = 0
+                    for j_s in T.Parallel(block_S):
+                        if left + j_s < seq_end_idx:
+                            g_shared[j_s] = g[batch_idx, left + j_s, bh]
+                        else:
+                            g_shared[j_s] = g[batch_idx, seq_end_idx - 1, bh]
 
                 for j_s in T.Parallel(block_S):
                     g_exp_shared[j_s] = T.exp2(g_shared[j_s] * 1.442695)
@@ -266,8 +295,10 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     T.barrier_arrive(bar_load)
                     T.barrier_wait(bar_load, i_s % 2)
                 for j_s in T.Parallel(block_S):
-                    g_rev_exp_shared[j_s] = (
-                        g_exp_shared[block_S - 1] * g_inv_exp_shared[j_s]
+                    g_rev_exp_shared[j_s] = T.if_then_else(
+                        left + j_s < seq_end_idx,
+                        g_exp_shared[block_S - 1] * g_inv_exp_shared[j_s],
+                        0.0,
                     )
 
                 # h_shared holds the previous recurrent state for this chunk.
@@ -358,8 +389,17 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                 T.mbarrier_wait_parity(mbar_o1[mbar_slot], mbar_phase)
                 T.copy(tmp_tmem[:, 0:block_DV], o_fragment)
 
-                if store_o:
+                if store_o and right <= seq_end_idx:
                     T.copy(o_fragment, o[batch_idx, left:right, bh, bv * block_DV : (bv + 1) * block_DV])
+                elif store_o:
+                    for j_s, j_v in T.Parallel(block_S, block_DV):
+                        if left + j_s < seq_end_idx:
+                            o[
+                                batch_idx,
+                                left + j_s,
+                                bh,
+                                bv * block_DV + j_v,
+                            ] = o_fragment[j_s, j_v]
 
                 # S = g_last * S + K^T @ V'
                 g_last_local[0] = g_exp_shared[block_S - 1]
@@ -419,8 +459,6 @@ def fused_gdr_fwd(
         seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
         if bool((seqlens <= 0).any().item()):
             unsupported_reasons.append("varlen_empty")
-        if bool((seqlens % chunk_size != 0).any().item()):
-            unsupported_reasons.append("varlen_ragged")
     if os.environ.get("FLASHQLA_BLACKWELL_PRETRANSFORM_A", "1") != "1":
         unsupported_reasons.append("raw_a")
     use_native_by_policy, policy_reason = should_use_native_fwd(H, Hg)
