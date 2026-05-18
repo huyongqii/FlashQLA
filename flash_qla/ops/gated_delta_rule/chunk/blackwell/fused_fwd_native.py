@@ -15,7 +15,7 @@ def _debug_enabled() -> bool:
 
 
 _DEBUG_MESSAGES = set()
-_DEFAULT_SYNC_BARRIERS = frozenset(("load", "h"))
+_DEFAULT_SYNC_BARRIERS = frozenset(("load", "h", "o"))
 _VALID_SYNC_BARRIERS = frozenset(("load", "h", "ag", "o", "hscale"))
 
 
