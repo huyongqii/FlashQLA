@@ -443,6 +443,13 @@ def fused_gdr_fwd(
             "FLASHQLA_BLACKWELL_BLOCK_DV must be 32, 64, or 128 for the current "
             f"TileLang 0.1.9 TCGEN05 path, got {block_DV}"
         )
+    if block_DV == 32 and os.environ.get("FLASHQLA_BLACKWELL_ALLOW_BLOCK_DV32", "") != "1":
+        raise ValueError(
+            "FLASHQLA_BLACKWELL_BLOCK_DV=32 is disabled for the current TileLang "
+            "0.1.9 TCGEN05 path because it lowers to unsupported bf16->fp32 MMA "
+            "tiles such as M64N32K128. Set FLASHQLA_BLACKWELL_ALLOW_BLOCK_DV32=1 "
+            "only when testing a TileLang/backend version that supports this tile."
+        )
     tmem_width = _tmem_width(block_DV)
     max_iters = int(os.environ.get("FLASHQLA_BLACKWELL_FWD_MAX_ITERS", "0"))
     if max_iters > 0:
