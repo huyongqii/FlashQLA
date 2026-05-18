@@ -149,7 +149,7 @@ def tilelang_correct_h0(
             cp_h0[seq_start_idx, bh, 0:DK, bv * block_DV : (bv + 1) * block_DV],
         )
 
-        for i_s in T.serial(num_iters - 1):
+        for i_s in T.Pipelined(num_iters - 1, num_stages=2):
             if fallback_mask[seq_start_idx + i_s, bh]:
                 T.copy(h_fragment, hd_shared)
             T.copy(
@@ -328,6 +328,8 @@ def correct_initial_states(
     fallback_mask: torch.Tensor,  # [cp_batch_size, num_v_heads]
     seq_map_r2c: torch.Tensor,  # [raw_batch_size + 1]
 ):
+    if seq_map_r2c.dtype != torch.int64:
+        seq_map_r2c = seq_map_r2c.to(torch.int64)
     cp_batch_size = fallback_mask.shape[0]
     _, num_heads, k_head_dim, v_head_dim = ht_buffer.shape
     assert k_head_dim == v_head_dim == 128
