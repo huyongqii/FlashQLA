@@ -15,9 +15,12 @@ def blackwell_fwd_policy() -> str:
     if policy in ("native", "force_native"):
         return "native"
     if policy in ("compat", "fallback", "hopper"):
-        return "compat"
+        raise ValueError(
+            "Blackwell Hopper-compatible fallback has been removed. "
+            "Use FLASHQLA_BLACKWELL_FWD_POLICY=native or auto."
+        )
     raise ValueError(
-        "FLASHQLA_BLACKWELL_FWD_POLICY must be one of auto, native, or compat, "
+        "FLASHQLA_BLACKWELL_FWD_POLICY must be one of auto or native, "
         f"got {policy!r}"
     )
 
@@ -35,8 +38,6 @@ def should_use_native_fwd(num_v_heads: int, num_k_heads: int) -> tuple[bool, str
     policy = blackwell_fwd_policy()
     if policy == "native":
         return True, "forced_native"
-    if policy == "compat":
-        return False, "policy_compat"
     if num_v_heads >= 64:
         return True, "auto_hv64"
     return False, f"auto_small_hv{num_v_heads}"

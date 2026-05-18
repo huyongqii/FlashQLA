@@ -7,9 +7,6 @@ import torch
 import tilelang
 import tilelang.language as T
 
-from flash_qla.ops.gated_delta_rule.chunk.hopper.fused_fwd import (
-    fused_gdr_fwd as hopper_fused_gdr_fwd,
-)
 from flash_qla.ops.gated_delta_rule.chunk.blackwell.policy import should_use_native_fwd
 
 
@@ -397,47 +394,35 @@ def fused_gdr_fwd(
     scale = scale or K ** (-0.5)
     fwd_experiment = os.environ.get("FLASHQLA_BLACKWELL_FWD_EXPERIMENT", "").lower()
 
-    fallback_reasons = []
+    unsupported_reasons = []
     if os.environ.get("FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE", "") != "1":
-        fallback_reasons.append("native_fwd_disabled")
+        unsupported_reasons.append("native_fwd_disabled")
     if output_h:
-        fallback_reasons.append("output_h")
+        unsupported_reasons.append("output_h")
     if cp_seq_map is not None:
-        fallback_reasons.append("cp_seq_map")
+        unsupported_reasons.append("cp_seq_map")
     if num_tokens % chunk_size != 0:
-        fallback_reasons.append("ragged_tokens")
+        unsupported_reasons.append("ragged_tokens")
     if cu_seqlens is not None:
         if os.environ.get("FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE_VARLEN", "") != "1":
-            fallback_reasons.append("varlen_native_disabled")
+            unsupported_reasons.append("varlen_native_disabled")
         else:
             seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
             if bool((seqlens % chunk_size != 0).any().item()):
-                fallback_reasons.append("varlen_ragged")
-            fallback_reasons.append("varlen_pretransform_a_unimplemented")
+                unsupported_reasons.append("varlen_ragged")
+            unsupported_reasons.append("varlen_pretransform_a_unimplemented")
     if os.environ.get("FLASHQLA_BLACKWELL_PRETRANSFORM_A", "1") != "1":
-        fallback_reasons.append("raw_a")
+        unsupported_reasons.append("raw_a")
     use_native_by_policy, policy_reason = should_use_native_fwd(H, Hg)
     if not use_native_by_policy:
-        fallback_reasons.append(policy_reason)
+        unsupported_reasons.append(policy_reason)
 
-    if fallback_reasons:
-        _debug("fallback=hopper reason=" + ",".join(fallback_reasons))
-        return hopper_fused_gdr_fwd(
-            q=q,
-            k=k,
-            v=v,
-            a=a,
-            g=g,
-            b=b,
-            scale=scale,
-            initial_state=initial_state,
-            output_final_state=output_final_state,
-            output_h=output_h,
-            output_o=output_o,
-            cu_seqlens=cu_seqlens,
-            cp_seq_map=cp_seq_map,
-            raw_cu_seqlens=raw_cu_seqlens,
-            chunk_size=chunk_size,
+    if unsupported_reasons:
+        reason = ",".join(unsupported_reasons)
+        _debug("unsupported reason=" + reason)
+        raise NotImplementedError(
+            "Blackwell native fused_gdr_fwd does not support this invocation: "
+            f"{reason}. Hopper fallback is disabled on Blackwell."
         )
 
     _debug(

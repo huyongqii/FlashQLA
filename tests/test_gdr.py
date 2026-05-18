@@ -25,6 +25,19 @@ from ref_gdr import chunk_gated_delta_rule_fwd as chunk_gated_delta_rule_fwd_ref
 from ref_gdr import chunk_gated_delta_rule_bwd as chunk_gated_delta_rule_bwd_ref
 
 
+def _blackwell_native_fwd_requested() -> bool:
+    kernels = {
+        item.strip().lower()
+        for item in os.environ.get("FLASHQLA_BLACKWELL_NATIVE_KERNELS", "").split(",")
+        if item.strip()
+    }
+    return (
+        os.environ.get("FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE", "") == "1"
+        and os.environ.get("FLASHQLA_BLACKWELL_NATIVE", "") == "1"
+        and ("fwd" in kernels or "all" in kernels)
+    )
+
+
 def _profile_value(prof: dict[str, float], label: str, *kernel_groups):
     value = 0.0
     missing = []
@@ -286,6 +299,7 @@ def test_gated_delta_rule(
         output_final_state=True,
         cu_seqlens=cu_seqlens,
     )
+    qla_output_h = not _blackwell_native_fwd_requested()
     g_qla, A_qla, o_qla, h_qla, s_qla = chunk_gated_delta_rule_fwd_qla(
         q=q,
         k=k,
@@ -296,14 +310,17 @@ def test_gated_delta_rule(
         initial_state=h0,
         cu_seqlens=cu_seqlens,
         output_final_state=True,
-        output_h=True,
+        output_h=qla_output_h,
         auto_cp=auto_cp,
     )
 
     if check_accuracy:
-        print(
-            f"h_qla: {(h_qla - h_ref).abs().max().item():.4f} / {h_ref.abs().max().item():.4f}"
-        )
+        if h_qla is not None:
+            print(
+                f"h_qla: {(h_qla - h_ref).abs().max().item():.4f} / {h_ref.abs().max().item():.4f}"
+            )
+        else:
+            print("h_qla: skipped (Blackwell native fwd output_h unsupported)")
         print(
             f"s_fla: {(s_fla - s_ref).abs().max().item():.4f} / {s_ref.abs().max().item():.4f}"
         )

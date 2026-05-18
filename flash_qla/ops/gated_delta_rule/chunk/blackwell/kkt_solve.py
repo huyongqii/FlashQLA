@@ -9,9 +9,6 @@ import torch
 import tilelang
 import tilelang.language as T
 
-from flash_qla.ops.gated_delta_rule.chunk.hopper.kkt_solve import (
-    kkt_solve as hopper_kkt_solve,
-)
 from flash_qla.utils import prepare_chunk_indices
 
 
@@ -538,7 +535,11 @@ def kkt_solve(
         tilelang_kkt_solve_kernel(k, b, g if g is not None else b, a, num_chunks)
         return a
     if experiment != "tcgen05":
-        return hopper_kkt_solve(k, b, chunk_size, cu_seqlens)
+        raise NotImplementedError(
+            "Blackwell native kkt_solve for cu_seqlens requires "
+            "FLASHQLA_BLACKWELL_KKT_EXPERIMENT=tcgen05. Hopper fallback is "
+            "disabled on Blackwell."
+        )
 
     batch_size, num_tokens, Hg, K = k.shape
     _, _, H = b.shape

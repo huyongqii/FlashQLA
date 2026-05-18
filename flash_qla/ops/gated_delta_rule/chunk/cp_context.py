@@ -10,17 +10,10 @@ import tilelang
 from flash_qla.utils import tensor_cache, assert_supported, is_blackwell
 
 _cc = assert_supported()
-# Tier-1: reuse hopper CP kernels on Blackwell as well.
-from .hopper import get_warmup_chunks, fused_gdr_h, correct_initial_states
 if is_blackwell(_cc):
-    try:
-        from .blackwell import (  # type: ignore[no-redef]  # noqa: F401
-            get_warmup_chunks,
-            fused_gdr_h,
-            correct_initial_states,
-        )
-    except ImportError:
-        pass
+    get_warmup_chunks = fused_gdr_h = correct_initial_states = None
+else:
+    from .hopper import get_warmup_chunks, fused_gdr_h, correct_initial_states
 
 
 MULTI_PROCESSOR_COUNT = torch.cuda.get_device_properties().multi_processor_count
@@ -141,6 +134,13 @@ def intra_card_cp_preprocess(
     _, _, num_v_heads, v_head_dim = v.shape
     chunk_size = a.shape[-1]
     device = k.device
+
+    if is_blackwell(_cc):
+        raise NotImplementedError(
+            "Blackwell native intra-card CP is not implemented yet. Hopper "
+            "fallback is disabled on Blackwell; run with --no-cp or implement "
+            "Blackwell-native get_warmup_chunks/fused_gdr_h/correct_h0."
+        )
 
     if batch_size > 1:
         return raw_h0, raw_cu_seqlens, None, None

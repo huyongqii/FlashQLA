@@ -3,25 +3,14 @@
 
 """Blackwell entry points for Gated Delta Rule chunk kernels.
 
-Forward and KKT have experimental native TCGEN05/TMEM implementations selected
-by ``FLASHQLA_BLACKWELL_NATIVE_KERNELS``. The remaining kernels intentionally
-forward to the Hopper-compatible implementation until their Blackwell rewrites
-are validated.
+Only native Blackwell kernels are dispatched from this module. Unsupported
+features fail explicitly instead of falling back to Hopper-compatible kernels;
+this keeps B200/B300 debugging focused on one implementation path.
 """
 
 from __future__ import annotations
 
 import os
-import warnings
-
-from flash_qla.ops.gated_delta_rule.chunk.hopper import (
-    correct_initial_states,
-    fused_gdr_bwd as _hopper_fused_gdr_bwd,
-    fused_gdr_fwd as _hopper_fused_gdr_fwd,
-    fused_gdr_h as _hopper_fused_gdr_h,
-    get_warmup_chunks,
-    kkt_solve as _hopper_kkt_solve,
-)
 
 
 _USE_EXPERIMENTAL_NATIVE = (
@@ -49,7 +38,6 @@ else:
 
 
 HAS_NATIVE_BLACKWELL_KERNELS = _USE_EXPERIMENTAL_NATIVE
-_WARNING_EMITTED = False
 _DEBUG_EMITTED = False
 _DEBUG_MESSAGES = set()
 
@@ -67,26 +55,13 @@ def _debug_dispatch(message: str):
         print(f"[FlashQLA Blackwell dispatch] {message}", flush=True)
 
 
-def _require_or_warn(kernel_name: str):
-    if os.environ.get("FLASHQLA_REQUIRE_BLACKWELL_NATIVE", "") == "1":
-        raise NotImplementedError(
-            f"Blackwell-native {kernel_name} is not implemented yet. "
-            "Only the experimental forward and KKT paths currently have native "
-            "TCGEN05/TMEM implementations. Unset "
-            "FLASHQLA_REQUIRE_BLACKWELL_NATIVE to allow Hopper-compatible "
-            "fallback for this kernel."
-        )
-
-    global _WARNING_EMITTED
-    if not _WARNING_EMITTED and os.environ.get("FLASHQLA_SUPPRESS_BLACKWELL_WARNING", "") != "1":
-        _WARNING_EMITTED = True
-        warnings.warn(
-            "FlashQLA is using a Hopper-compatible fallback for at least one "
-            "Blackwell kernel. Forward/KKT can use native TCGEN05/TMEM when "
-            "FLASHQLA_BLACKWELL_NATIVE_KERNELS includes fwd,kkt. Set "
-            "FLASHQLA_REQUIRE_BLACKWELL_NATIVE=1 to fail instead.",
-            stacklevel=3,
-        )
+def _unsupported(kernel_name: str):
+    raise NotImplementedError(
+        f"Blackwell-native {kernel_name} is not available in the current build. "
+        "FlashQLA no longer falls back to Hopper-compatible kernels on Blackwell. "
+        "Enable the native kernel in FLASHQLA_BLACKWELL_NATIVE_KERNELS or use a "
+        "feature path that has a Blackwell implementation."
+    )
 
 
 def kkt_solve(*args, **kwargs):
@@ -96,32 +71,30 @@ def kkt_solve(*args, **kwargs):
         else:
             _debug_dispatch("kkt_solve=native_fixed_fast_candidate")
         return _native_kkt_solve(*args, **kwargs)
-    if _USE_EXPERIMENTAL_NATIVE:
-        _debug_dispatch("kkt_solve=hopper_fallback")
-        return _hopper_kkt_solve(*args, **kwargs)
-    _require_or_warn("kkt_solve")
-    return _hopper_kkt_solve(*args, **kwargs)
+    _unsupported("kkt_solve")
 
 
 def fused_gdr_fwd(*args, **kwargs):
     if _native_fused_gdr_fwd is not None:
         _debug_dispatch("fused_gdr_fwd=native_candidate")
         return _native_fused_gdr_fwd(*args, **kwargs)
-    if _USE_EXPERIMENTAL_NATIVE:
-        _debug_dispatch("fused_gdr_fwd=hopper_fallback")
-        return _hopper_fused_gdr_fwd(*args, **kwargs)
-    _require_or_warn("fused_gdr_fwd")
-    return _hopper_fused_gdr_fwd(*args, **kwargs)
+    _unsupported("fused_gdr_fwd")
 
 
 def fused_gdr_h(*args, **kwargs):
-    _require_or_warn("fused_gdr_h")
-    return _hopper_fused_gdr_h(*args, **kwargs)
+    _unsupported("fused_gdr_h")
 
 
 def fused_gdr_bwd(*args, **kwargs):
-    _require_or_warn("fused_gdr_bwd")
-    return _hopper_fused_gdr_bwd(*args, **kwargs)
+    _unsupported("fused_gdr_bwd")
+
+
+def get_warmup_chunks(*args, **kwargs):
+    _unsupported("get_warmup_chunks")
+
+
+def correct_initial_states(*args, **kwargs):
+    _unsupported("correct_initial_states")
 
 
 __all__ = [

@@ -192,6 +192,11 @@ def chunk_gated_delta_rule_fwd(
     use_blackwell_native_fwd = False
     if is_blackwell(_cc):
         use_blackwell_native_fwd, _ = should_use_native_fwd(H, Hg)
+        if auto_cp:
+            raise NotImplementedError(
+                "Blackwell native intra-card CP is not implemented yet. Hopper "
+                "fallback is disabled on Blackwell; rerun with --no-cp."
+            )
     pretransform_a = (
         os.environ.get("FLASHQLA_BLACKWELL_PRETRANSFORM_A", "1") == "1"
         and is_blackwell(_cc)

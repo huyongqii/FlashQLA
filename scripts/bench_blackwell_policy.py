@@ -39,8 +39,6 @@ SHAPE_GROUPS = {
 
 
 POLICIES = {
-    'compat': {
-    },
     'auto_256_lh': {
         'FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE': '1',
         'FLASHQLA_BLACKWELL_NATIVE': '1',
@@ -106,39 +104,6 @@ POLICIES = {
         'FLASHQLA_BLACKWELL_FWD_THREADS': '256',
         'FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS': 'load,h',
     },
-    'qwen397_native_cp_exact': {
-        'FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE': '1',
-        'FLASHQLA_BLACKWELL_NATIVE': '1',
-        'FLASHQLA_BLACKWELL_NATIVE_KERNELS': 'fwd,kkt',
-        'FLASHQLA_BLACKWELL_FWD_POLICY': 'native',
-        'FLASHQLA_BLACKWELL_BLOCK_DV': '64',
-        'FLASHQLA_BLACKWELL_FWD_THREADS': '256',
-        'FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS': 'load,h',
-        'FLASHQLA_CP_EXACT': '1',
-    },
-    'qwen397_native_cp_exact_torch': {
-        'FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE': '1',
-        'FLASHQLA_BLACKWELL_NATIVE': '1',
-        'FLASHQLA_BLACKWELL_NATIVE_KERNELS': 'fwd,kkt',
-        'FLASHQLA_BLACKWELL_FWD_POLICY': 'native',
-        'FLASHQLA_BLACKWELL_BLOCK_DV': '64',
-        'FLASHQLA_BLACKWELL_FWD_THREADS': '256',
-        'FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS': 'load,h',
-        'FLASHQLA_CP_EXACT': '1',
-        'FLASHQLA_CP_CORRECT_H0_TORCH': '1',
-    },
-    'qwen397_native_cp4_exact_torch': {
-        'FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE': '1',
-        'FLASHQLA_BLACKWELL_NATIVE': '1',
-        'FLASHQLA_BLACKWELL_NATIVE_KERNELS': 'fwd,kkt',
-        'FLASHQLA_BLACKWELL_FWD_POLICY': 'native',
-        'FLASHQLA_BLACKWELL_BLOCK_DV': '64',
-        'FLASHQLA_BLACKWELL_FWD_THREADS': '256',
-        'FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS': 'load,h',
-        'FLASHQLA_CP_EXACT': '1',
-        'FLASHQLA_CP_CORRECT_H0_TORCH': '1',
-        'FLASHQLA_CP_MAX_LOCAL_CHUNKS': '4',
-    },
     'qwen397_native_exact_tmem': {
         'FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE': '1',
         'FLASHQLA_BLACKWELL_NATIVE': '1',
@@ -196,14 +161,6 @@ POLICIES = {
         'FLASHQLA_BLACKWELL_BLOCK_DV': '64',
         'FLASHQLA_BLACKWELL_FWD_THREADS': '512',
         'FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS': 'load',
-    },
-    'qwen397_kkt_compat_fwd': {
-        'FLASHQLA_BLACKWELL_NATIVE': '1',
-        'FLASHQLA_BLACKWELL_NATIVE_KERNELS': 'kkt',
-        'FLASHQLA_BLACKWELL_FWD_POLICY': 'compat',
-        'FLASHQLA_BLACKWELL_BLOCK_DV': '64',
-        'FLASHQLA_BLACKWELL_FWD_THREADS': '256',
-        'FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS': 'load,h',
     },
     'ag_256_lh': {
         'FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE': '1',
@@ -690,7 +647,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--policies",
-        default="qwen397_native,qwen397_kkt_compat_fwd",
+        default="qwen397_native",
         help=f"Comma-separated policies. Available: {','.join(sorted(POLICIES))}",
     )
     parser.add_argument(
@@ -748,12 +705,11 @@ def main() -> int:
             policy
             for policy in selected_policies
             if "fwd" in POLICIES[policy].get("FLASHQLA_BLACKWELL_NATIVE_KERNELS", "")
-            and POLICIES[policy].get("FLASHQLA_BLACKWELL_FWD_POLICY", "native") != "compat"
         ]
         if native_fwd_cp:
             print(
-                "[warn] --with-cp will force Blackwell native fwd policies through "
-                "their CP fallback path: "
+                "[warn] --with-cp is unsupported for Blackwell native fwd policies "
+                "now that Hopper fallback is disabled: "
                 + ",".join(native_fwd_cp),
                 flush=True,
             )
