@@ -973,7 +973,6 @@ def fused_gdr_h(
             store_final_state=output_final_state,
             is_varlen=is_varlen,
             is_cp=is_cp,
-            use_tcgen05=use_tcgen05,
         )
     else:
         tilelang_prepare_h_kernel = tilelang_prepare_h(
@@ -995,6 +994,7 @@ def fused_gdr_h(
             store_h=output_h,
             is_varlen=is_varlen,
             is_cp=is_cp,
+            use_tcgen05=use_tcgen05,
         )
     tilelang_prepare_h_kernel(
         k,
