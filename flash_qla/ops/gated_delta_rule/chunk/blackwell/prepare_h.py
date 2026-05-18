@@ -64,6 +64,11 @@ def tilelang_prepare_h(
     h0_shape = (batch_size, H, DK, DV)
     ht_shape = (batch_size, H, DK, DV)
     m_shape = (batch_size, H, DK, DK)
+    skip_store_group = (
+        os.environ.get("FLASHQLA_BLACKWELL_PREPARE_H_SKIP_STORE_GROUP", "") == "1"
+        and not store_h
+    )
+    bar_0_arrive_count = 384 if skip_store_group else 416
 
     @T.prim_func
     def tilelang_prepare_h_kernel(
@@ -147,7 +152,7 @@ def tilelang_prepare_h(
             data_is_ready = T.alloc_barrier(arrive_count=[96] * num_stages)
             data_is_free = T.alloc_barrier(arrive_count=[384] * num_stages)
 
-            bar_0 = T.alloc_barrier(arrive_count=416)
+            bar_0 = T.alloc_barrier(arrive_count=bar_0_arrive_count)
             bar_1 = T.alloc_barrier(arrive_count=256)
             bar_2 = T.alloc_barrier(arrive_count=384)
             bar_3 = T.alloc_barrier(arrive_count=128)
@@ -450,7 +455,7 @@ def tilelang_prepare_h(
 
                         T.barrier_arrive(data_is_ready[i_s % num_stages])
 
-                else:
+                elif not skip_store_group:
                     for i_s in T.serial(num_iters):
                         T.barrier_arrive(bar_0)
 
