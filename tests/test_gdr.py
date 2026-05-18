@@ -423,7 +423,6 @@ def test_gated_delta_rule(
                 prof_qla,
                 "[fwd] FlashQLA gdr",
                 (
-                    "tilelang_precompute_qk_p_blackwell_kernel_kernel",
                     "tilelang_fused_chunk_gdr_fwd_kernel_kernel",
                     "tilelang_fused_chunk_gdr_fwd_blackwell_native_kernel_kernel",
                     "tilelang_fused_chunk_gdr_fwd_blackwell_ag_kernel_kernel",
