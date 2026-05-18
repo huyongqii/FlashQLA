@@ -149,7 +149,7 @@ def tilelang_correct_h0(
             cp_h0[seq_start_idx, bh, 0:DK, bv * block_DV : (bv + 1) * block_DV],
         )
 
-        for i_s in T.Pipelined(num_iters - 1, num_stages=2):
+        for i_s in T.serial(num_iters - 1):
             if fallback_mask[seq_start_idx + i_s, bh]:
                 T.copy(h_fragment, hd_shared)
             T.copy(
