@@ -56,11 +56,10 @@ def chunk_gated_delta_rule_fwd(
                 and int(cu_seqlens[0].item()) == 0
                 and int(cu_seqlens[1].item()) == k.shape[1]
             )
-            if is_single_fixed_seq:
-                cu_seqlens = None
-            else:
+            if not is_single_fixed_seq:
                 raise NotImplementedError(
-                    "Blackwell native CP currently supports fixed-length inputs only."
+                    "Blackwell native CP currently supports only fixed-length "
+                    "inputs or cu_seqlens=[0, T]."
                 )
         if use_blackwell_cp and k.shape[0] > 1:
             use_blackwell_cp = False

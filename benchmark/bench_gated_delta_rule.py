@@ -142,17 +142,20 @@ def get_lib_versions() -> Dict[str, str]:
         versions["fla"] = "Not Installed"
 
     # FlashInfer
-    try:
-        import flashinfer
+    if HAS_FI:
+        try:
+            import flashinfer
 
-        if hasattr(flashinfer, "__version__"):
-            versions["flashinfer"] = flashinfer.__version__
-        elif hasattr(flashinfer, "version"):
-            versions["flashinfer"] = str(flashinfer.version)
-        else:
-            versions["flashinfer"] = "Installed (ver unknown)"
-    except ImportError:
-        versions["flashinfer"] = "Not Installed"
+            if hasattr(flashinfer, "__version__"):
+                versions["flashinfer"] = flashinfer.__version__
+            elif hasattr(flashinfer, "version"):
+                versions["flashinfer"] = str(flashinfer.version)
+            else:
+                versions["flashinfer"] = "Installed (ver unknown)"
+        except ImportError:
+            versions["flashinfer"] = "Not Installed"
+    else:
+        versions["flashinfer"] = "Skipped"
 
     # TileLang
     try:
