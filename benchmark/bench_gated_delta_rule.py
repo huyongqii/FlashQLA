@@ -26,12 +26,8 @@ from flash_qla import (
 )
 from flash_qla.utils import l2norm
 
-try:
-    from flashinfer.gdn_prefill import chunk_gated_delta_rule as fi_fwd
-
-    HAS_FI = True
-except ImportError:
-    HAS_FI = False
+fi_fwd = None
+HAS_FI = False
 
 HEAD_DIM = 128
 BWD_SPLIT_SIZE = 8
@@ -66,15 +62,16 @@ def generate_rand_seqlens(batch_size, num_tokens):
 
 
 FWD_MODEL_CONFIGS = [
-    ModelConfig("397B/122B TP8", 2, 8),
+    # Qwen 397B/122B scope for Hopper-vs-Blackwell comparison.
     ModelConfig("397B/122B TP4", 4, 16),
     ModelConfig("397B/122B TP2", 8, 32),
-    ModelConfig("397B/122B TP1", 16, 64),
-    ModelConfig("35B/9B/4B TP1", 16, 32),
-    ModelConfig("27B TP2", 8, 24),
-    ModelConfig("27B TP1", 16, 48),
-    ModelConfig("2B/0.8B TP1", 16, 16),
-    ModelConfig("Sym h32", 32, 32),
+    # ModelConfig("397B/122B TP8", 2, 8),
+    # ModelConfig("397B/122B TP1", 16, 64),
+    # ModelConfig("35B/9B/4B TP1", 16, 32),
+    # ModelConfig("27B TP2", 8, 24),
+    # ModelConfig("27B TP1", 16, 48),
+    # ModelConfig("2B/0.8B TP1", 16, 16),
+    # ModelConfig("Sym h32", 32, 32),
 ]
 
 FWD_SEQLEN_CONFIGS = [
@@ -82,21 +79,21 @@ FWD_SEQLEN_CONFIGS = [
     SeqLenConfig("1x16384", [16384]),
     SeqLenConfig("1x8192", [8192]),
     SeqLenConfig("1x4096", [4096]),
-    SeqLenConfig("1x2048", [2048]),
-    SeqLenConfig("28672+4096", [28672, 4096]),
-    SeqLenConfig("24576+8192", [24576, 8192]),
-    SeqLenConfig("16384+16384", [16384, 16384]),
-    SeqLenConfig("8192+24576", [8192, 24576]),
-    SeqLenConfig("4096+28672", [4096, 28672]),
-    SeqLenConfig("12288+4096", [12288, 4096]),
-    SeqLenConfig("6144+2048", [6144, 2048]),
-    SeqLenConfig("4096+4096", [4096, 4096]),
-    SeqLenConfig("2048+6144", [2048, 6144]),
-    SeqLenConfig("1024+7168", [1024, 7168]),
-    SeqLenConfig("8192x4", [8192] * 4),
-    SeqLenConfig("4096x8", [4096] * 8),
-    SeqLenConfig("2048x4", [2048] * 4),
-    SeqLenConfig("1024x8", [1024] * 8),
+    # SeqLenConfig("1x2048", [2048]),
+    # SeqLenConfig("28672+4096", [28672, 4096]),
+    # SeqLenConfig("24576+8192", [24576, 8192]),
+    # SeqLenConfig("16384+16384", [16384, 16384]),
+    # SeqLenConfig("8192+24576", [8192, 24576]),
+    # SeqLenConfig("4096+28672", [4096, 28672]),
+    # SeqLenConfig("12288+4096", [12288, 4096]),
+    # SeqLenConfig("6144+2048", [6144, 2048]),
+    # SeqLenConfig("4096+4096", [4096, 4096]),
+    # SeqLenConfig("2048+6144", [2048, 6144]),
+    # SeqLenConfig("1024+7168", [1024, 7168]),
+    # SeqLenConfig("8192x4", [8192] * 4),
+    # SeqLenConfig("4096x8", [4096] * 8),
+    # SeqLenConfig("2048x4", [2048] * 4),
+    # SeqLenConfig("1024x8", [1024] * 8),
 ]
 BWD_MODEL_CONFIGS = [
     ModelConfig("32", 32, 32),
@@ -467,21 +464,32 @@ def main():
     parser = argparse.ArgumentParser(description="Benchmark FlashQLA Gated Delta Rule")
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--repeats", type=int, default=100)
-    parser.add_argument("--mode", choices=["fwd", "bwd", "all"], default="all")
-    parser.add_argument("--skip-fi", action="store_true")
+    parser.add_argument("--mode", choices=["fwd", "bwd", "all"], default="fwd")
+    parser.add_argument(
+        "--with-fi",
+        action="store_true",
+        help="Also benchmark FlashInfer forward. Disabled by default.",
+    )
+    parser.add_argument("--skip-fi", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     if not torch.cuda.is_available():
         print("CUDA not available.")
         return
 
-    global HAS_FI
-    if args.skip_fi:
-        HAS_FI = False
+    global HAS_FI, fi_fwd
+    if args.with_fi and not args.skip_fi:
+        try:
+            from flashinfer.gdn_prefill import chunk_gated_delta_rule as _fi_fwd
+
+            fi_fwd = _fi_fwd
+            HAS_FI = True
+        except ImportError:
+            HAS_FI = False
 
     gpu_name = torch.cuda.get_device_properties(0).name
     print(f"GPU: {gpu_name}")
-    print("Models: Qwen3.5 family (397B, 122B, 35B, 27B, 9B, 4B, 2B, 0.8B), d=128")
+    print("Models: Qwen3.5 397B/122B TP2/TP4, d=128")
     print(f"Config: Warmup={args.warmup}, Repeats={args.repeats}")
 
     libs = get_lib_versions()

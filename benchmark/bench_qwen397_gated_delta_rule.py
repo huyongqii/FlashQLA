@@ -1,60 +1,52 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026 The Qwen team, Alibaba Group.
 # Licensed under The MIT License [see LICENSE for details]
-
-"""Benchmark FlashQLA GDR forward on Qwen 397B/122B shapes.
-
-This is intentionally closer to benchmark/bench_gated_delta_rule.py than to
-tests/test_gdr.py: it creates inputs once per case and times direct function
-calls with tilelang.profiler.do_bench(). Different FlashQLA policy envs are
-still isolated in worker subprocesses because dispatch is decided at import
-time.
-"""
-
-from __future__ import annotations
+#
+# Blackwell-side benchmark aligned with benchmark/bench_gated_delta_rule.py.
 
 import argparse
-import csv
-import json
+import gc
 import math
 import os
-import subprocess
-import sys
-import traceback
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List, Optional, Tuple
+
+import torch
+import torch.nn.functional as F
+
+import tilelang
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
 HEAD_DIM = 128
 
-SHAPES = {
-    "tp1": (16, 64),
-    "tp2": (8, 32),
-    "tp4": (4, 16),
-    "tp8": (2, 8),
-}
-SHAPE_GROUPS = {
-    "qwen397": ("tp1", "tp2", "tp4", "tp8"),
-    "all": ("tp1", "tp2", "tp4", "tp8"),
-}
-DEFAULT_SEQLENS = (4096, 8192, 16384, 32768)
 
-POLICIES: dict[str, dict[str, str]] = {
-    "hopper_compat": {
-        "FLASHQLA_FORCE_ARCH": "sm90",
-    },
-    "qwen397_native": {
-        "FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE": "1",
-        "FLASHQLA_BLACKWELL_NATIVE": "1",
-        "FLASHQLA_BLACKWELL_NATIVE_KERNELS": "fwd,kkt",
-        "FLASHQLA_BLACKWELL_FWD_POLICY": "native",
-        "FLASHQLA_BLACKWELL_BLOCK_DV": "64",
-        "FLASHQLA_BLACKWELL_FWD_THREADS": "256",
-        "FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS": "load,h,o",
-    },
-    "qwen397_native_cp": {
+@dataclass
+class ModelConfig:
+    label: str
+    h_qk: int
+    h_v: int
+
+
+@dataclass
+class SeqLenConfig:
+    label: str
+    seqlens: List[int]
+
+
+FWD_MODEL_CONFIGS = [
+    ModelConfig("397B/122B TP4", 4, 16),
+    ModelConfig("397B/122B TP2", 8, 32),
+]
+
+FWD_SEQLEN_CONFIGS = [
+    SeqLenConfig("1x32768", [32768]),
+    SeqLenConfig("1x16384", [16384]),
+    SeqLenConfig("1x8192", [8192]),
+    SeqLenConfig("1x4096", [4096]),
+]
+
+KERNEL_ENVS = {
+    "blackwell_cp": {
         "FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE": "1",
         "FLASHQLA_BLACKWELL_NATIVE": "1",
         "FLASHQLA_BLACKWELL_NATIVE_KERNELS": "fwd,kkt",
@@ -69,7 +61,7 @@ POLICIES: dict[str, dict[str, str]] = {
         "FLASHQLA_BLACKWELL_FWD_THREADS": "256",
         "FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS": "load,h,o",
     },
-    "qwen397_native_cp_force_s8": {
+    "blackwell_cp_force_s8": {
         "FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE": "1",
         "FLASHQLA_BLACKWELL_NATIVE": "1",
         "FLASHQLA_BLACKWELL_NATIVE_KERNELS": "fwd,kkt",
@@ -115,757 +107,292 @@ ENV_TO_CLEAR = (
     "FLASHQLA_TARGET_CTA_RATIO",
 )
 
-CSV_FIELDS = (
-    "policy",
-    "shape",
-    "batch_size",
-    "seqlen",
-    "nkh",
-    "nvh",
-    "status",
-    "qla_ms",
-    "fla_ms",
-    "fi_ms",
-    "speedup_vs_fla",
-    "speedup_vs_fi",
-    "check_o_rel",
-    "check_s_rel",
-    "error",
-)
 
-
-@dataclass
-class Row:
-    policy: str
-    shape: str
-    batch_size: int
-    seqlen: int
-    nkh: int
-    nvh: int
-    status: str
-    qla_ms: float
-    fla_ms: float
-    fi_ms: float
-    speedup_vs_fla: float
-    speedup_vs_fi: float
-    check_o_rel: float
-    check_s_rel: float
-    error: str
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "Row":
-        return cls(
-            policy=str(data.get("policy", "")),
-            shape=str(data.get("shape", "")),
-            batch_size=int(data.get("batch_size", 1)),
-            seqlen=int(data.get("seqlen", 0)),
-            nkh=int(data.get("nkh", 0)),
-            nvh=int(data.get("nvh", 0)),
-            status=str(data.get("status", "failed")),
-            qla_ms=_as_float(data.get("qla_ms")),
-            fla_ms=_as_float(data.get("fla_ms")),
-            fi_ms=_as_float(data.get("fi_ms")),
-            speedup_vs_fla=_as_float(data.get("speedup_vs_fla")),
-            speedup_vs_fi=_as_float(data.get("speedup_vs_fi")),
-            check_o_rel=_as_float(data.get("check_o_rel")),
-            check_s_rel=_as_float(data.get("check_s_rel")),
-            error=str(data.get("error", "")),
-        )
-
-    def to_csv(self) -> dict[str, Any]:
-        return {
-            "policy": self.policy,
-            "shape": self.shape,
-            "batch_size": self.batch_size,
-            "seqlen": self.seqlen,
-            "nkh": self.nkh,
-            "nvh": self.nvh,
-            "status": self.status,
-            "qla_ms": _csv_float(self.qla_ms),
-            "fla_ms": _csv_float(self.fla_ms),
-            "fi_ms": _csv_float(self.fi_ms),
-            "speedup_vs_fla": _csv_float(self.speedup_vs_fla),
-            "speedup_vs_fi": _csv_float(self.speedup_vs_fi),
-            "check_o_rel": _csv_float(self.check_o_rel),
-            "check_s_rel": _csv_float(self.check_s_rel),
-            "error": self.error,
-        }
-
-
-def _as_float(value: Any) -> float:
-    try:
-        if value is None:
-            return float("nan")
-        return float(value)
-    except (TypeError, ValueError):
-        return float("nan")
-
-
-def _csv_float(value: float) -> str:
-    if math.isnan(value):
-        return ""
-    return f"{value:.6f}"
-
-
-def _fmt_ms(value: float) -> str:
-    if math.isnan(value):
-        return ""
-    return f"{value:.3f}ms"
-
-
-def _fmt_x(value: float) -> str:
-    if math.isnan(value):
-        return ""
-    return f"{value:.3f}x"
-
-
-def _split_csv(value: str) -> list[str]:
-    return [item.strip() for item in value.split(",") if item.strip()]
-
-
-def _parse_int_csv(value: str) -> list[int]:
-    return [int(item) for item in _split_csv(value)]
-
-
-def _expand_shapes(items: list[str]) -> list[str]:
-    expanded: list[str] = []
-    for item in items:
-        if item in SHAPE_GROUPS:
-            expanded.extend(SHAPE_GROUPS[item])
-        else:
-            expanded.append(item)
-    return expanded
-
-
-def _parse_env(items: list[str]) -> dict[str, str]:
-    parsed: dict[str, str] = {}
+def parse_env_overrides(items: List[str]) -> Dict[str, str]:
+    result = {}
     for item in items:
         if "=" not in item:
             raise ValueError(f"--env expects KEY=VALUE, got {item!r}")
         key, value = item.split("=", 1)
         key = key.strip()
         if not key:
-            raise ValueError(f"--env has empty key in {item!r}")
-        parsed[key] = value
-    return parsed
+            raise ValueError(f"--env has an empty key in {item!r}")
+        result[key] = value
+    return result
 
 
-def _policy_env(policy: str, extra_env: dict[str, str]) -> dict[str, str]:
-    env = os.environ.copy()
+def apply_kernel_env(kernel: str, extra_env: Dict[str, str]) -> Dict[str, str]:
     for key in ENV_TO_CLEAR:
-        env.pop(key, None)
-    env.update(POLICIES[policy])
-    env.update(extra_env)
-    env.setdefault("FLASHQLA_SUPPRESS_BLACKWELL_WARNING", "1")
-    return env
+        os.environ.pop(key, None)
+    os.environ.update(KERNEL_ENVS[kernel])
+    os.environ.update(extra_env)
+    os.environ.setdefault("FLASHQLA_SUPPRESS_BLACKWELL_WARNING", "1")
+    visible = {key: os.environ[key] for key in sorted(KERNEL_ENVS[kernel])}
+    visible.update(extra_env)
+    return visible
 
 
-def _speedup(base_ms: float, qla_ms: float) -> float:
-    if math.isnan(base_ms) or math.isnan(qla_ms) or qla_ms <= 0:
-        return float("nan")
-    return base_ms / qla_ms
-
-
-def _mean(values: list[float]) -> float:
-    values = [v for v in values if not math.isnan(v)]
-    if not values:
-        return float("nan")
-    return sum(values) / len(values)
-
-
-def _markdown_table(headers: list[str], rows: list[list[str]]) -> str:
-    lines = [
-        "| " + " | ".join(headers) + " |",
-        "| " + " | ".join("---" for _ in headers) + " |",
-    ]
-    lines.extend("| " + " | ".join(row) + " |" for row in rows)
-    return "\n".join(lines)
-
-
-def _worker_json(row: dict[str, Any]) -> int:
-    print(json.dumps(row, sort_keys=True), flush=True)
-    return 0
-
-
-def _worker_failed(args: argparse.Namespace, status: str, error: str) -> int:
-    return _worker_json(
-        {
-            "policy": args.worker_policy,
-            "shape": args.worker_shape,
-            "batch_size": 1,
-            "seqlen": args.worker_seqlen,
-            "nkh": args.worker_nkh,
-            "nvh": args.worker_nvh,
-            "status": status,
-            "qla_ms": None,
-            "fla_ms": None,
-            "fi_ms": None,
-            "speedup_vs_fla": None,
-            "speedup_vs_fi": None,
-            "check_o_rel": None,
-            "check_s_rel": None,
-            "error": error[-2000:],
-        }
-    )
-
-
-def _run_worker(args: argparse.Namespace) -> int:
+def cleanup_cuda():
     try:
-        sys.path.insert(0, str(REPO_ROOT))
-
-        import torch
-        import torch.nn.functional as F
-        import tilelang
-
-        from flash_qla import chunk_gated_delta_rule_fwd as qla_fwd
-        from flash_qla.utils import l2norm
-
-        if not torch.cuda.is_available():
-            return _worker_failed(args, "failed", "CUDA not available")
-
-        try:
-            from fla.ops.gated_delta_rule.chunk import (
-                chunk_gated_delta_rule_fwd as fla_fwd,
-            )
-        except Exception as exc:
-            if args.skip_fla:
-                fla_fwd = None
-            else:
-                return _worker_failed(args, "failed", f"FLA import failed: {exc}")
-
-        fi_fwd = None
-        if not args.skip_fi:
-            try:
-                from flashinfer.gdn_prefill import chunk_gated_delta_rule as fi_fwd
-            except Exception:
-                fi_fwd = None
-
-        torch.manual_seed(args.seed)
-        torch.cuda.manual_seed_all(args.seed)
-
-        device = "cuda"
-        batch_size = 1
-        t = args.worker_seqlen
-        hq = args.worker_nkh
-        hv = args.worker_nvh
-        scale = HEAD_DIM ** (-0.5)
-        dtype = torch.bfloat16
-
-        q = l2norm(torch.randn(batch_size, t, hq, HEAD_DIM, device=device, dtype=dtype))
-        k = l2norm(torch.randn(batch_size, t, hq, HEAD_DIM, device=device, dtype=dtype))
-        v = torch.randn(batch_size, t, hv, HEAD_DIM, device=device, dtype=dtype)
-        g = F.logsigmoid(
-            torch.randn(batch_size, t, hv, device=device, dtype=torch.float32)
-        ) / 16
-        beta = torch.randn(batch_size, t, hv, device=device, dtype=torch.float32).sigmoid()
-        h0 = None
-        if not args.no_h0:
-            h0 = torch.randn(
-                batch_size, hv, HEAD_DIM, HEAD_DIM, device=device, dtype=torch.float32
-            )
-
-        swa_mask = torch.zeros(hv, dtype=torch.bool, device=device)
-        swa_mask[: math.ceil(args.swa_ratio * hv)] = True
-        swa_mask = swa_mask[torch.randperm(hv, device=device)]
-        g[:, :, ~swa_mask] = 0.0
-
-        fixed_cu_seqlens = torch.tensor([0, t], dtype=torch.int32, device=device)
-
-        def call_qla():
-            return qla_fwd(
-                q,
-                k,
-                v,
-                g,
-                beta,
-                scale=scale,
-                initial_state=h0,
-                output_final_state=True,
-                output_h=False,
-                cu_seqlens=None,
-                auto_cp=not args.no_cp,
-            )
-
-        def call_fla():
-            assert fla_fwd is not None
-            return fla_fwd(
-                q,
-                k,
-                v,
-                g,
-                beta,
-                scale=scale,
-                initial_state=h0,
-                output_final_state=True,
-                cu_seqlens=None,
-            )
-
-        def call_fi():
-            assert fi_fwd is not None
-            return fi_fwd(
-                q=q.view(-1, hq, HEAD_DIM),
-                k=k.view(-1, hq, HEAD_DIM),
-                v=v.view(-1, hv, HEAD_DIM),
-                g=g.view(-1, hv),
-                beta=beta.view(-1, hv),
-                scale=scale,
-                initial_state=h0,
-                cu_seqlens=fixed_cu_seqlens,
-                output_final_state=True,
-            )
-
-        check_o_rel = float("nan")
-        check_s_rel = float("nan")
-        if args.check:
-            if fla_fwd is None:
-                return _worker_failed(args, "failed", "Correctness check needs FLA")
-            qla_result = call_qla()
-            fla_result = call_fla()
-            _, _, o_qla, _, s_qla = qla_result
-            _, o_fla, _, s_fla, _, _ = fla_result
-            o_abs = (o_qla.float() - o_fla.float()).abs().amax().item()
-            s_abs = (s_qla.float() - s_fla.float()).abs().amax().item()
-            o_denom = o_fla.float().abs().amax().clamp_min(1e-6).item()
-            s_denom = s_fla.float().abs().amax().clamp_min(1e-6).item()
-            check_o_rel = o_abs / o_denom
-            check_s_rel = s_abs / s_denom
-            if check_o_rel > args.rtol or check_s_rel > args.rtol:
-                return _worker_json(
-                    {
-                        "policy": args.worker_policy,
-                        "shape": args.worker_shape,
-                        "batch_size": batch_size,
-                        "seqlen": t,
-                        "nkh": hq,
-                        "nvh": hv,
-                        "status": "failed_check",
-                        "qla_ms": None,
-                        "fla_ms": None,
-                        "fi_ms": None,
-                        "speedup_vs_fla": None,
-                        "speedup_vs_fi": None,
-                        "check_o_rel": check_o_rel,
-                        "check_s_rel": check_s_rel,
-                        "error": (
-                            f"check failed: o_rel={check_o_rel:.6f}, "
-                            f"s_rel={check_s_rel:.6f}, rtol={args.rtol}"
-                        ),
-                    }
-                )
-
-        torch.cuda.synchronize()
-        qla_ms = tilelang.profiler.do_bench(
-            call_qla, warmup=args.warmup, rep=args.repeats
-        )
-
-        fla_ms = float("nan")
-        if fla_fwd is not None and not args.skip_fla:
+        if torch.cuda.is_available():
             torch.cuda.synchronize()
-            fla_ms = tilelang.profiler.do_bench(
-                call_fla, warmup=args.warmup, rep=args.repeats
-            )
-
-        fi_ms = float("nan")
-        if fi_fwd is not None and not args.skip_fi:
-            torch.cuda.synchronize()
-            fi_ms = tilelang.profiler.do_bench(
-                call_fi, warmup=args.warmup, rep=args.repeats
-            )
-
-        return _worker_json(
-            {
-                "policy": args.worker_policy,
-                "shape": args.worker_shape,
-                "batch_size": batch_size,
-                "seqlen": t,
-                "nkh": hq,
-                "nvh": hv,
-                "status": "ok",
-                "qla_ms": qla_ms,
-                "fla_ms": fla_ms,
-                "fi_ms": fi_ms,
-                "speedup_vs_fla": _speedup(fla_ms, qla_ms),
-                "speedup_vs_fi": _speedup(fi_ms, qla_ms),
-                "check_o_rel": check_o_rel,
-                "check_s_rel": check_s_rel,
-                "error": "",
-            }
-        )
+            gc.collect()
+            torch.cuda.empty_cache()
     except Exception:
-        return _worker_failed(args, "failed", traceback.format_exc())
+        pass
 
 
-def _parse_worker_output(stdout: str) -> dict[str, Any] | None:
-    for line in reversed(stdout.splitlines()):
-        line = line.strip()
-        if not line.startswith("{"):
-            continue
-        try:
-            return json.loads(line)
-        except json.JSONDecodeError:
-            continue
-    return None
-
-
-def _run_case(
-    *,
-    policy: str,
-    shape: str,
-    seqlen: int,
-    nkh: int,
-    nvh: int,
-    args: argparse.Namespace,
-    log_dir: Path,
-    extra_env: dict[str, str],
-) -> Row:
-    cmd = [
-        sys.executable,
-        str(Path(__file__).resolve()),
-        "--worker",
-        "--worker-policy",
-        policy,
-        "--worker-shape",
-        shape,
-        "--worker-seqlen",
-        str(seqlen),
-        "--worker-nkh",
-        str(nkh),
-        "--worker-nvh",
-        str(nvh),
-        "--warmup",
-        str(args.warmup),
-        "--repeats",
-        str(args.repeats),
-        "--seed",
-        str(args.seed),
-        "--swa-ratio",
-        str(args.swa_ratio),
-        "--rtol",
-        str(args.rtol),
-    ]
-    if args.no_h0:
-        cmd.append("--no-h0")
-    if args.no_cp:
-        cmd.append("--no-cp")
-    if not args.check:
-        cmd.append("--no-check")
-    if args.skip_fla:
-        cmd.append("--skip-fla")
-    if args.skip_fi:
-        cmd.append("--skip-fi")
-
-    env = _policy_env(policy, extra_env)
-    visible_env = {key: env[key] for key in sorted(POLICIES[policy]) if key in env}
-    for key in sorted(extra_env):
-        visible_env[key] = env[key]
-    log_path = log_dir / f"{policy}_{shape}_t{seqlen}.log"
-
-    header = [
-        "cmd=" + " ".join(cmd),
-        "env=" + json.dumps(visible_env, sort_keys=True),
-        "",
-    ]
+def get_lib_versions() -> Dict[str, str]:
+    versions = {}
     try:
-        proc = subprocess.run(
-            cmd,
-            cwd=REPO_ROOT,
-            env=env,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=args.timeout,
-            check=False,
-        )
-        log_path.write_text(
-            "\n".join(header)
-            + "STDOUT\n"
-            + proc.stdout
-            + "\nSTDERR\n"
-            + proc.stderr,
-            encoding="utf-8",
-        )
-        data = _parse_worker_output(proc.stdout)
-        if data is None:
-            return Row(
-                policy,
-                shape,
-                1,
-                seqlen,
-                nkh,
-                nvh,
-                "failed",
-                float("nan"),
-                float("nan"),
-                float("nan"),
-                float("nan"),
-                float("nan"),
-                float("nan"),
-                float("nan"),
-                f"worker rc={proc.returncode}; no JSON output; see {log_path}",
+        versions["torch"] = torch.__version__
+    except Exception:
+        versions["torch"] = "N/A"
+    try:
+        import fla
+
+        versions["fla"] = getattr(fla, "__version__", "Installed (ver unknown)")
+    except ImportError:
+        versions["fla"] = "Not Installed"
+    try:
+        versions["tilelang"] = getattr(tilelang, "__version__", "Installed (ver unknown)")
+    except Exception:
+        versions["tilelang"] = "N/A"
+    return versions
+
+
+def prepare_tensors(
+    seqlens: List[int], h_qk: int, h_v: int, l2norm, head_dim: int = HEAD_DIM
+) -> Optional[Dict[str, Any]]:
+    device = "cuda"
+    num_seqs = len(seqlens)
+    total_tokens = sum(seqlens)
+    scale = head_dim ** (-0.5)
+
+    offsets = [0]
+    for s in seqlens:
+        offsets.append(offsets[-1] + s)
+    cu_seqlens = torch.tensor(offsets, dtype=torch.int32, device=device)
+
+    try:
+        q = l2norm(
+            torch.randn(
+                1, total_tokens, h_qk, head_dim, device=device, dtype=torch.bfloat16
             )
-        if proc.returncode != 0 and data.get("status") == "ok":
-            data["status"] = "failed"
-            data["error"] = f"worker rc={proc.returncode}; see {log_path}"
-        return Row.from_dict(data)
-    except subprocess.TimeoutExpired as exc:
-        log_path.write_text(
-            "\n".join(header) + f"TIMEOUT after {args.timeout}s\n{exc}",
-            encoding="utf-8",
         )
-        return Row(
-            policy,
-            shape,
-            1,
-            seqlen,
-            nkh,
-            nvh,
-            "timeout",
-            float("nan"),
-            float("nan"),
-            float("nan"),
-            float("nan"),
-            float("nan"),
-            float("nan"),
-            float("nan"),
-            f"timeout after {args.timeout}s; see {log_path}",
-        )
-
-
-def _write_csv(path: Path, rows: list[Row]) -> None:
-    with path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
-        writer.writeheader()
-        for row in rows:
-            writer.writerow(row.to_csv())
-
-
-def _build_summary(rows: list[Row]) -> str:
-    grouped: dict[tuple[str, str], list[Row]] = {}
-    for row in rows:
-        grouped.setdefault((row.policy, row.shape), []).append(row)
-
-    aggregate_rows: list[list[str]] = []
-    for (policy, shape), group_rows in sorted(grouped.items()):
-        ok_rows = [row for row in group_rows if row.status == "ok"]
-        speedups = [row.speedup_vs_fla for row in ok_rows]
-        aggregate_rows.append(
-            [
-                policy,
-                shape,
-                f"{len(ok_rows)}/{len(group_rows)}",
-                _fmt_x(_mean(speedups)),
-                _fmt_x(min(speedups)) if speedups else "",
-                _fmt_x(max(speedups)) if speedups else "",
-                _fmt_ms(_mean([row.qla_ms for row in ok_rows])),
-                _fmt_ms(_mean([row.fla_ms for row in ok_rows])),
-                _fmt_ms(_mean([row.fi_ms for row in ok_rows])),
-            ]
-        )
-
-    best_rows: list[list[str]] = []
-    shape_order = [
-        shape for shape in SHAPE_GROUPS["qwen397"] if any(row.shape == shape for row in rows)
-    ]
-    seqlen_order = sorted({row.seqlen for row in rows})
-    for shape in shape_order:
-        for seqlen in seqlen_order:
-            candidates = [
-                row
-                for row in rows
-                if row.shape == shape and row.seqlen == seqlen and row.status == "ok"
-            ]
-            candidates.sort(key=lambda row: row.speedup_vs_fla, reverse=True)
-            best = candidates[0] if candidates else None
-            next_best = candidates[1] if len(candidates) > 1 else None
-            best_rows.append(
-                [
-                    shape,
-                    "1",
-                    str(seqlen),
-                    best.policy if best else "",
-                    _fmt_x(best.speedup_vs_fla) if best else "",
-                    next_best.policy if next_best else "",
-                    _fmt_x(next_best.speedup_vs_fla) if next_best else "",
-                ]
+        k = l2norm(
+            torch.randn(
+                1, total_tokens, h_qk, head_dim, device=device, dtype=torch.bfloat16
             )
-
-    failed_rows = [
-        [
-            row.policy,
-            row.shape,
-            str(row.seqlen),
-            row.status,
-            row.error.replace("\n", " | ")[:240],
-        ]
-        for row in rows
-        if row.status != "ok"
-    ]
-
-    parts = [
-        "Aggregate",
-        "",
-        _markdown_table(
-            ["policy", "shape", "ok", "avg", "min", "max", "qla", "fla", "fi"],
-            aggregate_rows,
-        ),
-        "",
-        "Best by case",
-        "",
-        _markdown_table(
-            ["shape", "B", "T", "best_policy", "best", "next_policy", "next"],
-            best_rows,
-        ),
-    ]
-    if failed_rows:
-        parts.extend(
-            [
-                "",
-                "Failures",
-                "",
-                _markdown_table(["policy", "shape", "T", "status", "error"], failed_rows),
-            ]
         )
-    return "\n".join(parts)
-
-
-def _print_progress(row: Row) -> None:
-    if row.status == "ok":
-        print(
-            f"{row.policy:28s} {row.shape:4s} T={row.seqlen:<5d} "
-            f"qla={_fmt_ms(row.qla_ms):>10s} fla={_fmt_ms(row.fla_ms):>10s} "
-            f"vs_fla={_fmt_x(row.speedup_vs_fla):>8s}",
-            flush=True,
+        v = torch.randn(
+            1, total_tokens, h_v, head_dim, device=device, dtype=torch.bfloat16
         )
-    else:
-        print(
-            f"{row.policy:28s} {row.shape:4s} T={row.seqlen:<5d} "
-            f"status={row.status} error={row.error[:120]}",
-            flush=True,
+        g = (
+            F.logsigmoid(
+                torch.randn(1, total_tokens, h_v, device=device, dtype=torch.float32)
+            )
+            / 16
+        )
+        beta = torch.randn(
+            1, total_tokens, h_v, device=device, dtype=torch.float32
+        ).sigmoid()
+        h0 = torch.randn(
+            num_seqs, h_v, head_dim, head_dim, device=device, dtype=torch.float32
+        )
+    except RuntimeError as e:
+        if "out of memory" in str(e).lower():
+            return None
+        raise e
+
+    swa_ratio = 0.75
+    swa_mask = torch.zeros(h_v, dtype=torch.bool, device=device)
+    swa_mask[: math.ceil(swa_ratio * h_v)] = True
+    swa_mask = swa_mask[torch.randperm(h_v, device=device)]
+    g[:, :, ~swa_mask] = 0.0
+
+    return {
+        "scale": scale,
+        "cu_seqlens": cu_seqlens,
+        "q": q,
+        "k": k,
+        "v": v,
+        "g": g,
+        "beta": beta,
+        "h0": h0,
+    }
+
+
+def bench_fwd(
+    seqlens: List[int],
+    h_qk: int,
+    h_v: int,
+    qla_fwd,
+    fla_fwd,
+    l2norm,
+    head_dim: int = HEAD_DIM,
+    warmup: int = 10,
+    repeats: int = 5,
+    auto_cp: bool = True,
+) -> Tuple[float, float]:
+    cleanup_cuda()
+    data = prepare_tensors(seqlens, h_qk, h_v, l2norm, head_dim)
+    if data is None:
+        return float("nan"), float("nan")
+
+    q, k, v, g, beta = data["q"], data["k"], data["v"], data["g"], data["beta"]
+    h0, scale, cu_seqlens = data["h0"], data["scale"], data["cu_seqlens"]
+
+    def call_qla_fwd():
+        qla_fwd(
+            q,
+            k,
+            v,
+            g,
+            beta,
+            scale=scale,
+            initial_state=h0,
+            output_final_state=True,
+            output_h=False,
+            cu_seqlens=cu_seqlens,
+            auto_cp=auto_cp,
         )
 
+    def call_fla_fwd():
+        fla_fwd(
+            q,
+            k,
+            v,
+            g,
+            beta,
+            scale=scale,
+            initial_state=h0,
+            output_final_state=True,
+            cu_seqlens=cu_seqlens,
+        )
 
-def _run_driver(args: argparse.Namespace) -> int:
-    selected_policies = _split_csv(args.policies)
-    if args.with_hopper and "hopper_compat" not in selected_policies:
-        selected_policies.append("hopper_compat")
-    selected_shapes = _expand_shapes(_split_csv(args.shapes))
-    seqlens = _parse_int_csv(args.seqlens)
-    extra_env = _parse_env(args.env)
+    try:
+        qla_ms = tilelang.profiler.do_bench(call_qla_fwd, warmup=warmup, rep=repeats)
+    except RuntimeError as e:
+        print(f"\n[WARN] FlashQLA Fwd failed: {e}")
+        cleanup_cuda()
+        qla_ms = float("nan")
 
-    unknown_policies = [policy for policy in selected_policies if policy not in POLICIES]
-    unknown_shapes = [shape for shape in selected_shapes if shape not in SHAPES]
-    if unknown_policies:
-        raise ValueError(f"Unknown policies: {unknown_policies}. Valid: {sorted(POLICIES)}")
-    if unknown_shapes:
-        raise ValueError(f"Unknown shapes: {unknown_shapes}. Valid: {sorted(SHAPES)}")
-    if any(seqlen <= 0 for seqlen in seqlens):
-        raise ValueError("--seqlens entries must be positive")
+    try:
+        fla_ms = tilelang.profiler.do_bench(call_fla_fwd, warmup=warmup, rep=repeats)
+    except RuntimeError as e:
+        print(f"\n[WARN] FLA Fwd failed: {e}")
+        cleanup_cuda()
+        fla_ms = float("nan")
 
-    log_dir = Path(args.log_dir)
-    log_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        torch.cuda.synchronize()
+    except Exception:
+        pass
 
-    print("Qwen 397B/122B forward benchmark")
-    print(f"policies={','.join(selected_policies)}")
-    print(f"shapes={','.join(selected_shapes)} seqlens={','.join(map(str, seqlens))}")
-    print(
-        f"warmup={args.warmup} repeats={args.repeats} "
-        f"check={args.check} h0={not args.no_h0} auto_cp={not args.no_cp}",
-        flush=True,
-    )
-
-    rows: list[Row] = []
-    for policy in selected_policies:
-        for shape in selected_shapes:
-            nkh, nvh = SHAPES[shape]
-            for seqlen in seqlens:
-                row = _run_case(
-                    policy=policy,
-                    shape=shape,
-                    seqlen=seqlen,
-                    nkh=nkh,
-                    nvh=nvh,
-                    args=args,
-                    log_dir=log_dir,
-                    extra_env=extra_env,
-                )
-                rows.append(row)
-                _print_progress(row)
-
-    out_path = Path(args.out)
-    _write_csv(out_path, rows)
-    summary = _build_summary(rows)
-    summary_path = out_path.with_suffix(".summary.md")
-    summary_path.write_text(summary + "\n", encoding="utf-8")
-
-    print("\n" + summary)
-    print(f"\nwrote {out_path}")
-    print(f"wrote {summary_path}")
-    return 1 if any(row.status != "ok" for row in rows) else 0
+    return qla_ms, fla_ms
 
 
-def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
+FWD_HDR = (
+    f"{'Model Config':<16} {'Seqlens':<17} {'h_qk':>5} {'h_v':>5}    "
+    f"{'flash_qla [fwd]':>10}  {'FLA [fwd]':>10}   {'vs FLA':>7}"
+)
+
+
+def fmt_time(ms: float) -> str:
+    if math.isnan(ms):
+        return "     N/A  "
+    return f"{ms:>8.3f}ms"
+
+
+def fmt_ratio(base: float, other: float) -> str:
+    if math.isnan(base) or math.isnan(other) or base == 0:
+        return "   N/A  "
+    return f"{other / base:>6.2f}x"
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Benchmark Qwen397 FlashQLA GDR Fwd")
     parser.add_argument(
-        "--policies",
-        default="qwen397_native_cp",
-        help=f"Comma-separated policies. Available: {','.join(sorted(POLICIES))}",
-    )
-    parser.add_argument(
-        "--with-hopper",
-        action="store_true",
-        help="Also run hopper_compat.",
-    )
-    parser.add_argument(
-        "--shapes",
-        default="qwen397",
-        help=(
-            "Comma-separated shape presets or groups. "
-            f"Shapes: {','.join(sorted(SHAPES))}. "
-            f"Groups: {','.join(sorted(SHAPE_GROUPS))}"
-        ),
-    )
-    parser.add_argument(
-        "--seqlens",
-        default=",".join(str(x) for x in DEFAULT_SEQLENS),
-        help="Comma-separated sequence lengths.",
+        "--kernel",
+        choices=sorted(KERNEL_ENVS),
+        default="blackwell_cp",
+        help="Blackwell kernel env preset.",
     )
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--repeats", type=int, default=100)
-    parser.add_argument("--timeout", type=float, default=300.0)
-    parser.add_argument("--out", default="qwen397_gdr_bench.csv")
-    parser.add_argument("--log-dir", default="qwen397_gdr_bench_logs")
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--swa-ratio", type=float, default=0.75)
-    parser.add_argument("--rtol", type=float, default=0.02)
-    parser.add_argument("--no-h0", action="store_true")
-    parser.add_argument("--no-cp", action="store_true")
-    parser.add_argument("--no-check", action="store_false", dest="check")
-    parser.set_defaults(check=True)
-    parser.add_argument("--skip-fla", action="store_true")
-    parser.add_argument("--skip-fi", action="store_true")
     parser.add_argument(
         "--env",
         action="append",
         default=[],
-        help="Extra worker env override, e.g. --env FLASHQLA_BLOCK_DV=64.",
+        help="Extra env override applied after --kernel, e.g. --env FLASHQLA_CP_MIN_CHUNKS=1.",
     )
-
-    parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument("--worker-policy", default="", help=argparse.SUPPRESS)
-    parser.add_argument("--worker-shape", default="", help=argparse.SUPPRESS)
-    parser.add_argument("--worker-seqlen", type=int, default=0, help=argparse.SUPPRESS)
-    parser.add_argument("--worker-nkh", type=int, default=0, help=argparse.SUPPRESS)
-    parser.add_argument("--worker-nvh", type=int, default=0, help=argparse.SUPPRESS)
-    return parser
-
-
-def main() -> int:
-    parser = _build_parser()
     args = parser.parse_args()
-    if args.worker:
-        return _run_worker(args)
-    return _run_driver(args)
+
+    visible_env = apply_kernel_env(args.kernel, parse_env_overrides(args.env))
+
+    from fla.ops.gated_delta_rule.chunk import chunk_gated_delta_rule_fwd as fla_fwd
+    from flash_qla import chunk_gated_delta_rule_fwd as qla_fwd
+    from flash_qla.utils import l2norm
+
+    if not torch.cuda.is_available():
+        print("CUDA not available.")
+        return
+
+    gpu_name = torch.cuda.get_device_properties(0).name
+    print(f"GPU: {gpu_name}")
+    print("Models: Qwen3.5 397B/122B TP2/TP4, d=128")
+    print(f"Kernel: {args.kernel}")
+    print(f"Env: {visible_env}")
+    print(f"Config: Warmup={args.warmup}, Repeats={args.repeats}")
+
+    libs = get_lib_versions()
+    print("Library Versions:")
+    ver_str = " | ".join([f"{k}: {v}" for k, v in libs.items()])
+    print(f"  {ver_str}")
+
+    print("=" * 90)
+    print("\n>>> FORWARD BENCHMARKS")
+    print(FWD_HDR)
+    print("-" * len(FWD_HDR))
+
+    prev_model = None
+    for cfg in FWD_MODEL_CONFIGS:
+        if prev_model is not None and cfg.label != prev_model:
+            print()
+        prev_model = cfg.label
+
+        for sl_cfg in FWD_SEQLEN_CONFIGS:
+            try:
+                qla_ms, fla_ms = bench_fwd(
+                    sl_cfg.seqlens,
+                    cfg.h_qk,
+                    cfg.h_v,
+                    qla_fwd,
+                    fla_fwd,
+                    l2norm,
+                    warmup=args.warmup,
+                    repeats=args.repeats,
+                    auto_cp=True,
+                )
+
+                ratio_fla = fmt_ratio(qla_ms, fla_ms)
+
+                print(
+                    f"{cfg.label:<16} {sl_cfg.label:<17} {cfg.h_qk:>5} {cfg.h_v:>5}    "
+                    f"{fmt_time(qla_ms)}  {fmt_time(fla_ms)}   {ratio_fla}",
+                    flush=True,
+                )
+            except Exception as e:
+                print(f"\n[ERROR] Forward Case Failed: {cfg.label} / {sl_cfg.label}")
+                print(f"Exception: {e}")
+                cleanup_cuda()
+                continue
+
+            cleanup_cuda()
+
+    print("\nBenchmark Finished.")
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()

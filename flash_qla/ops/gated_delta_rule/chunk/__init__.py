@@ -51,9 +51,17 @@ def chunk_gated_delta_rule_fwd(
         )
         use_blackwell_cp = auto_cp and use_blackwell_native_fwd and blackwell_cp_requested
         if use_blackwell_cp and cu_seqlens is not None:
-            raise NotImplementedError(
-                "Blackwell native CP currently supports fixed-length inputs only."
+            is_single_fixed_seq = (
+                cu_seqlens.numel() == 2
+                and int(cu_seqlens[0].item()) == 0
+                and int(cu_seqlens[1].item()) == k.shape[1]
             )
+            if is_single_fixed_seq:
+                cu_seqlens = None
+            else:
+                raise NotImplementedError(
+                    "Blackwell native CP currently supports fixed-length inputs only."
+                )
         if use_blackwell_cp and k.shape[0] > 1:
             use_blackwell_cp = False
         min_cp_chunks_env = os.environ.get("FLASHQLA_CP_MIN_CHUNKS", "").strip()
