@@ -11,7 +11,6 @@ from flash_qla.ops.utils import chunk_local_cumsum, group_reduce_vector
 
 _cc = assert_supported()
 from .hopper import (
-    correct_initial_states,
     fused_gdr_fwd,
     fused_gdr_bwd,
     fused_gdr_h,
@@ -19,7 +18,6 @@ from .hopper import (
 )
 if is_blackwell(_cc):
     from .blackwell import (  # type: ignore[no-redef]  # noqa: F401
-        correct_initial_states,
         fused_gdr_fwd,
         fused_gdr_bwd,
         fused_gdr_h,
@@ -45,6 +43,27 @@ def _blackwell_segment_chunks() -> int:
 def _debug_blackwell_segment(message: str):
     if os.environ.get("FLASHQLA_DEBUG_BLACKWELL_DISPATCH", "") == "1":
         print(f"[FlashQLA Blackwell segment fwd] {message}", flush=True)
+
+
+def _compose_segment_initial_states_torch(
+    initial_state: torch.Tensor | None,
+    ht: torch.Tensor,
+    mt: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    num_segments, H, K, V = ht.shape
+    segment_initial_state = torch.empty(
+        (num_segments, H, K, V),
+        dtype=torch.float32,
+        device=ht.device,
+    )
+    if initial_state is None:
+        state = torch.zeros((H, K, V), dtype=torch.float32, device=ht.device)
+    else:
+        state = initial_state[0].to(torch.float32)
+    for i in range(num_segments):
+        segment_initial_state[i] = state
+        state = ht[i].to(torch.float32) + torch.matmul(mt[i].to(torch.float32), state)
+    return segment_initial_state, state.unsqueeze(0)
 
 
 def _try_blackwell_segmented_fwd(
@@ -118,13 +137,10 @@ def _try_blackwell_segmented_fwd(
         cu_seqlens=cu_segments,
         num_warmup_chunks=num_warmup_chunks,
     )
-    seq_map_r2c = torch.tensor([0, num_segments], dtype=seqlen_dtype, device=k.device)
-    segment_initial_state = correct_initial_states(
-        raw_h0=initial_state,
-        ht_buffer=ht,
-        mt_buffer=mt,
-        fallback_mask=fallback_mask,
-        seq_map_r2c=seq_map_r2c,
+    segment_initial_state, segment_final_state = _compose_segment_initial_states_torch(
+        initial_state,
+        ht,
+        mt,
     )
 
     q_segmented = q.reshape(num_segments, segment_tokens, Hg, K)
@@ -133,7 +149,7 @@ def _try_blackwell_segmented_fwd(
     a_segmented = a.reshape(num_segments, segment_tokens, H, chunk_size)
     g_segmented = g.reshape(num_segments, segment_tokens, H)
     b_segmented = b.reshape(num_segments, segment_tokens, H)
-    o_segmented, h_segmented, final_state_segmented = fused_gdr_fwd(
+    o_segmented, _h_segmented, _final_state_segmented = fused_gdr_fwd(
         q=q_segmented,
         k=k_segmented,
         v=v_segmented,
@@ -154,7 +170,7 @@ def _try_blackwell_segmented_fwd(
     h = torch.empty((batch_size, 0, H, K, V), dtype=k.dtype, device=k.device)
     final_state = None
     if output_final_state:
-        final_state = final_state_segmented[-batch_size:].contiguous()
+        final_state = segment_final_state
     return o, h, final_state
 
 

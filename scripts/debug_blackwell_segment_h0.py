@@ -47,7 +47,7 @@ def _torch_correct_initial_states(
     h0: torch.Tensor | None,
     ht: torch.Tensor,
     mt: torch.Tensor,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor]:
     num_segments, num_heads, head_dim_k, head_dim_v = ht.shape
     out = torch.empty(
         (num_segments, num_heads, head_dim_k, head_dim_v),
@@ -62,7 +62,7 @@ def _torch_correct_initial_states(
     for seg in range(num_segments):
         out[seg] = state.to(out.dtype)
         state = ht[seg].to(torch.float32) + torch.matmul(mt[seg].to(torch.float32), state)
-    return out
+    return out, state
 
 
 def main() -> int:
@@ -159,7 +159,7 @@ def main() -> int:
         fallback_mask=fallback_mask,
         seq_map_r2c=seq_map_r2c,
     )
-    segment_h0_torch = _torch_correct_initial_states(h0, ht, mt)
+    segment_h0_torch, final_torch = _torch_correct_initial_states(h0, ht, mt)
 
     if h0 is not None:
         _max_report("segment_h0[0]_vs_raw_h0", segment_h0[0], h0[0])
@@ -182,6 +182,7 @@ def main() -> int:
             segment_h0_torch[seg],
         )
     _max_report("last_segment_final_vs_ref_final", ht[-1].float(), final_ref[0].float())
+    _max_report("torch_composed_final_vs_ref_final", final_torch, final_ref[0].float())
     return 0
 
 
