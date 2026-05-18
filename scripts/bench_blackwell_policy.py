@@ -700,17 +700,18 @@ def main() -> int:
     if unknown_shapes:
         raise ValueError(f"Unknown shapes: {unknown_shapes}. Valid: {sorted(SHAPES)}")
     if not args.no_cp:
-        unsupported_cp = [
+        native_fwd_cp = [
             policy
             for policy in selected_policies
             if "fwd" in POLICIES[policy].get("FLASHQLA_BLACKWELL_NATIVE_KERNELS", "")
             and POLICIES[policy].get("FLASHQLA_BLACKWELL_FWD_POLICY", "native") != "compat"
         ]
-        if unsupported_cp:
-            raise ValueError(
-                "--with-cp is not supported for Blackwell native forward policies "
-                f"{unsupported_cp}. Use the default --no-cp path for current "
-                "native benchmarks; CP needs a separate state-prefix rewrite."
+        if native_fwd_cp:
+            print(
+                "[warn] --with-cp will force Blackwell native fwd policies through "
+                "their CP fallback path: "
+                + ",".join(native_fwd_cp),
+                flush=True,
             )
 
     log_dir = Path(args.log_dir)
