@@ -64,6 +64,12 @@ def tilelang_prepare_h(
     h0_shape = (batch_size, H, DK, DV)
     ht_shape = (batch_size, H, DK, DV)
     m_shape = (batch_size, H, DK, DK)
+    slim_prepare_h = (
+        not store_h
+        and os.environ.get("FLASHQLA_BLACKWELL_CP_SLIM_PREPARE_H", "1") != "0"
+    )
+    keep_store_group = not slim_prepare_h
+    num_threads = 512 if keep_store_group else 480
 
     @T.prim_func
     def tilelang_prepare_h_kernel(
@@ -80,7 +86,7 @@ def tilelang_prepare_h(
         ht: T.Tensor(ht_shape, dtype=ht_dtype),
         mt: T.Tensor(m_shape, dtype=ht_dtype),
     ):
-        with T.Kernel(batch_size * H, threads=512) as (bbh,):
+        with T.Kernel(batch_size * H, threads=num_threads) as (bbh,):
             bb, bh = bbh // H, bbh % H
             bhg = bh // (H // Hg)
 
@@ -147,7 +153,7 @@ def tilelang_prepare_h(
             data_is_ready = T.alloc_barrier(arrive_count=[96] * num_stages)
             data_is_free = T.alloc_barrier(arrive_count=[384] * num_stages)
 
-            bar_0 = T.alloc_barrier(arrive_count=416)
+            bar_0 = T.alloc_barrier(arrive_count=416 if keep_store_group else 384)
             bar_1 = T.alloc_barrier(arrive_count=256)
             bar_2 = T.alloc_barrier(arrive_count=384)
             bar_3 = T.alloc_barrier(arrive_count=128)
@@ -451,17 +457,24 @@ def tilelang_prepare_h(
                         T.barrier_arrive(data_is_ready[i_s % num_stages])
 
                 else:
-                    for i_s in T.serial(num_iters):
-                        T.barrier_arrive(bar_0)
+                    if keep_store_group:
+                        for i_s in T.serial(num_iters):
+                            T.barrier_arrive(bar_0)
 
-                        T.barrier_wait(bar_0, i_s % 2)
-                        T.barrier_wait(bar_1, i_s % 2)
-                        # Store S
-                        if store_h:
-                            T.copy(
-                                h_shared,
-                                h[batch_idx, chunk_start_idx + i_s, bh, 0:DK, 0:DV],
-                            )
+                            T.barrier_wait(bar_0, i_s % 2)
+                            T.barrier_wait(bar_1, i_s % 2)
+                            # Store S
+                            if store_h:
+                                T.copy(
+                                    h_shared,
+                                    h[
+                                        batch_idx,
+                                        chunk_start_idx + i_s,
+                                        bh,
+                                        0:DK,
+                                        0:DV,
+                                    ],
+                                )
 
     return tilelang_prepare_h_kernel
 
