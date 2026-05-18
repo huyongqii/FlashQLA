@@ -762,7 +762,7 @@ def kkt_solve(
     experiment = os.environ.get("FLASHQLA_BLACKWELL_KKT_EXPERIMENT", "")
     batch_size, num_tokens, Hg, K = k.shape
     _, _, H = b.shape
-    can_use_fixed_fast = cu_seqlens is None
+    can_use_fixed_fast = cu_seqlens is None and num_tokens % chunk_size == 0
     if cu_seqlens is not None:
         seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
         can_use_fixed_fast = (

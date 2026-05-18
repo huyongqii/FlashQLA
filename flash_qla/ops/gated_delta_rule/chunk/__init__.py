@@ -95,7 +95,10 @@ def chunk_gated_delta_rule_fwd(
         use_blackwell_dual_a = (
             pretransform_a
             and os.environ.get("FLASHQLA_BLACKWELL_CP_DUAL_A", "1") != "0"
-            and (cu_seqlens is None or is_chunk_aligned_cu_seqlens)
+            and (
+                (cu_seqlens is None and k.shape[1] % 64 == 0)
+                or is_chunk_aligned_cu_seqlens
+            )
         )
         if use_blackwell_dual_a:
             from .blackwell import kkt_solve_raw_and_transformed
