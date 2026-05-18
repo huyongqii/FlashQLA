@@ -64,11 +64,6 @@ def tilelang_prepare_h(
     h0_shape = (batch_size, H, DK, DV)
     ht_shape = (batch_size, H, DK, DV)
     m_shape = (batch_size, H, DK, DK)
-    skip_store_group = (
-        os.environ.get("FLASHQLA_BLACKWELL_PREPARE_H_SKIP_STORE_GROUP", "") == "1"
-        and not store_h
-    )
-    bar_0_arrive_count = 384 if skip_store_group else 416
 
     @T.prim_func
     def tilelang_prepare_h_kernel(
@@ -152,7 +147,7 @@ def tilelang_prepare_h(
             data_is_ready = T.alloc_barrier(arrive_count=[96] * num_stages)
             data_is_free = T.alloc_barrier(arrive_count=[384] * num_stages)
 
-            bar_0 = T.alloc_barrier(arrive_count=bar_0_arrive_count)
+            bar_0 = T.alloc_barrier(arrive_count=416)
             bar_1 = T.alloc_barrier(arrive_count=256)
             bar_2 = T.alloc_barrier(arrive_count=384)
             bar_3 = T.alloc_barrier(arrive_count=128)
@@ -455,7 +450,7 @@ def tilelang_prepare_h(
 
                         T.barrier_arrive(data_is_ready[i_s % num_stages])
 
-                elif not skip_store_group:
+                else:
                     for i_s in T.serial(num_iters):
                         T.barrier_arrive(bar_0)
 
@@ -536,6 +531,13 @@ def fused_gdr_h(
         (real_batch_size, H, K, K), dtype=ht_dtype, device=k.device
     )
 
+    num_stages = int(os.environ.get("FLASHQLA_BLACKWELL_PREPARE_H_STAGES", "2"))
+    if num_stages < 1:
+        raise ValueError(
+            "FLASHQLA_BLACKWELL_PREPARE_H_STAGES must be a positive integer, "
+            f"got {num_stages}"
+        )
+
     tilelang_prepare_h_kernel = tilelang_prepare_h(
         H,
         Hg,
@@ -555,6 +557,7 @@ def fused_gdr_h(
         store_h=output_h,
         is_varlen=is_varlen,
         is_cp=is_cp,
+        num_stages=num_stages,
     )
     tilelang_prepare_h_kernel(
         k,
