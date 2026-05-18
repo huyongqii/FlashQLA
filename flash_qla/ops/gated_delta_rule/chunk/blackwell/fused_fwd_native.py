@@ -136,9 +136,12 @@ def tilelang_precompute_p_blackwell(
             p_tmem = T.alloc_tmem((block_S, block_S), dtype=accum_dtype)
             p_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
             mbar_p = T.alloc_barrier(arrive_count=1)
+            bar_load = T.alloc_barrier(arrive_count=128)
 
             T.copy(q[bb, left:right, bhg, 0:DK], q_shared)
             T.copy(k[bb, left:right, bhg, 0:DK], k_shared)
+            T.barrier_arrive(bar_load)
+            T.barrier_wait(bar_load, 0)
             T.tcgen05_gemm(
                 q_shared,
                 k_shared,
