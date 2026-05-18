@@ -43,7 +43,7 @@ def chunk_gated_delta_rule_fwd(
     Hg, H = k.shape[-2], v.shape[-2]
     use_blackwell_native_fwd = False
     use_blackwell_cp = False
-    is_single_fixed_cu_seqlens = False
+    is_chunk_aligned_cu_seqlens = False
     if is_blackwell(_cc):
         use_blackwell_native_fwd, _ = should_use_native_fwd(H, Hg)
         blackwell_cp_requested = (
@@ -52,15 +52,17 @@ def chunk_gated_delta_rule_fwd(
         )
         use_blackwell_cp = auto_cp and use_blackwell_native_fwd and blackwell_cp_requested
         if cu_seqlens is not None:
-            is_single_fixed_cu_seqlens = (
-                cu_seqlens.numel() == 2
-                and int(cu_seqlens[0].item()) == 0
-                and int(cu_seqlens[1].item()) == k.shape[1]
+            seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
+            is_chunk_aligned_cu_seqlens = (
+                int(cu_seqlens[0].item()) == 0
+                and int(cu_seqlens[-1].item()) == k.shape[1]
+                and bool((seqlens > 0).all().item())
+                and bool((seqlens % 64 == 0).all().item())
             )
-            if use_blackwell_cp and not is_single_fixed_cu_seqlens:
+            if use_blackwell_cp and not is_chunk_aligned_cu_seqlens:
                 raise NotImplementedError(
                     "Blackwell native CP currently supports only fixed-length "
-                    "inputs or cu_seqlens=[0, T]."
+                    "inputs or chunk-aligned cu_seqlens."
                 )
         if use_blackwell_cp and k.shape[0] > 1:
             use_blackwell_cp = False
@@ -84,7 +86,7 @@ def chunk_gated_delta_rule_fwd(
         os.environ.get("FLASHQLA_BLACKWELL_PRETRANSFORM_A", "1") == "1"
         and is_blackwell(_cc)
         and use_blackwell_native_fwd
-        and (cu_seqlens is None or is_single_fixed_cu_seqlens)
+        and (cu_seqlens is None or is_chunk_aligned_cu_seqlens)
         and not output_h
     )
     if use_blackwell_cp:
