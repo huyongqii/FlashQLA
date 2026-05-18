@@ -127,6 +127,18 @@ POLICIES = {
         'FLASHQLA_CP_EXACT': '1',
         'FLASHQLA_CP_CORRECT_H0_TORCH': '1',
     },
+    'qwen397_native_cp4_exact_torch': {
+        'FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE': '1',
+        'FLASHQLA_BLACKWELL_NATIVE': '1',
+        'FLASHQLA_BLACKWELL_NATIVE_KERNELS': 'fwd,kkt',
+        'FLASHQLA_BLACKWELL_FWD_POLICY': 'native',
+        'FLASHQLA_BLACKWELL_BLOCK_DV': '64',
+        'FLASHQLA_BLACKWELL_FWD_THREADS': '256',
+        'FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS': 'load,h',
+        'FLASHQLA_CP_EXACT': '1',
+        'FLASHQLA_CP_CORRECT_H0_TORCH': '1',
+        'FLASHQLA_CP_MAX_LOCAL_CHUNKS': '4',
+    },
     'qwen397_native_exact_tmem': {
         'FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE': '1',
         'FLASHQLA_BLACKWELL_NATIVE': '1',
@@ -255,6 +267,7 @@ ENV_TO_CLEAR = (
     "FLASHQLA_CP_EXACT",
     "FLASHQLA_CP_WARMUP_THRESHOLD",
     "FLASHQLA_CP_CORRECT_H0_TORCH",
+    "FLASHQLA_CP_MAX_LOCAL_CHUNKS",
     "FLASHQLA_BLACKWELL_FWD_EXPERIMENT",
     "FLASHQLA_BLACKWELL_FWD_MAX_ITERS",
     "FLASHQLA_BLACKWELL_KKT_EXPERIMENT",
@@ -489,6 +502,8 @@ def _run_one(
     ]
     if args.no_cp:
         cmd.append("--no-cp")
+    if args.no_h0:
+        cmd.append("--no-h0")
     if args.hide_acc:
         cmd.append("--hide-acc")
     if args.hide_lat:
@@ -711,6 +726,11 @@ def main() -> int:
     parser.add_argument("--log-dir", default="blackwell_policy_logs")
     parser.add_argument("--no-cp", action="store_true", default=True)
     parser.add_argument("--with-cp", action="store_false", dest="no_cp")
+    parser.add_argument(
+        "--no-h0",
+        action="store_true",
+        help="Pass --no-h0 to tests/test_gdr.py to isolate initial-state issues.",
+    )
     parser.add_argument("--hide-acc", action="store_true")
     parser.add_argument("--hide-lat", action="store_true")
     args = parser.parse_args()

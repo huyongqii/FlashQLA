@@ -58,12 +58,20 @@ def _calc_cp_seqs(
     # Minimizing T yields the theoretical optimum: L_cp* ∝ √(B·H·Lc / P), where P = MULTI_PROCESSOR_COUNT, L_cp = max_local_chunks
     # Scaled by empirical factor (3) and aligned to the nearest power of 2 for optimal SM scheduling & memory alignment.
 
-    max_local_chunks = 2 ** round(
-        math.log2(math.sqrt(H * sum(num_chunks) / MULTI_PROCESSOR_COUNT) * 3)
-    )
-
-    # Set min to 4 to ensure multi-stage pipelining in fused_gdr;
-    max_local_chunks = max(max_local_chunks, 4)
+    max_local_chunks_env = os.environ.get("FLASHQLA_CP_MAX_LOCAL_CHUNKS", "").strip()
+    if max_local_chunks_env:
+        max_local_chunks = int(max_local_chunks_env)
+        if max_local_chunks < 1:
+            raise ValueError(
+                "FLASHQLA_CP_MAX_LOCAL_CHUNKS must be a positive integer, "
+                f"got {max_local_chunks}"
+            )
+    else:
+        max_local_chunks = 2 ** round(
+            math.log2(math.sqrt(H * sum(num_chunks) / MULTI_PROCESSOR_COUNT) * 3)
+        )
+        # Set min to 4 to ensure multi-stage pipelining in fused_gdr.
+        max_local_chunks = max(max_local_chunks, 4)
 
     use_cp = False
     cp_cu_seqlens = []
