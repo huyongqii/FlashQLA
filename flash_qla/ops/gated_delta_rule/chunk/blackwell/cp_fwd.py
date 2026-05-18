@@ -136,7 +136,6 @@ def tilelang_correct_h0(
         cp_h0,
         h_fragment,
     ):
-        h_shared = T.alloc_shared((DK, block_DV), dtype=buffer_dtype)
         hd_shared = T.alloc_shared((DK, block_DV), dtype=buffer_dtype)
         m_shared = T.alloc_shared((DK, DK), dtype=buffer_dtype)
 
@@ -156,9 +155,8 @@ def tilelang_correct_h0(
                         0:DK,
                         bv * block_DV : (bv + 1) * block_DV,
                     ],
-                    h_shared,
+                    h_fragment,
                 )
-                T.copy(h_shared, h_fragment)
                 if fallback_mask[seq_start_idx + i_s, bh]:
                     T.copy(mt_buffer[seq_start_idx + i_s, bh, 0:DK, 0:DK], m_shared)
                     T.gemm(m_shared, hd_shared, h_fragment, clear_accum=False)
