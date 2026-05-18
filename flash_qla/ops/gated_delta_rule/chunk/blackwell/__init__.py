@@ -33,8 +33,10 @@ if _USE_EXPERIMENTAL_NATIVE:
         _NATIVE_FWD_NAME = "none"
     if "kkt" in _NATIVE_KERNELS or "all" in _NATIVE_KERNELS:
         from .kkt_solve import kkt_solve as _native_kkt_solve
+        from .kkt_solve import transform_a as _native_transform_a
     else:
         _native_kkt_solve = None
+        _native_transform_a = None
     from .prepare_h import fused_gdr_h as _native_fused_gdr_h
     from .cp_fwd import (
         correct_initial_states as _native_correct_initial_states,
@@ -43,6 +45,7 @@ if _USE_EXPERIMENTAL_NATIVE:
 else:
     _native_fused_gdr_fwd = None
     _native_kkt_solve = None
+    _native_transform_a = None
     _native_fused_gdr_h = None
     _native_correct_initial_states = None
     _native_get_warmup_chunks = None
@@ -85,6 +88,13 @@ def kkt_solve(*args, **kwargs):
     _unsupported("kkt_solve")
 
 
+def transform_a(*args, **kwargs):
+    if _native_transform_a is not None:
+        _debug_dispatch("transform_a=native_fixed_fast_candidate")
+        return _native_transform_a(*args, **kwargs)
+    _unsupported("transform_a")
+
+
 def fused_gdr_fwd(*args, **kwargs):
     if _native_fused_gdr_fwd is not None:
         _debug_dispatch(f"fused_gdr_fwd=native_{_NATIVE_FWD_NAME}")
@@ -123,6 +133,7 @@ __all__ = [
     "fused_gdr_bwd",
     "fused_gdr_h",
     "kkt_solve",
+    "transform_a",
     "get_warmup_chunks",
     "correct_initial_states",
 ]

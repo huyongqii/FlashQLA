@@ -92,7 +92,20 @@ def chunk_gated_delta_rule_fwd(
                 raw_cu_seqlens=cu_seqlens,
             )
         )
-        A = kkt_solve(k=k, b=beta, g=g if pretransform_a else None, cu_seqlens=None)
+        if (
+            pretransform_a
+            and os.environ.get("FLASHQLA_BLACKWELL_CP_TRANSFORM_A", "") == "1"
+        ):
+            from .blackwell import transform_a
+
+            A = transform_a(A_for_cp, g, beta)
+        else:
+            A = kkt_solve(
+                k=k,
+                b=beta,
+                g=g if pretransform_a else None,
+                cu_seqlens=None,
+            )
     else:
         kkt_kwargs = {
             "k": k,

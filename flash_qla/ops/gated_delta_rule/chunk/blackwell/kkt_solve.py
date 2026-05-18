@@ -504,6 +504,81 @@ def tilelang_kkt_solve_fixed_fast(
     return tilelang_kkt_solve_fixed_fast_kernel
 
 
+@tilelang.jit(
+    pass_configs={
+        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
+    },
+)
+def tilelang_transform_a(
+    H,
+    chunk_size,
+    accum_dtype,
+    qkva_dtype,
+    b_dtype,
+    g_dtype,
+):
+    data_batch_size = T.dynamic("data_batch_size")
+    num_tokens = T.dynamic("num_tokens")
+    num_chunks = T.dynamic("num_chunks")
+    block_S = chunk_size
+
+    a_shape = (data_batch_size, num_tokens, H, chunk_size)
+    b_shape = (data_batch_size, num_tokens, H)
+    g_shape = (data_batch_size, num_tokens, H)
+
+    @T.prim_func
+    def tilelang_transform_a_kernel(
+        a_raw: T.Tensor(a_shape, dtype=qkva_dtype),
+        g: T.Tensor(g_shape, dtype=g_dtype),
+        b: T.Tensor(b_shape, dtype=b_dtype),
+        a: T.Tensor(a_shape, dtype=qkva_dtype),
+        num_chunks: T.int32,
+    ):
+        with T.Kernel(num_chunks * H, threads=128) as (bch,):
+            bc, bh = bch // H, bch % H
+            bb = bc % data_batch_size
+            chunk_idx = bc // data_batch_size
+            left = chunk_idx * block_S
+
+            for j_s, j_t in T.Parallel(block_S, block_S):
+                a[bb, left + j_s, bh, j_t] = (
+                    a_raw[bb, left + j_s, bh, j_t]
+                    * T.exp2(
+                        (
+                            g[bb, left + j_s, bh]
+                            - g[bb, left + j_t, bh]
+                        )
+                        * 1.442695
+                    )
+                    * b[bb, left + j_t, bh]
+                )
+
+    return tilelang_transform_a_kernel
+
+
+def transform_a(
+    a_raw: torch.Tensor,
+    g: torch.Tensor,
+    b: torch.Tensor,
+    chunk_size: int = 64,
+):
+    batch_size, num_tokens, H, block_S = a_raw.shape
+    assert block_S == chunk_size == 64
+    assert g.shape == b.shape == (batch_size, num_tokens, H)
+    num_chunks = batch_size * tilelang.cdiv(num_tokens, chunk_size)
+    a = torch.empty_like(a_raw)
+    tilelang_transform_a_kernel = tilelang_transform_a(
+        H,
+        chunk_size,
+        qkva_dtype=a_raw.dtype,
+        b_dtype=b.dtype,
+        g_dtype=g.dtype,
+        accum_dtype="float32",
+    )
+    tilelang_transform_a_kernel(a_raw, g, b, a, num_chunks)
+    return a
+
+
 def kkt_solve(
     k: torch.Tensor,
     b: torch.Tensor,
