@@ -59,6 +59,23 @@ POLICIES = {
         'FLASHQLA_BLACKWELL_FWD_THREADS': '256',
         'FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS': 'load,h',
     },
+    'qwen397_native_b32': {
+        'FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE': '1',
+        'FLASHQLA_BLACKWELL_NATIVE': '1',
+        'FLASHQLA_BLACKWELL_NATIVE_KERNELS': 'fwd,kkt',
+        'FLASHQLA_BLACKWELL_FWD_POLICY': 'native',
+        'FLASHQLA_BLACKWELL_BLOCK_DV': '32',
+        'FLASHQLA_BLACKWELL_FWD_THREADS': '256',
+        'FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS': 'load,h',
+    },
+    'qwen397_native_auto_dv': {
+        'FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE': '1',
+        'FLASHQLA_BLACKWELL_NATIVE': '1',
+        'FLASHQLA_BLACKWELL_NATIVE_KERNELS': 'fwd,kkt',
+        'FLASHQLA_BLACKWELL_FWD_POLICY': 'native',
+        'FLASHQLA_BLACKWELL_FWD_THREADS': '256',
+        'FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS': 'load,h',
+    },
     'qwen397_native_exact_tmem': {
         'FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE': '1',
         'FLASHQLA_BLACKWELL_NATIVE': '1',
@@ -328,22 +345,45 @@ def _error_tail(text: str, max_lines: int = 12) -> str:
     return " | ".join(tail)
 
 
-def _make_filtered_settings(base_set: str, seqlens: list[int], log_dir: Path) -> tuple[str, Path]:
+def _make_filtered_settings(
+    base_set: str,
+    seqlens: list[int] | None,
+    batch_sizes: list[int] | None,
+    log_dir: Path,
+) -> tuple[str, Path]:
     source = Path("tests/settings") / f"{base_set}.csv"
     if not source.exists():
         raise FileNotFoundError(f"Missing settings file: {source}")
 
     with source.open(newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
-        rows = [row for row in reader if int(row["num_tokens"]) in seqlens]
+        rows = []
+        for row in reader:
+            if seqlens is not None and int(row["num_tokens"]) not in seqlens:
+                continue
+            if batch_sizes is None:
+                rows.append(dict(row))
+            else:
+                for batch_size in batch_sizes:
+                    new_row = dict(row)
+                    new_row["batch_size"] = str(batch_size)
+                    rows.append(new_row)
         fieldnames = reader.fieldnames
 
     if not rows:
-        raise ValueError(f"No rows in {source} match --seqlens={seqlens}")
+        raise ValueError(
+            f"No rows in {source} match --seqlens={seqlens} "
+            f"--batch-sizes={batch_sizes}"
+        )
     if fieldnames is None:
         raise ValueError(f"Settings file has no header: {source}")
 
-    name = f"_blackwell_policy_{os.getpid()}_{'_'.join(map(str, seqlens))}"
+    suffix_parts = [str(os.getpid())]
+    if seqlens is not None:
+        suffix_parts.append("t" + "_".join(map(str, seqlens)))
+    if batch_sizes is not None:
+        suffix_parts.append("b" + "_".join(map(str, batch_sizes)))
+    name = "_blackwell_policy_" + "_".join(suffix_parts)
     target = Path("tests/settings") / f"{name}.csv"
     with target.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
@@ -581,6 +621,14 @@ def main() -> int:
             "created under tests/settings and copied to the log directory."
         ),
     )
+    parser.add_argument(
+        "--batch-sizes",
+        default="",
+        help=(
+            "Optional comma-separated batch sizes. Matching settings rows are "
+            "duplicated with these batch_size values."
+        ),
+    )
     parser.add_argument("--timeout", type=float, default=300.0)
     parser.add_argument("--correctness-repeats", type=int, default=1000)
     parser.add_argument("--out", default="blackwell_policy.csv")
@@ -616,9 +664,16 @@ def main() -> int:
     log_dir = Path(args.log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
     filtered_settings_path: Path | None = None
-    if args.seqlens:
-        seqlens = [int(item) for item in _split_csv(args.seqlens)]
-        args.set, filtered_settings_path = _make_filtered_settings(args.set, seqlens, log_dir)
+    seqlens = [int(item) for item in _split_csv(args.seqlens)] if args.seqlens else None
+    batch_sizes = (
+        [int(item) for item in _split_csv(args.batch_sizes)]
+        if args.batch_sizes
+        else None
+    )
+    if seqlens is not None or batch_sizes is not None:
+        args.set, filtered_settings_path = _make_filtered_settings(
+            args.set, seqlens, batch_sizes, log_dir
+        )
 
     try:
         rows: list[RunResult] = []

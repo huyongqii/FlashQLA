@@ -77,6 +77,25 @@ def _tmem_width(block_DV: int) -> int:
     return width
 
 
+def _select_block_dv(real_batch_size: int, num_v_heads: int) -> int:
+    value = os.environ.get("FLASHQLA_BLACKWELL_BLOCK_DV")
+    if value:
+        return int(value)
+
+    try:
+        sm_count = torch.cuda.get_device_properties().multi_processor_count
+    except Exception:
+        sm_count = 148
+    ratio = float(os.environ.get("FLASHQLA_TARGET_CTA_RATIO", "0.7"))
+    target_num_ctas = max(1, int(sm_count * ratio))
+    grid_size = real_batch_size * num_v_heads
+    if grid_size >= target_num_ctas:
+        return 128
+    if grid_size * 2 >= target_num_ctas:
+        return 64
+    return 32
+
+
 @tilelang.jit(
     pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
@@ -412,10 +431,10 @@ def fused_gdr_fwd(
     h = torch.empty((batch_size, 0, H, K, V), dtype=k.dtype, device=k.device)
     o = torch.empty_like(v)
 
-    block_DV = int(os.environ.get("FLASHQLA_BLACKWELL_BLOCK_DV", "64"))
-    if block_DV not in (64, 128):
+    block_DV = _select_block_dv(real_batch_size, H)
+    if block_DV not in (32, 64, 128):
         raise ValueError(
-            "FLASHQLA_BLACKWELL_BLOCK_DV must be 64 or 128 for the current "
+            "FLASHQLA_BLACKWELL_BLOCK_DV must be 32, 64, or 128 for the current "
             f"TileLang 0.1.9 TCGEN05 path, got {block_DV}"
         )
     tmem_width = _tmem_width(block_DV)
