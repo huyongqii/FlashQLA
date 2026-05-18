@@ -43,6 +43,28 @@ def _max_report(name: str, actual: torch.Tensor, expected: torch.Tensor) -> None
     )
 
 
+def _torch_correct_initial_states(
+    h0: torch.Tensor | None,
+    ht: torch.Tensor,
+    mt: torch.Tensor,
+) -> torch.Tensor:
+    num_segments, num_heads, head_dim_k, head_dim_v = ht.shape
+    out = torch.empty(
+        (num_segments, num_heads, head_dim_k, head_dim_v),
+        dtype=torch.float32 if h0 is None else h0.dtype,
+        device=ht.device,
+    )
+    state = (
+        torch.zeros((num_heads, head_dim_k, head_dim_v), dtype=torch.float32, device=ht.device)
+        if h0 is None
+        else h0[0].to(torch.float32)
+    )
+    for seg in range(num_segments):
+        out[seg] = state.to(out.dtype)
+        state = ht[seg].to(torch.float32) + torch.matmul(mt[seg].to(torch.float32), state)
+    return out
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tokens", type=int, default=4096)
@@ -100,7 +122,10 @@ def main() -> int:
         initial_state=h0,
     )
     g_qla = chunk_local_cumsum(g_raw, chunk_size=chunk_size)
-    A_qla = kkt_solve(k=k, b=beta, g=g_qla, cu_seqlens=None)
+    # prepare_h expects the raw KKT solve A and receives g/beta separately.
+    # The native forward path may use a pretransformed A, but that is the wrong
+    # input semantic for state-prefix preparation.
+    A_qla = kkt_solve(k=k, b=beta, cu_seqlens=None)
 
     seqlen_dtype = torch.int32
     cu_segments = (
@@ -134,15 +159,27 @@ def main() -> int:
         fallback_mask=fallback_mask,
         seq_map_r2c=seq_map_r2c,
     )
+    segment_h0_torch = _torch_correct_initial_states(h0, ht, mt)
 
     if h0 is not None:
         _max_report("segment_h0[0]_vs_raw_h0", segment_h0[0], h0[0])
+        _max_report("torch_segment_h0[0]_vs_raw_h0", segment_h0_torch[0], h0[0])
     for seg in range(num_segments):
         chunk_idx = seg * args.segment_chunks
         _max_report(
             f"segment_h0[{seg}]_vs_ref_h_chunk{chunk_idx}",
             segment_h0[seg],
             h_ref[0, chunk_idx],
+        )
+        _max_report(
+            f"torch_segment_h0[{seg}]_vs_ref_h_chunk{chunk_idx}",
+            segment_h0_torch[seg],
+            h_ref[0, chunk_idx],
+        )
+        _max_report(
+            f"segment_h0[{seg}]_vs_torch_segment_h0",
+            segment_h0[seg],
+            segment_h0_torch[seg],
         )
     _max_report("last_segment_final_vs_ref_final", ht[-1].float(), final_ref[0].float())
     return 0

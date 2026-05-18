@@ -105,10 +105,11 @@ def _try_blackwell_segmented_fwd(
         f"using segmented native fwd segments={num_segments} "
         f"segment_chunks={segment_chunks}"
     )
+    a_for_segment_h = kkt_solve(k=k, b=b, cu_seqlens=None)
     _, ht, mt = fused_gdr_h(
         k=k,
         v=v,
-        a=a,
+        a=a_for_segment_h,
         g=g,
         b=b,
         initial_state=None,
