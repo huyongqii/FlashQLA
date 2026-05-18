@@ -364,6 +364,7 @@ def tilelang_kkt_solve_fixed_fast(
             k_shared = T.alloc_shared((block_S, DK), dtype=qkva_dtype)
             b_shared = T.alloc_shared((block_S), dtype=accum_dtype, scope="shared")
             a64_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
+            a64_tmem = T.alloc_tmem((block_S, block_S), dtype=accum_dtype)
 
             a16i_row = T.alloc_fragment((4, 16), dtype=accum_dtype)
             a16i_sum = T.alloc_fragment((4, 16), dtype=accum_dtype)
@@ -390,6 +391,7 @@ def tilelang_kkt_solve_fixed_fast(
             bar_load = T.alloc_barrier(arrive_count=128)
             bar_a32 = T.alloc_barrier(arrive_count=128)
             bar_store = T.alloc_barrier(arrive_count=128)
+            mma_mbar = T.alloc_barrier(arrive_count=1)
 
             if right <= num_tokens:
                 T.copy(k[bb, left:right, bhg, 0:DK], k_shared)
@@ -410,7 +412,16 @@ def tilelang_kkt_solve_fixed_fast(
             T.barrier_wait(bar_load, 0)
 
             # A = I + StrictLower(beta * K @ K^T)
-            T.gemm(k_shared, k_shared, a64_fragment, transpose_B=True, clear_accum=True)
+            T.tcgen05_gemm(
+                k_shared,
+                k_shared,
+                a64_tmem,
+                transpose_B=True,
+                clear_accum=True,
+                mbar=mma_mbar,
+            )
+            T.mbarrier_wait_parity(mma_mbar, 0)
+            T.copy(a64_tmem, a64_fragment)
             for j_s, j_t in T.Parallel(block_S, block_S):
                 a64_fragment[j_s, j_t] *= b_shared[j_s]
             for j_s, j_t in T.Parallel(block_S, block_S):

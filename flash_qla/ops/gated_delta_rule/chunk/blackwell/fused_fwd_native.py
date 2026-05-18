@@ -257,8 +257,8 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     )
                 for j_s, j_t in T.Parallel(block_S, block_S):
                     if j_s >= j_t:
-                        a_shared[j_s, j_t] *= T.exp2(
-                            (g_shared[j_s] - g_shared[j_t]) * 1.442695
+                        a_shared[j_s, j_t] *= (
+                            g_exp_shared[j_s] * g_inv_exp_shared[j_t]
                         )
                         a_shared[j_s, j_t] *= b_shared[j_t]
                     else:
