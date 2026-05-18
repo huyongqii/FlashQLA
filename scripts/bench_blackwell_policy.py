@@ -120,6 +120,42 @@ POLICIES = {
         'FLASHQLA_BLACKWELL_FWD_THREADS': '256',
         'FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS': 'load,h,o',
     },
+    'qwen397_native_cp_th8': {
+        'FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE': '1',
+        'FLASHQLA_BLACKWELL_NATIVE': '1',
+        'FLASHQLA_BLACKWELL_NATIVE_KERNELS': 'fwd,kkt',
+        'FLASHQLA_BLACKWELL_FWD_POLICY': 'native',
+        'FLASHQLA_BLACKWELL_CP': '1',
+        'FLASHQLA_CP_MAX_LOCAL_CHUNKS': '32',
+        'FLASHQLA_CP_MIN_CHUNKS': '512',
+        'FLASHQLA_CP_WARMUP_THRESHOLD': '-8.0',
+        'FLASHQLA_BLACKWELL_FWD_THREADS': '256',
+        'FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS': 'load,h,o',
+    },
+    'qwen397_native_cp_th6': {
+        'FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE': '1',
+        'FLASHQLA_BLACKWELL_NATIVE': '1',
+        'FLASHQLA_BLACKWELL_NATIVE_KERNELS': 'fwd,kkt',
+        'FLASHQLA_BLACKWELL_FWD_POLICY': 'native',
+        'FLASHQLA_BLACKWELL_CP': '1',
+        'FLASHQLA_CP_MAX_LOCAL_CHUNKS': '32',
+        'FLASHQLA_CP_MIN_CHUNKS': '512',
+        'FLASHQLA_CP_WARMUP_THRESHOLD': '-6.0',
+        'FLASHQLA_BLACKWELL_FWD_THREADS': '256',
+        'FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS': 'load,h,o',
+    },
+    'qwen397_native_cp_th4': {
+        'FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE': '1',
+        'FLASHQLA_BLACKWELL_NATIVE': '1',
+        'FLASHQLA_BLACKWELL_NATIVE_KERNELS': 'fwd,kkt',
+        'FLASHQLA_BLACKWELL_FWD_POLICY': 'native',
+        'FLASHQLA_BLACKWELL_CP': '1',
+        'FLASHQLA_CP_MAX_LOCAL_CHUNKS': '32',
+        'FLASHQLA_CP_MIN_CHUNKS': '512',
+        'FLASHQLA_CP_WARMUP_THRESHOLD': '-4.0',
+        'FLASHQLA_BLACKWELL_FWD_THREADS': '256',
+        'FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS': 'load,h,o',
+    },
     'qwen397_native_cp_s64': {
         'FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE': '1',
         'FLASHQLA_BLACKWELL_NATIVE': '1',
@@ -639,6 +675,184 @@ def _write_csv(path: Path, rows: list[RunResult]) -> None:
             writer.writerow(row.__dict__)
 
 
+def _fmt(value: float | int | None, digits: int = 3, suffix: str = "") -> str:
+    if value is None:
+        return ""
+    if isinstance(value, int):
+        return f"{value}{suffix}"
+    return f"{value:.{digits}f}{suffix}"
+
+
+def _fmt_status(row: RunResult) -> str:
+    if row.status == "ok":
+        return "ok"
+    if row.returncode is None:
+        return row.status
+    return f"{row.status}({row.returncode})"
+
+
+def _markdown_table(headers: list[str], rows: list[list[str]]) -> str:
+    widths = [
+        max(len(header), *(len(row[index]) for row in rows))
+        for index, header in enumerate(headers)
+    ]
+    header_line = "| " + " | ".join(
+        header.ljust(widths[index]) for index, header in enumerate(headers)
+    ) + " |"
+    separator = "| " + " | ".join("-" * widths[index] for index in range(len(headers))) + " |"
+    body = [
+        "| " + " | ".join(row[index].ljust(widths[index]) for index in range(len(headers))) + " |"
+        for row in rows
+    ]
+    return "\n".join([header_line, separator, *body])
+
+
+def _avg(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
+def _sort_row(row: RunResult) -> tuple[str, int, int, str]:
+    return (
+        row.shape,
+        row.t if row.t is not None else -1,
+        row.batch_size if row.batch_size is not None else -1,
+        row.policy,
+    )
+
+
+def _build_tables(rows: list[RunResult]) -> tuple[str, str]:
+    grouped: dict[tuple[str, str], list[RunResult]] = {}
+    for row in rows:
+        grouped.setdefault((row.policy, row.shape), []).append(row)
+
+    aggregate_rows: list[list[str]] = []
+    for (policy, shape), group in sorted(grouped.items()):
+        ok_rows = [row for row in group if row.status == "ok" and row.speedup is not None]
+        speedups = [row.speedup for row in ok_rows if row.speedup is not None]
+        qla_ms = [row.qla_ms for row in ok_rows if row.qla_ms is not None]
+        qla_gdr_ms = [row.qla_gdr_ms for row in ok_rows if row.qla_gdr_ms is not None]
+        qla_cp_h_ms = [row.qla_cp_h_ms for row in ok_rows if row.qla_cp_h_ms is not None]
+        qla_cp_c_ms = [row.qla_cp_c_ms for row in ok_rows if row.qla_cp_c_ms is not None]
+        aggregate_rows.append(
+            [
+                policy,
+                shape,
+                f"{len(ok_rows)}/{len(group)}",
+                _fmt(_avg(speedups), suffix="x"),
+                _fmt(min(speedups) if speedups else None, suffix="x"),
+                _fmt(max(speedups) if speedups else None, suffix="x"),
+                _fmt(_avg(qla_ms), suffix="ms"),
+                _fmt(_avg(qla_gdr_ms), suffix="ms"),
+                _fmt(_avg(qla_cp_h_ms), suffix="ms"),
+                _fmt(_avg(qla_cp_c_ms), suffix="ms"),
+            ]
+        )
+
+    case_rows: list[list[str]] = []
+    for row in sorted(rows, key=_sort_row):
+        case_rows.append(
+            [
+                row.policy,
+                row.shape,
+                _fmt(row.batch_size, digits=0),
+                _fmt(row.t, digits=0),
+                _fmt(row.speedup, suffix="x"),
+                _fmt(row.fla_ms, suffix="ms"),
+                _fmt(row.qla_ms, suffix="ms"),
+                _fmt(row.qla_gdr_ms, suffix="ms"),
+                _fmt(row.qla_cp_w_ms, suffix="ms"),
+                _fmt(row.qla_cp_h_ms, suffix="ms"),
+                _fmt(row.qla_cp_c_ms, suffix="ms"),
+                _fmt_status(row),
+            ]
+        )
+
+    best_rows: list[list[str]] = []
+    cases: dict[tuple[str, int | None, int | None], list[RunResult]] = {}
+    for row in rows:
+        cases.setdefault((row.shape, row.batch_size, row.t), []).append(row)
+    for (shape, batch_size, t), group in sorted(
+        cases.items(), key=lambda item: (item[0][0], item[0][2] or -1, item[0][1] or -1)
+    ):
+        ok_rows = sorted(
+            [row for row in group if row.status == "ok" and row.speedup is not None],
+            key=lambda row: row.speedup if row.speedup is not None else -1.0,
+            reverse=True,
+        )
+        if not ok_rows:
+            best_rows.append([shape, _fmt(batch_size, digits=0), _fmt(t, digits=0), "", "", "", ""])
+            continue
+        best = ok_rows[0]
+        second = ok_rows[1] if len(ok_rows) > 1 else None
+        best_rows.append(
+            [
+                shape,
+                _fmt(batch_size, digits=0),
+                _fmt(t, digits=0),
+                best.policy,
+                _fmt(best.speedup, suffix="x"),
+                second.policy if second is not None else "",
+                _fmt(second.speedup, suffix="x") if second is not None else "",
+            ]
+        )
+
+    aggregate = _markdown_table(
+        [
+            "policy",
+            "shape",
+            "ok",
+            "avg",
+            "min",
+            "max",
+            "qla",
+            "gdr",
+            "cp_h",
+            "cp_c",
+        ],
+        aggregate_rows,
+    )
+    cases_table = _markdown_table(
+        [
+            "policy",
+            "shape",
+            "B",
+            "T",
+            "speed",
+            "fla",
+            "qla",
+            "gdr",
+            "cp_w",
+            "cp_h",
+            "cp_c",
+            "status",
+        ],
+        case_rows,
+    )
+    best_table = _markdown_table(
+        ["shape", "B", "T", "best_policy", "best", "next_policy", "next"],
+        best_rows,
+    )
+    summary_text = (
+        "Aggregate\n\n"
+        + aggregate
+        + "\n\nBest by case\n\n"
+        + best_table
+        + "\n\nAll cases\n\n"
+        + cases_table
+    )
+    terminal_text = "Aggregate\n\n" + aggregate + "\n\nBest by case\n\n" + best_table
+    return terminal_text, summary_text
+
+
+def _write_summary_md(path: Path, rows: list[RunResult]) -> Path:
+    _, summary_text = _build_tables(rows)
+    summary_path = path.with_suffix(".summary.md")
+    summary_path.write_text(summary_text + "\n", encoding="utf-8")
+    return summary_path
+
+
 def _print_summary(rows: list[RunResult]) -> None:
     grouped: dict[tuple[str, str], list[RunResult]] = {}
     for row in rows:
@@ -662,7 +876,11 @@ def _print_summary(rows: list[RunResult]) -> None:
             f"{policy:16s} {shape:6s} avg={avg:.3f}x "
             f"min={worst:.3f}x max={best:.3f}x",
             flush=True,
-        )
+            )
+
+    terminal_table, _ = _build_tables(rows)
+    print("\nTables", flush=True)
+    print(terminal_table, flush=True)
 
     failed = [row for row in rows if row.status != "ok"]
     if failed:
@@ -783,8 +1001,10 @@ def main() -> int:
 
         out_path = Path(args.out)
         _write_csv(out_path, rows)
+        summary_path = _write_summary_md(out_path, rows)
         _print_summary(rows)
         print(f"\nwrote {out_path}", flush=True)
+        print(f"wrote {summary_path}", flush=True)
         return 1 if any(row.status != "ok" for row in rows) else 0
     finally:
         if filtered_settings_path is not None:
