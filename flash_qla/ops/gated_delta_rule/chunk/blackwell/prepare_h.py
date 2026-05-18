@@ -150,8 +150,10 @@ def tilelang_prepare_h(
                 x_tmem = T.alloc_tmem((block_S, DK), dtype=accum_dtype)
                 mbar_x = T.alloc_barrier(arrive_count=[1] * 8)
             if use_tcgen05_s:
-                h_tmem = T.alloc_tmem((DK, DV), dtype=accum_dtype)
-                mbar_s = T.alloc_barrier(arrive_count=[1] * 8)
+                h_tile_fragment = T.alloc_fragment((DK, DV // 2), dtype=accum_dtype)
+                h_tile_tmem = T.alloc_tmem((DK, DV // 2), dtype=accum_dtype)
+                mbar_s_l = T.alloc_barrier(arrive_count=[1] * 8)
+                mbar_s_r = T.alloc_barrier(arrive_count=[1] * 8)
 
             data_is_ready = T.alloc_barrier(arrive_count=[96] * num_stages)
             data_is_free = T.alloc_barrier(arrive_count=[384] * num_stages)
@@ -209,17 +211,41 @@ def tilelang_prepare_h(
                     T.barrier_wait(bar_2, i_s % 2)
                     # S += X^T @ Y
                     if use_tcgen05_s:
-                        T.copy(h_fragment, h_tmem)
+                        for j_k, j_v in T.Parallel(DK, DV // 2):
+                            h_tile_fragment[j_k, j_v] = h_fragment[j_k, j_v]
+                        T.copy(h_tile_fragment, h_tile_tmem)
                         T.tcgen05_gemm(
                             x_shared,
-                            y_shared,
-                            h_tmem,
+                            y_shared[0:block_S, 0 : DV // 2],
+                            h_tile_tmem,
                             transpose_A=True,
                             clear_accum=False,
-                            mbar=mbar_s[mbar_slot],
+                            mbar=mbar_s_l[mbar_slot],
                         )
-                        T.mbarrier_wait_parity(mbar_s[mbar_slot], mbar_phase)
-                        T.copy(h_tmem, h_fragment)
+                        T.mbarrier_wait_parity(mbar_s_l[mbar_slot], mbar_phase)
+                        T.copy(h_tile_tmem, h_tile_fragment)
+                        for j_k, j_v in T.Parallel(DK, DV // 2):
+                            h_fragment[j_k, j_v] = h_tile_fragment[j_k, j_v]
+
+                        for j_k, j_v in T.Parallel(DK, DV // 2):
+                            h_tile_fragment[j_k, j_v] = h_fragment[
+                                j_k, j_v + DV // 2
+                            ]
+                        T.copy(h_tile_fragment, h_tile_tmem)
+                        T.tcgen05_gemm(
+                            x_shared,
+                            y_shared[0:block_S, DV // 2 : DV],
+                            h_tile_tmem,
+                            transpose_A=True,
+                            clear_accum=False,
+                            mbar=mbar_s_r[mbar_slot],
+                        )
+                        T.mbarrier_wait_parity(mbar_s_r[mbar_slot], mbar_phase)
+                        T.copy(h_tile_tmem, h_tile_fragment)
+                        for j_k, j_v in T.Parallel(DK, DV // 2):
+                            h_fragment[j_k, j_v + DV // 2] = h_tile_fragment[
+                                j_k, j_v
+                            ]
                     else:
                         T.gemm(
                             x_shared,
