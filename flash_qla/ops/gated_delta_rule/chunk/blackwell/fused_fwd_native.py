@@ -113,24 +113,22 @@ def tilelang_precompute_p_blackwell(
 ):
     batch_size = T.dynamic("batch_size")
     num_tokens = T.dynamic("num_tokens")
-    num_chunks = T.dynamic("num_chunks")
+    num_p_chunks = T.dynamic("num_p_chunks")
     block_S = chunk_size
 
     q_shape = (batch_size, num_tokens, Hg, DK)
-    p_shape = (batch_size, num_chunks, Hg, block_S, block_S)
+    p_shape = (batch_size, num_p_chunks, Hg, block_S, block_S)
 
     @T.prim_func
     def tilelang_precompute_p_blackwell_kernel(
         q: T.Tensor(q_shape, dtype=qkva_dtype),
         k: T.Tensor(q_shape, dtype=qkva_dtype),
         p: T.Tensor(p_shape, dtype=qkva_dtype),
-        num_chunks: T.int32,
     ):
-        with T.Kernel(batch_size * num_chunks * Hg, threads=128) as (bchg,):
+        with T.Kernel(batch_size * num_p_chunks * Hg, threads=128) as (bchg,):
             bc, bhg = bchg // Hg, bchg % Hg
-            bb, chunk_idx = bc // num_chunks, bc % num_chunks
+            bb, chunk_idx = bc // num_p_chunks, bc % num_p_chunks
             left = chunk_idx * block_S
-            right = left + block_S
 
             q_shared = T.alloc_shared((block_S, DK), dtype=qkva_dtype)
             k_shared = T.alloc_shared((block_S, DK), dtype=qkva_dtype)
@@ -534,7 +532,7 @@ def fused_gdr_fwd(
             accum_dtype="float32",
             qkva_dtype=q.dtype,
         )
-        tilelang_precompute_p_kernel(q, k, p, num_chunks)
+        tilelang_precompute_p_kernel(q, k, p)
     else:
         p = torch.empty(
             (batch_size, 1, Hg, chunk_size, chunk_size),
