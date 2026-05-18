@@ -80,7 +80,17 @@ def chunk_gated_delta_rule_fwd(
         and not output_h
     )
     if use_blackwell_cp:
-        A_for_cp = kkt_solve(k=k, b=beta, cu_seqlens=cu_seqlens)
+        use_blackwell_dual_a = (
+            pretransform_a
+            and os.environ.get("FLASHQLA_BLACKWELL_CP_DUAL_A", "") == "1"
+        )
+        if use_blackwell_dual_a:
+            from .blackwell import kkt_solve_raw_and_transformed
+
+            A_for_cp, A = kkt_solve_raw_and_transformed(k=k, b=beta, g=g)
+        else:
+            A_for_cp = kkt_solve(k=k, b=beta, cu_seqlens=cu_seqlens)
+            A = None
         initial_state, cu_seqlens, cp_seq_map, raw_cu_seqlens = (
             intra_card_cp_preprocess(
                 k=k,
@@ -92,14 +102,7 @@ def chunk_gated_delta_rule_fwd(
                 raw_cu_seqlens=cu_seqlens,
             )
         )
-        if (
-            pretransform_a
-            and os.environ.get("FLASHQLA_BLACKWELL_CP_TRANSFORM_A", "") == "1"
-        ):
-            from .blackwell import transform_a
-
-            A = transform_a(A_for_cp, g, beta)
-        else:
+        if A is None:
             A = kkt_solve(
                 k=k,
                 b=beta,

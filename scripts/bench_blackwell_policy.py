@@ -108,13 +108,13 @@ POLICIES = {
         'FLASHQLA_BLACKWELL_FWD_THREADS': '256',
         'FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS': 'load,h,o',
     },
-    'qwen397_native_cp_transform_a': {
+    'qwen397_native_cp_dual_a': {
         'FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE': '1',
         'FLASHQLA_BLACKWELL_NATIVE': '1',
         'FLASHQLA_BLACKWELL_NATIVE_KERNELS': 'fwd,kkt',
         'FLASHQLA_BLACKWELL_FWD_POLICY': 'native',
         'FLASHQLA_BLACKWELL_CP': '1',
-        'FLASHQLA_BLACKWELL_CP_TRANSFORM_A': '1',
+        'FLASHQLA_BLACKWELL_CP_DUAL_A': '1',
         'FLASHQLA_CP_MAX_LOCAL_CHUNKS': '32',
         'FLASHQLA_CP_MIN_CHUNKS': '512',
         'FLASHQLA_CP_WARMUP_THRESHOLD': '-1.0',
@@ -324,7 +324,7 @@ ENV_TO_CLEAR = (
     "FLASHQLA_AUTOCP",
     "FLASHQLA_BLACKWELL_CP",
     "FLASHQLA_BLACKWELL_CP_EXACT",
-    "FLASHQLA_BLACKWELL_CP_TRANSFORM_A",
+    "FLASHQLA_BLACKWELL_CP_DUAL_A",
     "FLASHQLA_CP_EXACT",
     "FLASHQLA_CP_WARMUP_THRESHOLD",
     "FLASHQLA_CP_CORRECT_H0_TORCH",
@@ -343,7 +343,7 @@ TOTAL_RE = re.compile(r"^total\s+(?P<fla>[0-9.]+|NaN)\s+(?P<qla>[0-9.]+|NaN)\s*$
 SPEEDUP_RE = re.compile(r"Speed up:\s+(?P<speedup>[0-9.]+)x")
 KERNEL_RE = re.compile(r"'(?P<kernel>tilelang_[^']+_kernel)'")
 PROFILE_RE = re.compile(
-    r"^\[fwd\]\s+(?P<name>csum|solve|wu|gdr|o|cp-w|cp-a|cp-h|cp-c)\s+"
+    r"^\[fwd\]\s+(?P<name>csum|solve|wu|gdr|o|cp-w|cp-h|cp-c)\s+"
     r"(?P<fla>[0-9.]+|NaN)\s+(?P<qla>[0-9.]+|NaN)\s*$"
 )
 
@@ -371,8 +371,6 @@ class RunResult:
     qla_o_ms: float | None
     fla_cp_w_ms: float | None
     qla_cp_w_ms: float | None
-    fla_cp_a_ms: float | None
-    qla_cp_a_ms: float | None
     fla_cp_h_ms: float | None
     qla_cp_h_ms: float | None
     fla_cp_c_ms: float | None
@@ -450,17 +448,7 @@ def _parse_output(text: str) -> tuple[list[dict[str, float | int | None]], list[
                 "qla_ms": pending_total[1],
                 "speedup": float(speedup_match.group("speedup")),
             }
-            for name in (
-                "csum",
-                "solve",
-                "wu",
-                "gdr",
-                "o",
-                "cp_w",
-                "cp_a",
-                "cp_h",
-                "cp_c",
-            ):
+            for name in ("csum", "solve", "wu", "gdr", "o", "cp_w", "cp_h", "cp_c"):
                 values = pending_profile.get(name, (None, None))
                 row[f"fla_{name}_ms"] = values[0]
                 row[f"qla_{name}_ms"] = values[1]
@@ -654,8 +642,6 @@ def _run_one(
                 qla_o_ms=None,
                 fla_cp_w_ms=None,
                 qla_cp_w_ms=None,
-                fla_cp_a_ms=None,
-                qla_cp_a_ms=None,
                 fla_cp_h_ms=None,
                 qla_cp_h_ms=None,
                 fla_cp_c_ms=None,
@@ -691,8 +677,6 @@ def _run_one(
             qla_o_ms=row["qla_o_ms"],
             fla_cp_w_ms=row["fla_cp_w_ms"],
             qla_cp_w_ms=row["qla_cp_w_ms"],
-            fla_cp_a_ms=row["fla_cp_a_ms"],
-            qla_cp_a_ms=row["qla_cp_a_ms"],
             fla_cp_h_ms=row["fla_cp_h_ms"],
             qla_cp_h_ms=row["qla_cp_h_ms"],
             fla_cp_c_ms=row["fla_cp_c_ms"],
@@ -736,8 +720,6 @@ def _write_csv(path: Path, rows: list[RunResult]) -> None:
         "qla_o_ms",
         "fla_cp_w_ms",
         "qla_cp_w_ms",
-        "fla_cp_a_ms",
-        "qla_cp_a_ms",
         "fla_cp_h_ms",
         "qla_cp_h_ms",
         "fla_cp_c_ms",
@@ -805,7 +787,6 @@ def _qla_other_ms(row: RunResult) -> float | None:
         row.qla_gdr_ms,
         row.qla_o_ms,
         row.qla_cp_w_ms,
-        row.qla_cp_a_ms,
         row.qla_cp_h_ms,
         row.qla_cp_c_ms,
     ):
@@ -841,7 +822,6 @@ def _build_tables(rows: list[RunResult]) -> tuple[str, str]:
             row.qla_solve_ms for row in ok_rows if row.qla_solve_ms is not None
         ]
         qla_gdr_ms = [row.qla_gdr_ms for row in ok_rows if row.qla_gdr_ms is not None]
-        qla_cp_a_ms = [row.qla_cp_a_ms for row in ok_rows if row.qla_cp_a_ms is not None]
         qla_cp_h_ms = [row.qla_cp_h_ms for row in ok_rows if row.qla_cp_h_ms is not None]
         qla_cp_c_ms = [row.qla_cp_c_ms for row in ok_rows if row.qla_cp_c_ms is not None]
         qla_other_ms = [
@@ -858,7 +838,6 @@ def _build_tables(rows: list[RunResult]) -> tuple[str, str]:
                 _fmt(_avg(qla_ms), suffix="ms"),
                 _fmt(_avg(qla_solve_ms), suffix="ms"),
                 _fmt(_avg(qla_gdr_ms), suffix="ms"),
-                _fmt(_avg(qla_cp_a_ms), suffix="ms"),
                 _fmt(_avg(qla_cp_h_ms), suffix="ms"),
                 _fmt(_avg(qla_cp_c_ms), suffix="ms"),
                 _fmt(_avg(qla_other_ms), suffix="ms"),
@@ -879,7 +858,6 @@ def _build_tables(rows: list[RunResult]) -> tuple[str, str]:
                 _fmt(row.qla_solve_ms, suffix="ms"),
                 _fmt(row.qla_gdr_ms, suffix="ms"),
                 _fmt(row.qla_cp_w_ms, suffix="ms"),
-                _fmt(row.qla_cp_a_ms, suffix="ms"),
                 _fmt(row.qla_cp_h_ms, suffix="ms"),
                 _fmt(row.qla_cp_c_ms, suffix="ms"),
                 _fmt(_qla_other_ms(row), suffix="ms"),
@@ -927,7 +905,6 @@ def _build_tables(rows: list[RunResult]) -> tuple[str, str]:
             "qla",
             "solve",
             "gdr",
-            "cp_a",
             "cp_h",
             "cp_c",
             "other",
@@ -946,7 +923,6 @@ def _build_tables(rows: list[RunResult]) -> tuple[str, str]:
             "solve",
             "gdr",
             "cp_w",
-            "cp_a",
             "cp_h",
             "cp_c",
             "other",
