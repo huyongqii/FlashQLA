@@ -3,11 +3,10 @@
 
 """Blackwell entry points for Gated Delta Rule chunk kernels.
 
-The current implementation is intentionally explicit: native sm_100 kernels are
-not implemented yet, so this module forwards to the Hopper-compatible kernels
-unless `FLASHQLA_REQUIRE_BLACKWELL_NATIVE=1` is set. This keeps the dispatch
-boundary stable while preventing accidental claims that the compatibility path
-is Blackwell-native.
+Forward and KKT have experimental native TCGEN05/TMEM implementations selected
+by ``FLASHQLA_BLACKWELL_NATIVE_KERNELS``. The remaining kernels intentionally
+forward to the Hopper-compatible implementation until their Blackwell rewrites
+are validated.
 """
 
 from __future__ import annotations
@@ -72,19 +71,20 @@ def _require_or_warn(kernel_name: str):
     if os.environ.get("FLASHQLA_REQUIRE_BLACKWELL_NATIVE", "") == "1":
         raise NotImplementedError(
             f"Blackwell-native {kernel_name} is not implemented yet. "
-            "Current FlashQLA sm_100 support uses the Hopper-compatible "
-            "TileLang/TVM path, which has been observed to lower to HMMA rather "
-            "than tcgen05/TMEM on B200. Unset "
-            "FLASHQLA_REQUIRE_BLACKWELL_NATIVE to allow compatibility fallback."
+            "Only the experimental forward and KKT paths currently have native "
+            "TCGEN05/TMEM implementations. Unset "
+            "FLASHQLA_REQUIRE_BLACKWELL_NATIVE to allow Hopper-compatible "
+            "fallback for this kernel."
         )
 
     global _WARNING_EMITTED
     if not _WARNING_EMITTED and os.environ.get("FLASHQLA_SUPPRESS_BLACKWELL_WARNING", "") != "1":
         _WARNING_EMITTED = True
         warnings.warn(
-            "FlashQLA Blackwell native kernels are not implemented yet; "
-            "falling back to the Hopper-compatible TileLang/TVM path. "
-            "Set FLASHQLA_REQUIRE_BLACKWELL_NATIVE=1 to fail instead.",
+            "FlashQLA is using a Hopper-compatible fallback for at least one "
+            "Blackwell kernel. Forward/KKT can use native TCGEN05/TMEM when "
+            "FLASHQLA_BLACKWELL_NATIVE_KERNELS includes fwd,kkt. Set "
+            "FLASHQLA_REQUIRE_BLACKWELL_NATIVE=1 to fail instead.",
             stacklevel=3,
         )
 

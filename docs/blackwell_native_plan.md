@@ -2,29 +2,31 @@
 
 ## Current State
 
-On NVIDIA B200 (`sm_100`), FlashQLA currently runs through
-`flash_qla.ops.gated_delta_rule.chunk.blackwell`, but the Blackwell module is a
-compatibility wrapper around the Hopper TileLang kernels. SASS inspection of
-TVM-generated artifacts shows `HMMA.16816.F32.BF16` / `HMMA.1688.F32.TF32`, not
-`tcgen05.mma` or TMEM instructions.
+FlashQLA has an experimental Blackwell native fixed-length forward path in
+`chunk/blackwell/fused_fwd_native.py` and a native KKT path in
+`chunk/blackwell/kkt_solve.py`. These kernels explicitly use TileLang
+`T.tcgen05_gemm`, TMEM, and mbarriers. They have been validated on B200/B300
+for the stable no-CP path with SASS inspection showing Blackwell tensor-core
+instructions.
 
-This means B200 support is correctness-oriented only. It is not a native
-Blackwell performance path.
+The stable production candidate is the AG forward kernel plus fixed-fast KKT.
+Failed exploratory paths that reused precomputed P/Pg, chunk-parallel global
+state materialization, or the mechanical Hopper pipeline port have been removed
+from the runnable benchmark policy set because they either failed correctness or
+were substantially slower on B300.
 
 ## Dispatch Contract
 
 - `chunk/hopper/*`: existing Hopper-compatible TileLang implementation.
-- `chunk/blackwell/*`: future native Blackwell implementation.
-- `FLASHQLA_REQUIRE_BLACKWELL_NATIVE=1`: fail if sm_100 would use the
-  compatibility path.
-- `FLASHQLA_BLACKWELL_NATIVE=1`: enable the experimental forward/kkt path that
-  explicitly calls `T.tcgen05_gemm` and should fail instead of lowering to HMMA.
-- `FLASHQLA_BLACKWELL_NATIVE_KERNELS=kkt`: choose which experimental kernels to
-  enable. The default is empty, which keeps all kernels on the compatibility
-  path even when `FLASHQLA_BLACKWELL_NATIVE=1` is set. Use `kkt` only for
-  correctness/codegen experiments; the current KKT prototype is slower than the
-  compatibility path. Use `kkt,fwd` only for debugging the mechanical TCGEN05
-  fused-forward port, which currently compiles but can hang at runtime.
+- `chunk/blackwell/fused_fwd_native.py`: stable experimental native forward
+  candidate for fixed-length, no-CP inference.
+- `chunk/blackwell/kkt_solve.py`: native fixed-fast KKT candidate.
+- `FLASHQLA_REQUIRE_BLACKWELL_NATIVE=1`: fail when a requested Blackwell kernel
+  would use Hopper-compatible fallback.
+- `FLASHQLA_BLACKWELL_NATIVE=1`: enable experimental native dispatch.
+- `FLASHQLA_BLACKWELL_NATIVE_KERNELS=fwd,kkt`: enable the current native
+  forward and KKT candidates. Kernels not listed here remain on the
+  Hopper-compatible path.
 - `scripts/inspect_blackwell_mma.py --all`: verify whether generated artifacts
   contain `tcgen05`, `TMEM`, `WGMMA`, or `HMMA`.
 
@@ -40,28 +42,23 @@ integration.
 
 ## Experimental Native Branch
 
-`chunk/blackwell/fused_fwd.py` and `chunk/blackwell/kkt_solve.py` currently copy
-the Hopper dataflow but replace each tensor-core `T.gemm` with explicit
-`T.tcgen05_gemm(..., mbar=...)` plus `T.mbarrier_wait_parity(...)`. TCGEN05 does
-not accept `local.fragment` accumulators, so the experimental path uses TMEM
-scratch accumulators and copies results back to fragments/shared buffers for the
-existing elementwise epilogue. This is not the final high-performance design.
-Its purpose is to force TileLang 0.1.9 to either emit TCGEN05 or fail at the
-exact operand/layout that still needs deeper TMEM and layout work.
+The active native branch is no longer the mechanical Hopper port. It is the
+fixed-length AG forward kernel in `fused_fwd_native.py`, paired with fixed-fast
+KKT. The kernel uses one CTA per `(batch, value head, DV block)` and scans chunks
+serially inside that CTA. This is correct and fast enough for TP1/Hv64, but it
+does not create enough CTAs for Qwen397 TP2/TP4/TP8 on B300.
 
-`kkt_solve` has one BF16 tensor-core GEMM (`K @ K^T`) and two FP32 32x32 helper
-matrix products in the triangular inverse. TileLang 0.1.9 does not accept
-`float32` shared/shared inputs for TCGEN05, so those helper products are kept as
-explicit CUDA-core accumulation loops. This avoids accidental HMMA/TF32 fallback
-while keeping the main BF16 product on TCGEN05.
+TileLang 0.1.9 is sufficient for the current TCGEN05 baseline:
 
-Run the first compile probe with KKT isolated:
+- `T.tcgen05_gemm`
+- `T.alloc_tmem`
+- `T.mbarrier_wait_parity`
+- shared/TMEM copies
 
-```bash
-FLASHQLA_BLACKWELL_NATIVE=1 FLASHQLA_BLACKWELL_NATIVE_KERNELS=kkt \
-  python tests/test_gdr.py --set profile --skip-bwd --hide-lat
-python scripts/inspect_blackwell_mma.py --no-run --all
-```
+It has not been sufficient so far for a robust high-performance Blackwell
+producer/consumer pipeline in this recurrent operator. The failed experiments
+showed fragile behavior around operand layout, P/Pg reuse, CP, and mechanical
+Hopper pipeline translation.
 
 To bind SASS inspection to the latest benchmark instead of old TVM cache
 directories, prefer:
@@ -72,23 +69,18 @@ python scripts/inspect_blackwell_mma.py --no-run --latest-tvm-dir
 python scripts/inspect_blackwell_mma.py --no-run --since-minutes 5
 ```
 
-To debug the mechanical fused-forward TCGEN05 port:
+Run the stable native candidate with:
 
 ```bash
-FLASHQLA_BLACKWELL_NATIVE=1 FLASHQLA_BLACKWELL_NATIVE_KERNELS=kkt,fwd \
-  python tests/test_gdr.py --set profile --skip-bwd --hide-lat
-python scripts/inspect_blackwell_mma.py --no-run --all
+FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE=1 \
+FLASHQLA_BLACKWELL_NATIVE=1 \
+FLASHQLA_BLACKWELL_NATIVE_KERNELS=fwd,kkt \
+FLASHQLA_BLACKWELL_FWD_POLICY=native \
+FLASHQLA_BLACKWELL_BLOCK_DV=64 \
+FLASHQLA_BLACKWELL_FWD_THREADS=256 \
+FLASHQLA_BLACKWELL_FWD_SYNC_BARRIERS=load,h \
+python tests/test_gdr.py --set profile --skip-bwd --no-cp
 ```
-
-The active `fwd` experiment is `chunk/blackwell/fused_fwd_native.py`, a
-fixed-length single-consumer TCGEN05 baseline. The older mechanical port remains
-in `chunk/blackwell/fused_fwd.py` as a compiler probe only.
-
-If this fails with a TCGEN05 operand/layout error, the next implementation step
-is to move the failing accumulator to `T.alloc_tmem` and annotate the matching
-TCGEN05 layout. If it compiles but the inspector still reports HMMA, the explicit
-TCGEN05 calls are not being selected and the lowering path must be debugged
-before performance tuning.
 
 ## Forward GEMM Sites
 
@@ -132,14 +124,15 @@ compatibility path until the fixed-length forward kernel is validated.
   - recurrent state update accumulator
   - output accumulator
   - local chunk accumulator
-- Split producer/consumer roles for Blackwell rather than reusing Hopper
-  register budgets and 512-thread warp-specialized layout.
-- Retune CTA shape independently for:
-  - small head count / TP8
-  - medium head count / TP2-TP4
-  - large head count / TP1
-- Avoid a single `grid_size -> block_DV` heuristic. Blackwell should have a
-  per-shape policy table or generated autotune table.
+- Do not materialize all intermediate chunk states globally just to create
+  parallelism; B300 measurements showed that this loses badly.
+- Do not continue the precomputed P/Pg path until TileLang operand-layout and
+  synchronization behavior is understood at the TCGEN05/TMEM level.
+- Split the next major optimization into a state-prefix/CP design that creates
+  more independent chunk work for TP2/TP4/TP8 without writing full per-chunk
+  `DK x DV` states to global memory.
+- Keep the current AG native path as the baseline for TP1 and as the correctness
+  reference for new Blackwell experiments.
 
 TCGEN05 mbarrier reuse note: the native fwd prototype uses 4 mbarrier slots per
 GEMM site and flips wait parity by reuse round:
@@ -154,51 +147,37 @@ phase 0, indicating that barrier reuse needs explicit phase progression.
 
 ## Forward Rewrite Strategy
 
-The mechanical `fused_fwd.py` port proves that TCGEN05 lowering is reachable,
-but it is not a viable performance or correctness base because the Hopper
-512-thread producer/three-consumer warp-specialized pipeline can deadlock after
-TCGEN05/TMEM substitution.
+The current AG baseline already implements the first stable fixed-length
+TCGEN05 path. The next large optimization should not be another local reorder or
+barrier sweep. It should address the B300 occupancy issue directly:
 
-The native forward rewrite should proceed as a new kernel, not as more patches
-to the mechanical port:
+1. Define a per-segment summary for the recurrent state update:
+   `S_out = alpha * S_in + delta`.
+2. Compute summaries for multiple chunk ranges in parallel.
+3. Prefix-scan those summaries to recover each segment's initial state.
+4. Run the existing AG forward on each segment with the recovered state.
+5. Keep summaries compact enough that global memory traffic is far below the
+   rejected chunk-parallel full-state materialization.
 
-1. Build a fixed-length, single-CTA, single-consumer-warpgroup baseline for
-   `output_h=False` and `output_final_state=True`.
-2. Use one TCGEN05 GEMM at a time with immediate `mbarrier_wait_parity`.
-3. Keep `S` and `O` accumulators in TMEM across the operations that naturally
-   consume them; avoid fragment->TMEM->fragment round trips in the final design.
-4. Add the producer warpgroup and double-buffered shared loads only after the
-   single-consumer version passes correctness.
-5. Split policies by shape class:
-   - TP8/small head: prioritize low overhead and enough CTAs.
-   - TP2/TP1/large head: prioritize persistent TMEM state and high tensor-core
-     utilization.
-6. Reintroduce CP/varlen only after fixed-length paths are stable.
+This is algorithmically closer to the existing CP idea than to attention-style
+TMA pipelining. Attention kernels pipeline because each tile is mostly
+independent once the softmax state is carried. GDR has a true recurrent state,
+so extra parallelism requires a scan/correction step, not only producer/consumer
+overlap inside one CTA.
 
-This is the route toward best performance. The mechanical port remains useful
-only as a compiler probe for TileLang 0.1.9 TCGEN05 constraints.
+## Current B300 Finding
 
-## Current B200 Finding
+For Qwen397-style no-CP fixed-length inference, the current native path is
+competitive for TP1 but slower for small value-head counts:
 
-For `B=1, Hk=64, Hv=64`, the KKT-only TCGEN05 prototype is currently slower than
-the compatibility path. Example `T=32768`:
+- TP1/Hv64: about `1.06x-1.11x` FLA.
+- TP2/Hv32: about `0.75x-0.79x` FLA.
+- TP4/Hv16: about `0.67x-0.70x` FLA.
+- TP8/Hv8: about `0.64x-0.67x` FLA.
 
-- FLA total: ~3.23 ms
-- FlashQLA total with KKT prototype + compatibility fused GDR: ~12.85 ms
-- FlashQLA `kkt_solve`: ~5.45 ms
-- FlashQLA `fused_chunk_gdr_fwd`: ~7.40 ms
-
-Therefore the current KKT prototype should not be enabled for performance runs
-or SGLang experiments. It is a proof that TileLang 0.1.9 can emit TCGEN05/TMEM
-for this operator family. The performance path must focus on a new native fused
-forward kernel and a redesigned KKT solve that avoids TMEM copy-back and slow
-FP32 helper loops.
-
-Use the variant runner to compare clean subprocesses:
-
-```bash
-python scripts/bench_blackwell_variants.py --variants compat,fwd,kkt --set profile
-```
+The kernel breakdown shows KKT is not the main bottleneck. The fused GDR stage
+dominates, and for small head counts the problem is insufficient parallel work
+on B300 rather than a single obvious TCGEN05 micro-tuning issue.
 
 For dispatch debugging:
 
@@ -206,46 +185,6 @@ For dispatch debugging:
 FLASHQLA_DEBUG_BLACKWELL_DISPATCH=1 FLASHQLA_BLACKWELL_NATIVE=1 \
   FLASHQLA_BLACKWELL_NATIVE_KERNELS=fwd \
   python tests/test_gdr.py --set profile --skip-bwd --hide-lat
-```
-
-Native fused forward has a second guard because the first fixed-length
-single-consumer prototype can still hang while TCGEN05/TMEM usage is being
-isolated:
-
-```bash
-FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE=1 FLASHQLA_BLACKWELL_NATIVE=1 \
-  FLASHQLA_BLACKWELL_NATIVE_KERNELS=fwd \
-  python tests/test_gdr.py --set profile --skip-bwd --no-cp --hide-acc
-```
-
-To isolate native fused-forward runtime hangs, limit the number of chunks per
-CTA:
-
-```bash
-FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE=1 FLASHQLA_BLACKWELL_NATIVE=1 \
-  FLASHQLA_BLACKWELL_NATIVE_KERNELS=fwd FLASHQLA_BLACKWELL_FWD_MAX_ITERS=1 \
-  python tests/test_gdr.py --set profile --skip-bwd --no-cp --hide-acc
-```
-
-If `MAX_ITERS=1` works but full length hangs, test the looped barrier path:
-
-```bash
-FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE=1 FLASHQLA_BLACKWELL_NATIVE=1 \
-  FLASHQLA_BLACKWELL_NATIVE_KERNELS=fwd FLASHQLA_BLACKWELL_FWD_MAX_ITERS=2 \
-  python tests/test_gdr.py --set profile --skip-bwd --no-cp --hide-acc
-```
-
-Any benchmark collected with `FLASHQLA_BLACKWELL_FWD_MAX_ITERS>0` is a runtime
-debug probe only and is not a valid full-sequence performance result.
-
-When probing kernels that may hang inside CUDA, use the timeout wrapper so the
-process group is killed if Ctrl-C cannot interrupt the GPU work:
-
-```bash
-python scripts/run_with_timeout.py --timeout 120 -- \
-  env FLASHQLA_ENABLE_BLACKWELL_FWD_NATIVE=1 FLASHQLA_BLACKWELL_NATIVE=1 \
-  FLASHQLA_BLACKWELL_NATIVE_KERNELS=fwd FLASHQLA_BLACKWELL_FWD_MAX_ITERS=4 \
-  python tests/test_gdr.py --set profile --skip-bwd --no-cp --hide-acc
 ```
 
 Before debugging that kernel, run the minimal TCGEN05 smoke test:
