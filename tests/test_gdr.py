@@ -315,7 +315,7 @@ def test_gated_delta_rule(
     )
 
     if check_accuracy:
-        if h_qla is not None:
+        if h_qla is not None and h_qla.numel() > 0 and h_qla.shape == h_ref.shape:
             print(
                 f"h_qla: {(h_qla - h_ref).abs().max().item():.4f} / {h_ref.abs().max().item():.4f}"
             )
