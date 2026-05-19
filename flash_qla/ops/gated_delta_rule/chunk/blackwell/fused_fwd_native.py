@@ -313,12 +313,14 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     T.mbarrier_wait_parity(mbar_u[mbar_slot], mbar_phase)
                     T.copy(uv_tmem[:, 0:block_DV], u_fragment)
 
+                    # Fused: u_new = v_old - g_exp * u; write back to v_shared
+                    # for next A@v GEMM. Replaces 3 separate Parallel passes
+                    # (3 sync points + 3 SMEM round-trips collapsed to 1).
                     for j_s, j_v in T.Parallel(block_S, block_DV):
-                        u_fragment[j_s, j_v] *= -g_exp_shared[j_s]
-                    for j_s, j_v in T.Parallel(block_S, block_DV):
-                        u_fragment[j_s, j_v] += v_shared[stage, j_s, j_v]
-                    for j_s, j_v in T.Parallel(block_S, block_DV):
-                        v_shared[stage, j_s, j_v] = u_fragment[j_s, j_v]
+                        v_shared[stage, j_s, j_v] = (
+                            v_shared[stage, j_s, j_v]
+                            - g_exp_shared[j_s] * u_fragment[j_s, j_v]
+                        )
 
                     T.barrier_wait(bar_3, i_s % 2)
                     T.tcgen05_gemm(
@@ -330,12 +332,18 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     )
                     T.mbarrier_wait_parity(mbar_v[mbar_slot], mbar_phase)
                     T.copy(uv_tmem[:, 0:block_DV], v_fragment)
+
+                    # Write vd_shared first (un-scaled v), arrive bar_4 ASAP
+                    # so consumer-O can start O += P @ Vd in parallel.
                     T.copy(v_fragment, vd_shared)
                     T.barrier_arrive(bar_4)
 
+                    # Then produce vn_shared = v * g_rev_exp for consumer-S.
+                    # Fused: scale and write in one pass (was 2 passes).
                     for j_s, j_v in T.Parallel(block_S, block_DV):
-                        v_fragment[j_s, j_v] *= g_rev_exp_shared[j_s]
-                    T.copy(v_fragment, vn_shared)
+                        vn_shared[j_s, j_v] = (
+                            v_fragment[j_s, j_v] * g_rev_exp_shared[j_s]
+                        )
                     T.barrier_arrive(bar_5)
 
                     T.barrier_wait(bar_5, i_s % 2)
