@@ -19,8 +19,9 @@ def _alloc_inversion_buffers(block_S, accum_dtype, qkva_dtype):
     """Allocate the shared / fragment buffers used by the 64x64 lower-tri
     inversion. Returns a tuple in the order expected by
     ``_invert_64x64_lower_tri``: ``(a64_fragment, a16i_row, a16i_sum,
-    a16i_shared, a16o_shared, a16o_fragment, a32i0_shared, a32i1_shared,
-    a32o_shared, a32o_fragment, a64_shared)``.
+    a16i_shared, a16o_shared, a16o_fragment, a32i_fragment,
+    a32i0_shared, a32i1_shared, a32o_shared, a32o_fragment,
+    a64_shared)``.
 
     A tuple (rather than a dict) keeps the buffers as plain TileLang IR
     handles so they can be passed straight into a ``@T.macro`` -- a dict
@@ -33,6 +34,7 @@ def _alloc_inversion_buffers(block_S, accum_dtype, qkva_dtype):
     a16i_shared = T.alloc_shared((4, 17, 16), dtype=accum_dtype)
     a16o_shared = T.alloc_shared((2, 17, 16), dtype=accum_dtype)
     a16o_fragment = T.alloc_fragment((2, 16, 16), dtype=accum_dtype)
+    a32i_fragment = T.alloc_fragment((2, 32, 32), dtype=accum_dtype)
     a32i0_shared = T.alloc_shared((32, 32), dtype=accum_dtype)
     a32i1_shared = T.alloc_shared((32, 32), dtype=accum_dtype)
     a32o_shared = T.alloc_shared((32, 32), dtype=accum_dtype)
@@ -51,6 +53,7 @@ def _alloc_inversion_buffers(block_S, accum_dtype, qkva_dtype):
         a16i_shared,
         a16o_shared,
         a16o_fragment,
+        a32i_fragment,
         a32i0_shared,
         a32i1_shared,
         a32o_shared,
@@ -68,6 +71,7 @@ def _invert_64x64_lower_tri(
     a16i_shared,
     a16o_shared,
     a16o_fragment,
+    a32i_fragment,
     a32i0_shared,
     a32i1_shared,
     a32o_shared,
@@ -142,25 +146,25 @@ def _invert_64x64_lower_tri(
             )
     T.copy(a16o_fragment, a16o_shared[:, 0:16, 0:16])
 
-    # Pack the two 32x32 inverses directly into a32i0_shared / a32i1_shared.
-    # Skipping the previous fragment round-trip saves ~8KB of register file
-    # per warpgroup; ``a32i?_shared`` are pure-shared and the GEMMs below
-    # only consume them, so this is safe. Three mutually-exclusive passes
-    # mirror the original layout (upper-right zero / lower-left from a16o /
-    # diagonal from a16i) so each ``T.Parallel`` body remains a single
-    # straight-line write.
-    for k_s, k_t in T.Parallel(32, 32):
+    # Pack the two 32x32 inverses through the same fragment staging Hopper
+    # uses. Direct shared writes can make TileLang's small-GEMM layout
+    # inference fail in this Blackwell TCGEN05 kernel.
+    for j_s, k_s, k_t in T.Parallel(2, 32, 32):
         if k_s < 16 and k_t >= 16:
-            a32i0_shared[k_s, k_t] = 0
-            a32i1_shared[k_s, k_t] = 0
-    for k_s, k_t in T.Parallel(32, 32):
+            a32i_fragment[j_s, k_s, k_t] = 0
+    for j_s, k_s, k_t in T.Parallel(2, 32, 32):
         if k_s >= 16 and k_t < 16:
-            a32i0_shared[k_s, k_t] = a16o_shared[0, k_s - 16, k_t]
-            a32i1_shared[k_s, k_t] = a16o_shared[1, k_s - 16, k_t]
-    for k_s, k_t in T.Parallel(32, 32):
+            a32i_fragment[j_s, k_s, k_t] = a16o_shared[j_s, k_s - 16, k_t]
+    for j_s, k_s, k_t in T.Parallel(2, 32, 32):
         if k_s // 16 == k_t // 16:
-            a32i0_shared[k_s, k_t] = a16i_shared[k_s // 16, k_s % 16, k_t % 16]
-            a32i1_shared[k_s, k_t] = a16i_shared[2 + k_s // 16, k_s % 16, k_t % 16]
+            a32i_fragment[j_s, k_s, k_t] = a16i_shared[
+                j_s * 2 + k_s // 16, k_s % 16, k_t % 16
+            ]
+    for j_s, k_s, k_t in T.Parallel(2, 32, 32):
+        if j_s == 0:
+            a32i0_shared[k_s, k_t] = a32i_fragment[j_s, k_s, k_t]
+        else:
+            a32i1_shared[k_s, k_t] = a32i_fragment[j_s, k_s, k_t]
 
     # Second-level 1x32x32. The small FP32 32x32 solves are not a supported
     # TCGEN05 operand pattern in TileLang 0.1.9, but hand-unrolled CUDA-core
@@ -176,10 +180,10 @@ def _invert_64x64_lower_tri(
     #   * bot-right (rows 32..63, cols 32..63) <- a32i1_shared
     #   * bot-left  (rows 32..63, cols 0..31)  <- a32o_fragment (last gemm)
     #   * top-right (rows 0..31,  cols 32..63) <- 0
-    for k_s, k_t in T.Parallel(32, 32):
-        a64_shared[k_s, k_t] = a32i0_shared[k_s, k_t]
-    for k_s, k_t in T.Parallel(32, 32):
-        a64_shared[32 + k_s, 32 + k_t] = a32i1_shared[k_s, k_t]
+    for j_s, k_s, k_t in T.Parallel(2, 32, 32):
+        a64_shared[j_s * 32 + k_s, j_s * 32 + k_t] = a32i_fragment[
+            j_s, k_s, k_t
+        ]
     for k_s, k_t in T.Parallel(32, 32):
         a64_shared[32 + k_s, k_t] = a32o_fragment[k_s, k_t]
     for k_s, k_t in T.Parallel(32, 32):
@@ -234,6 +238,7 @@ def tilelang_kkt_solve(
             a16i_shared,
             a16o_shared,
             a16o_fragment,
+            a32i_fragment,
             a32i0_shared,
             a32i1_shared,
             a32o_shared,
@@ -290,6 +295,7 @@ def tilelang_kkt_solve(
                 a16i_shared,
                 a16o_shared,
                 a16o_fragment,
+                a32i_fragment,
                 a32i0_shared,
                 a32i1_shared,
                 a32o_shared,
@@ -370,26 +376,91 @@ def tilelang_kkt_solve(
             a: T.Tensor(a_shape, dtype=qkva_dtype),
             num_chunks: T.int32,
         ):
-            with T.Kernel(num_chunks * H, threads=256) as (bch,):
+            with T.Kernel(num_chunks * H, threads=128) as (bch,):
                 bc, bh = bch // H, bch % H
                 bhg = bh // (H // Hg)
-
                 bb = bc % data_batch_size
                 chunk_idx = bc // data_batch_size
-                seq_start_idx = 0
-                seq_end_idx = num_tokens
+                left = chunk_idx * block_S
+                right = left + block_S
 
-                kernel_body(
-                    bb,
-                    bh,
-                    bhg,
-                    chunk_idx,
-                    seq_start_idx,
-                    seq_end_idx,
-                    k,
-                    b,
-                    a,
+                k_shared = T.alloc_shared((block_S, DK), dtype=qkva_dtype)
+                b_shared = T.alloc_shared((block_S), dtype=accum_dtype, scope="shared")
+                a64_tmem = T.alloc_tmem((block_S, block_S), dtype=accum_dtype)
+
+                (
+                    a64_fragment,
+                    a16i_row,
+                    a16i_sum,
+                    a16i_shared,
+                    a16o_shared,
+                    a16o_fragment,
+                    a32i_fragment,
+                    a32i0_shared,
+                    a32i1_shared,
+                    a32o_shared,
+                    a32o_fragment,
+                    a64_shared,
+                ) = _alloc_inversion_buffers(block_S, accum_dtype, qkva_dtype)
+
+                mma_mbar = T.alloc_barrier(arrive_count=1)
+
+                if right <= num_tokens:
+                    T.copy(k[bb, left:right, bhg, 0:DK], k_shared)
+                    for j_s in T.Parallel(block_S):
+                        b_shared[j_s] = b[bb, left + j_s, bh]
+                else:
+                    for j_s, j_k in T.Parallel(block_S, DK):
+                        if left + j_s < num_tokens:
+                            k_shared[j_s, j_k] = k[bb, left + j_s, bhg, j_k]
+                        else:
+                            k_shared[j_s, j_k] = 0
+                    for j_s in T.Parallel(block_S):
+                        if left + j_s < num_tokens:
+                            b_shared[j_s] = b[bb, left + j_s, bh]
+                        else:
+                            b_shared[j_s] = 0
+
+                T.tcgen05_gemm(
+                    k_shared,
+                    k_shared,
+                    a64_tmem,
+                    transpose_B=True,
+                    clear_accum=True,
+                    mbar=mma_mbar,
                 )
+                T.mbarrier_wait_parity(mma_mbar, 0)
+                T.copy(a64_tmem, a64_fragment)
+                for j_s, j_t in T.Parallel(block_S, block_S):
+                    if j_s > j_t:
+                        a64_fragment[j_s, j_t] *= b_shared[j_s]
+                    elif j_s == j_t:
+                        a64_fragment[j_s, j_t] = 1
+                    else:
+                        a64_fragment[j_s, j_t] = 0
+
+                _invert_64x64_lower_tri(
+                    block_S,
+                    a64_fragment,
+                    a16i_row,
+                    a16i_sum,
+                    a16i_shared,
+                    a16o_shared,
+                    a16o_fragment,
+                    a32i_fragment,
+                    a32i0_shared,
+                    a32i1_shared,
+                    a32o_shared,
+                    a32o_fragment,
+                    a64_shared,
+                )
+
+                if right <= num_tokens:
+                    T.copy(a64_shared, a[bb, left:right, bh, 0:block_S])
+                else:
+                    for j_s, j_t in T.Parallel(block_S, block_S):
+                        if left + j_s < num_tokens:
+                            a[bb, left + j_s, bh, j_t] = a64_shared[j_s, j_t]
 
     return tilelang_kkt_solve_kernel
 
@@ -405,7 +476,21 @@ def kkt_solve(
     assert K == 128
     assert chunk_size == 64
 
-    if cu_seqlens is None:
+    can_use_fixed = cu_seqlens is None
+    if cu_seqlens is not None:
+        seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
+        is_single_sequence = cu_seqlens.numel() == 2
+        can_use_fixed = (
+            int(cu_seqlens[0].item()) == 0
+            and int(cu_seqlens[-1].item()) == num_tokens
+            and bool((seqlens > 0).all().item())
+            and (
+                is_single_sequence
+                or bool((seqlens % chunk_size == 0).all().item())
+            )
+        )
+
+    if can_use_fixed:
         num_chunks = batch_size * tilelang.cdiv(num_tokens, chunk_size)
         seqlen_dtype = "int32"
         is_varlen = False
