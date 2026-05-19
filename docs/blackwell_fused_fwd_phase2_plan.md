@@ -70,7 +70,16 @@ Save the output as plain text in `docs/ncu_reports/phase2_baseline_T32k_no_cp.tx
 | pipe_tensor_cycles_active | 14.68% | 14.85% | 14.97% |
 | l1tex bank_conflicts (cumulative) | 725,832 | 1,462,525 | 2,929,165 |
 
-Per-launch bank conflicts: ~1.4M. SM throughput ~15% means the kernel is **stall-dominated** (not compute-bound, not HBM-bound). Stall breakdown is still pending (metric names need adjustment for the local NCU version).
+Per-launch bank conflicts: ~1.4M. SM throughput ~15% means the kernel is **stall-dominated** (not compute-bound, not HBM-bound).
+
+**Stall breakdown (from `--section WarpStateStats` fallback)**:
+- Warp Cycles Per Issued Instruction: **17.19 cycles**
+- "On average, each warp spends 8.5 cycles being stalled waiting for a scoreboard dependency"
+- "This stall type represents about **49.6% of the total average of 17.2 cycles**"
+
+**Conclusion**: Long Scoreboard (L1TEX data access) stall is the **single dominant** bottleneck at ~50%. Combined with the 1.4M bank conflicts and 15% SM throughput, the kernel is unambiguously **SMEM-subsystem-bound**.
+
+**Decision rule trigger**: `Stall Long Scoreboard > 30%` ✓ + SMEM headroom (B reduces, doesn't increase) ✓ → **Candidate B (RS-gemm to delete `p_shared`) wins as first move.** Candidate D (swizzle) is the natural follow-up. Candidate A is on hold (no barrier-stall data, but with 50% spent on long scoreboard, A's headroom is at most 50%).
 
 ### Step 2: extract the four numbers that decide everything
 
@@ -97,10 +106,13 @@ Open the report and record the following table in this file under §3:
 | `Shared Bank Conflicts > 20%` (or absolute >1M/launch) | **D: swizzle layout** | §5 below (new candidate) |
 | no clear signal | re-investigate, do not commit | — |
 
-**Preliminary signal from this session's incomplete NCU pass**: bank conflicts are
-1.4M/launch and SM throughput is only 15%. This **strongly favours Candidate D
-(swizzle)** as the first move, with B as second. Candidate A is on hold until
-the stall-reason breakdown is captured.
+**Preliminary signal from this session's NCU pass**: 
+- Long Scoreboard stall = **49.6%** (single dominant bottleneck)
+- L1tex bank conflicts = **1.4M / launch**
+- SM throughput 15%, HBM 37%
+- → Kernel is **SMEM-subsystem-bound**.
+
+**This decisively favours Candidate B first** (RS-gemm deletes `p_shared`, removing one full round-trip from the long-scoreboard hot path). Candidate D (swizzle) is the second move on the same root cause. Candidate A is on hold.
 
 The previous session committed sub-commit 3-A and 3-B without NCU evidence; both turned out to be wrong. **Do not skip step 3.**
 

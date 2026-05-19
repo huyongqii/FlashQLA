@@ -149,7 +149,13 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
             h_shared = T.alloc_shared((DK, block_DV), dtype=qkva_dtype)
             vd_shared = T.alloc_shared((block_S, block_DV), dtype=qkva_dtype)
             vn_shared = T.alloc_shared((block_S, block_DV), dtype=qkva_dtype)
-            p_shared = T.alloc_shared((block_S, block_S), dtype=qkva_dtype)
+            # Sub-commit 4 (Candidate B): p_shared deleted; cons-O now uses
+            # an RS (register-A x SMEM-B) tcgen05 gemm for P @ Vd. The
+            # fp32 -> bf16 downcast that previously happened implicitly via
+            # T.copy(p_fragment, p_shared) now happens in-register through
+            # p_cast_fragment. NCU 2026-05-20 baseline showed Long Scoreboard
+            # stall = 49.6% (L1TEX-bound), bank conflicts ~1.4M/launch;
+            # removing this round-trip targets that bottleneck directly.
             o_shared = T.alloc_shared((block_S, block_DV), dtype=o_dtype)
             g_shared = T.alloc_shared(
                 (num_stages, block_S), dtype=accum_dtype, scope="shared"
@@ -385,6 +391,12 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     T.set_max_nreg(CONSUMER_O_NREG, 1)
                 o_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
                 p_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
+                # Sub-commit 4 (Candidate B): bf16 register-side mirror of
+                # p_fragment used as A for the RS gemm with vd_shared. Avoids
+                # the p_shared SMEM round-trip.
+                p_cast_fragment = T.alloc_fragment(
+                    (block_S, block_S), dtype=qkva_dtype
+                )
                 decay_local = T.alloc_local((1), dtype=accum_dtype)
 
                 for i_s in T.serial(num_iters):
@@ -445,23 +457,28 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                             if j_s < j_t:
                                 a_shared[stage, j_s, j_t] = 0
 
-                    # arrive bar_3 ASAP: cons-V only needs a_shared's writes
-                    # (done above), it does NOT read p_shared. Releasing
-                    # bar_3 before the T.copy(p, p_shared) below lets cons-V
-                    # start its big GEMM(a, v, v_fragment) overlapped with
-                    # the SMEM store + elementwise here.
+                    # arrive bar_3 ASAP: cons-S only needs a_shared's writes
+                    # (done above), it does NOT read any P data. Releasing
+                    # bar_3 before the in-register cast + post-process below
+                    # lets cons-S start its big GEMM(a, v, v_fragment) earlier.
                     T.barrier_arrive(bar_3)
 
                     if not _cons_o_noop:
-                        T.copy(p_fragment, p_shared)
+                        # In-register fp32 -> bf16 downcast (replaces the old
+                        # T.copy(p_fragment, p_shared) SMEM round-trip).
+                        T.copy(p_fragment, p_cast_fragment)
 
                         for j_s, j_v in T.Parallel(block_S, block_DV):
                             o_fragment[j_s, j_v] *= scale * g_exp_shared[j_s]
 
                     T.barrier_wait(bar_4, i_s % 2)
                     if not _cons_o_noop:
+                        # RS gemm: A in registers (p_cast_fragment), B in SMEM
+                        # (vd_shared). On SM100 tcgen05 supports RS variants;
+                        # if the codegen path errors, fall back to keeping
+                        # p_shared.
                         T.gemm(
-                            p_shared,
+                            p_cast_fragment,
                             vd_shared,
                             o_fragment,
                             clear_accum=False,
