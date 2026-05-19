@@ -207,12 +207,21 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
             CONSUMER_V_NREG = int(160 * _scale_nreg) // 8 * 8
             CONSUMER_O_NREG = int(160 * _scale_nreg) // 8 * 8
 
+            # Disable per-WG setmaxnreg. This is required when using
+            # min_blocks_per_sm > 1: __launch_bounds__(N, 2) restricts the
+            # CTA's reg pool, but setmaxnreg.inc tries to grow each WG's
+            # allocation beyond that pool — causing a hard hang on SM100.
+            _disable_wg_reg = os.environ.get("FLASHQLA_DISABLE_WG_REG", "0") == "1"
+
             num_iters = T.ceildiv(seq_end_idx - seq_start_idx, block_S)
             if max_iters > 0 and num_iters > max_iters:
                 num_iters = max_iters
 
             if tx < 128:
-                T.set_max_nreg(CONSUMER_S_NREG, 1)
+                if _disable_wg_reg:
+                    T.disable_warp_group_reg_alloc()
+                else:
+                    T.set_max_nreg(CONSUMER_S_NREG, 1)
                 h_fragment = T.alloc_fragment((DK, block_DV), dtype=accum_dtype)
                 g_last_local = T.alloc_local((1), dtype=accum_dtype)
                 if use_initial_state:
@@ -264,7 +273,10 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     )
 
             elif tx < 256:
-                T.set_max_nreg(CONSUMER_V_NREG, 1)
+                if _disable_wg_reg:
+                    T.disable_warp_group_reg_alloc()
+                else:
+                    T.set_max_nreg(CONSUMER_V_NREG, 1)
                 u_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
                 v_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
 
@@ -352,7 +364,10 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     T.barrier_arrive(data_is_free[stage])
 
             elif tx < 384:
-                T.set_max_nreg(CONSUMER_O_NREG, 1)
+                if _disable_wg_reg:
+                    T.disable_warp_group_reg_alloc()
+                else:
+                    T.set_max_nreg(CONSUMER_O_NREG, 1)
                 o_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
                 p_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
                 decay_local = T.alloc_local((1), dtype=accum_dtype)
@@ -431,7 +446,10 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                 T.barrier_arrive(bar_o)
 
             else:
-                T.set_max_nreg(PRODUCER_NREG, 0)
+                if _disable_wg_reg:
+                    T.disable_warp_group_reg_alloc()
+                else:
+                    T.set_max_nreg(PRODUCER_NREG, 0)
                 if tx < 416:
                     for i_s in T.serial(num_iters):
                         stage = i_s % num_stages
