@@ -306,6 +306,64 @@ This experiment costs ~30 minutes (one patch + one run) and decisively gates the
 
 ---
 
+## 11b. Feasibility check result (2026-05-20) — **Path A alone is insufficient**
+
+Knob `FLASHQLA_CONS_O_NOOP=1` was added: cons-O keeps every barrier wait/arrive intact (so the rest of the pipeline still drains correctly) but skips all GEMMs, P-postprocess, and o_shared write. The upper triangle of `a_shared` is still zero-filled because cons-V reads it, but the per-chunk multiplications by `g_exp_shared` / `b_shared` are removed.
+
+T-scan run on top of the current best config (`FLASHQLA_DISABLE_WG_REG=1`):
+
+| T | NT | time | per_chunk |
+|---|---|---|---|
+| 4096 | 64 | 0.26 ms | 4.10 µs |
+| 16384 | 256 | 0.93 ms | 3.63 µs |
+| 32768 | 512 | 1.78 ms | 3.48 µs |
+| 65536 | 1024 | 3.49 ms | 3.41 µs |
+| 131072 | 2048 | 6.90 ms | **3.37 µs** |
+
+### Decomposition of per-chunk time
+
+| segment | per_chunk | meaning |
+|---|---|---|
+| FlashQLA fused, full | 5.04 µs | cons-S + cons-V + cons-O + producer |
+| FlashQLA fused, cons-O NOOP | 3.37 µs | cons-S + cons-V + producer (H-only) |
+| **cons-O actual cost** | **1.67 µs** | the 3 GEMMs + softmax + p_shared + o_shared write |
+| FLA H-only kernel | 1.46 µs | reference baseline |
+| **FlashQLA H-only "tax"** | **3.37 − 1.46 = 1.91 µs** | overhead of the warp-spec H pipeline itself |
+
+### Decision
+
+**Path A alone is not sufficient.** Splitting cons-O into a separate kernel only recovers the 1.67 µs cons-O cost. The remaining 3.37 µs/chunk is **2.3× FLA's H-kernel** — there is a structural cost in the multi-WG warp-spec H pipeline that is independent of cons-O.
+
+Estimated path-A-only outcome: gdr ~1.73 ms (vs current 3.84 ms, vs FLA 0.75 ms). That's a 2.2× speedup over today, but **still 2.3× behind FLA**.
+
+To match FLA, both fixes must land:
+
+1. **Cons-O extraction** → independent O kernel. Recovers ~1.67 µs/chunk in the H loop.
+2. **Cons-S + cons-V reorganisation** to eliminate the H-pipeline tax. Collapse the 3-WG ping-pong (cons-S → cons-V → cons-O via SMEM/TMEM staging) into a tighter design that mirrors FLA's instruction layout.
+
+#### Likely sources of the 1.91 µs H-pipeline tax
+
+a. **Multi-WG mbarrier chain.** Every chunk crosses 4 barriers (`data_is_ready`, `bar_0`, `bar_3`, `data_is_free`). Even with cons-O turned into a no-op, the chain still serialises producer → cons-S → cons-V → cons-O.
+b. **TMEM round-trip in cons-V.** The `u_tmem` / `v_tmem` accumulators introduced during the TMEM-migration commit require `tcgen05.ld` to bring values back to registers; each read-back has 10s-of-cycle latency that is not hidden when occupancy stays at 1 CTA/SM.
+c. **Intermediate SMEM staging.** `v_new` is written to `v_shared` by cons-V and re-read by cons-S; FLA keeps `v_new` in fragments throughout.
+d. **LDS bank conflict.** NCU showed `lsu_wavefronts_mem_shared_op_ld / inst_executed_op_shared_ld` ≈ 6.3 vs ideal 4 (1.57× over-traffic).
+
+### New recommendation — two-phase plan
+
+**Phase 1 (≤1 week): eliminate the H-pipeline tax inside the current fused kernel.**
+- Target: bring `per_chunk (cons-O NOOP)` from 3.37 µs to ~2.0 µs.
+- Approach: collapse cons-S + cons-V into a single WG that does the H recurrence end-to-end on registers. Drop `v_shared` round-trip (keep `v_new` in fragments). Drop `u_tmem` / `v_tmem` (keep on registers — fewer threads means more reg/thread is fine). Reduce barrier count.
+- Even keeping cons-O in place, this alone should bring full per_chunk from 5.04 to ~3.5 µs (gdr ~1.8 ms).
+
+**Phase 2 (1–2 weeks): extract cons-O into a separate O kernel.**
+- Target: drop the 1.67 µs cons-O contribution. With Phase 1 done, full per_chunk → ~2.0 µs.
+- Requires writing a chunk-parallel O kernel (grid `(NT, B×Hv, V/BV)`).
+- Expected total fwd: 1.0–1.5 ms (match-or-beat FLA).
+
+The new ordering is **fix the H pipeline first, then extract cons-O** — Phase 1 is higher leverage (1.91 µs vs 1.67 µs) and sets the right foundation for Phase 2.
+
+---
+
 ## 10. Appendix: experiments and timings
 
 ### Pure deletions (each from baseline 10.14 ms)
@@ -344,7 +402,7 @@ smsp__average_warps_issue_stalled_barrier_per_issue_active         =  1.32
 
 ---
 
-## 11. Configuration knobs added
+## 12. Configuration knobs added
 
 The following environment variables were introduced in `fused_fwd_native.py` for diagnostics:
 
@@ -354,6 +412,7 @@ The following environment variables were introduced in `fused_fwd_native.py` for
 | `FLASHQLA_NREG_SCALE` | Multiply CONSUMER_*_NREG by this factor | 1.0 |
 | `FLASHQLA_DISABLE_WG_REG` | Replace `T.set_max_nreg(...)` with `T.disable_warp_group_reg_alloc()` | 0 |
 | `FLASHQLA_MIN_BLOCKS_PER_SM` | Emit `T.annotate_min_blocks_per_sm(N)` | 1 (no annotation) |
+| `FLASHQLA_CONS_O_NOOP` | Skip cons-O's GEMMs / softmax / o-write while keeping all barriers (timing-only, output garbage) | 0 |
 
 **Recommended production config (current best):**
 ```bash
