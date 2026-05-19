@@ -770,7 +770,7 @@ def fused_gdr_mt(
         real_batch_size = len(cu_seqlens) - 1
         is_varlen = True
 
-    fallback_indices = fallback_indices.to(dtype=torch.int32, device=k.device)
+    fallback_indices = fallback_indices.to(dtype=torch.int32, device=k.device).contiguous()
     mt = torch.empty(
         (real_batch_size, H, K, K), dtype=torch.bfloat16, device=k.device
     )
