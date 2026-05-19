@@ -339,56 +339,59 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     )
                     T.mbarrier_wait_parity(mbar_p[mbar_slot], mbar_phase)
 
-                    for j_pb, j_tb in T.serial(block_S // 32, block_S // 32):
-                        T.copy(
-                            p_tmem[
-                                j_pb * 32 : (j_pb + 1) * 32,
-                                j_tb * 32 : (j_tb + 1) * 32,
-                            ],
-                            p_fragment,
-                        )
-                        for j_r, j_c in T.Parallel(32, 32):
-                            if j_pb * 32 + j_r >= j_tb * 32 + j_c:
-                                p_fragment[j_r, j_c] *= (
-                                    scale
-                                    * T.exp2(
+                    for j_pb in T.serial(block_S // 32):
+                        for j_tb in T.serial(block_S // 32):
+                            T.copy(
+                                p_tmem[
+                                    j_pb * 32 : (j_pb + 1) * 32,
+                                    j_tb * 32 : (j_tb + 1) * 32,
+                                ],
+                                p_fragment,
+                            )
+                            for j_r, j_c in T.Parallel(32, 32):
+                                if j_pb * 32 + j_r >= j_tb * 32 + j_c:
+                                    p_fragment[j_r, j_c] *= (
+                                        scale
+                                        * T.exp2(
+                                            (
+                                                g_shared[stage, j_pb * 32 + j_r]
+                                                - g_shared[
+                                                    stage, j_tb * 32 + j_c
+                                                ]
+                                            )
+                                            * 1.442695
+                                        )
+                                    )
+                                    a_shared[
+                                        stage,
+                                        j_pb * 32 + j_r,
+                                        j_tb * 32 + j_c,
+                                    ] *= T.exp2(
                                         (
                                             g_shared[stage, j_pb * 32 + j_r]
                                             - g_shared[stage, j_tb * 32 + j_c]
                                         )
                                         * 1.442695
                                     )
-                                )
-                                a_shared[
-                                    stage,
-                                    j_pb * 32 + j_r,
-                                    j_tb * 32 + j_c,
-                                ] *= T.exp2(
-                                    (
-                                        g_shared[stage, j_pb * 32 + j_r]
-                                        - g_shared[stage, j_tb * 32 + j_c]
-                                    )
-                                    * 1.442695
-                                )
-                                a_shared[
-                                    stage,
-                                    j_pb * 32 + j_r,
-                                    j_tb * 32 + j_c,
-                                ] *= b_shared[stage, j_tb * 32 + j_c]
-                            else:
-                                p_fragment[j_r, j_c] = 0
-                                a_shared[
-                                    stage,
-                                    j_pb * 32 + j_r,
-                                    j_tb * 32 + j_c,
-                                ] = 0
-                        T.copy(
-                            p_fragment,
-                            p_shared[
-                                j_pb * 32 : (j_pb + 1) * 32,
-                                j_tb * 32 : (j_tb + 1) * 32,
-                            ],
-                        )
+                                    a_shared[
+                                        stage,
+                                        j_pb * 32 + j_r,
+                                        j_tb * 32 + j_c,
+                                    ] *= b_shared[stage, j_tb * 32 + j_c]
+                                else:
+                                    p_fragment[j_r, j_c] = 0
+                                    a_shared[
+                                        stage,
+                                        j_pb * 32 + j_r,
+                                        j_tb * 32 + j_c,
+                                    ] = 0
+                            T.copy(
+                                p_fragment,
+                                p_shared[
+                                    j_pb * 32 : (j_pb + 1) * 32,
+                                    j_tb * 32 : (j_tb + 1) * 32,
+                                ],
+                            )
                     T.barrier_arrive(bar_3)
 
                     T.barrier_wait(bar_1, i_s % 2)
