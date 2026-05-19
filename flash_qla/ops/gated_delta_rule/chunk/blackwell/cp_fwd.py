@@ -35,6 +35,7 @@ def tilelang_get_warmup_chunks(
             if ht_mask[bb]:
                 for i_h in T.Parallel(num_heads):
                     num_warmup_chunks[bb, i_h] = 0
+                    fallback_mask[bb, i_h] = False
             else:
                 seq_start_idx = T.alloc_var("int32")
                 seq_end_idx = T.alloc_var("int32")

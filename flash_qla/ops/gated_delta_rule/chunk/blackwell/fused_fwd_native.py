@@ -170,7 +170,14 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
             data_is_ready = T.alloc_barrier(arrive_count=[96] * num_stages)
             data_is_free = T.alloc_barrier(arrive_count=[384] * num_stages)
             bar_o = T.alloc_barrier(arrive_count=128)
-            bar_0 = T.alloc_barrier(arrive_count=416)
+            # bar_0: only fences cons-O's o_shared write (prev iter, completed
+            # before cons-O re-arrives bar_0 via data_is_free → data_is_ready)
+            # against prod-output's o_shared read (cur iter). cons-S and
+            # cons-V used to participate as a cross-warpgroup iter-start
+            # barrier, but their h_shared / g_*_shared WAR are already covered
+            # by bar_5 (which all of them rendezvous on at iter end). So the
+            # cons-S / cons-V seats here were pure stalls — drop them.
+            bar_0 = T.alloc_barrier(arrive_count=160)
             bar_1 = T.alloc_barrier(arrive_count=256)
             bar_3 = T.alloc_barrier(arrive_count=128)
             bar_4 = T.alloc_barrier(arrive_count=128)
@@ -204,9 +211,11 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     stage = i_s % num_stages
                     stage_phase = (i_s // num_stages) % 2
                     T.barrier_wait(data_is_ready[stage], stage_phase)
-                    T.barrier_arrive(bar_0)
 
-                    T.barrier_wait(bar_0, i_s % 2)
+                    # Drop bar_0: h_shared WAR vs cons-V/O is covered by bar_5
+                    # (all three warpgroups rendezvous before cons-S overwrites
+                    # h_shared via T.copy below). bar_1 still serializes the
+                    # write against cons-V/O reading in the prev iter.
                     T.copy(h_fragment, h_shared)
                     T.barrier_arrive(bar_1)
 
@@ -249,9 +258,12 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     left = seq_start_idx + i_s * block_S
 
                     T.barrier_wait(data_is_ready[stage], stage_phase)
-                    T.barrier_arrive(bar_0)
 
-                    T.barrier_wait(bar_0, i_s % 2)
+                    # Drop bar_0: g_*_shared writes here only WAR against
+                    # cons-O's reads in the P-postprocess of the prev iter,
+                    # which all complete before cons-O's arrive bar_5. Since
+                    # cons-V also reaches arrive bar_5 each iter, the iter
+                    # boundary itself fences this WAR.
                     for j_s in T.Parallel(block_S):
                         g_exp_shared[j_s] = T.exp2(
                             g_shared[stage, j_s] * 1.442695
@@ -326,13 +338,16 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     stage_phase = (i_s // num_stages) % 2
 
                     T.barrier_wait(data_is_ready[stage], stage_phase)
+                    # bar_0: keep arrive (signals to prod-output that prev
+                    # iter's o_shared write is committed and we won't touch
+                    # o_shared again until wait bar_5 below). Drop wait —
+                    # cons-O does not need to fence against itself here.
                     T.barrier_arrive(bar_0)
 
                     # P is immediately consumed by scalar masking / decay, so
                     # keep it in a fragment instead of round-tripping through
                     # TMEM. TMEM is more useful for the long-lived O/H/UV
                     # accumulators below.
-                    T.barrier_wait(bar_0, i_s % 2)
                     T.gemm(
                         q_shared[stage, :, :],
                         k_shared[stage, :, :],

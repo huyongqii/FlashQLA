@@ -139,10 +139,12 @@ def tilelang_prepare_h(
             g_prod_X = T.alloc_fragment((1), dtype=accum_dtype)
             g_prod_Y = T.alloc_fragment((1), dtype=accum_dtype)
 
-            data_is_ready = T.alloc_barrier(arrive_count=[96] * num_stages)
+            data_is_ready = T.alloc_barrier(
+                arrive_count=[(96 if store_h else 128)] * num_stages
+            )
             data_is_free = T.alloc_barrier(arrive_count=[384] * num_stages)
 
-            bar_0 = T.alloc_barrier(arrive_count=416)
+            bar_0 = T.alloc_barrier(arrive_count=(416 if store_h else 384))
             bar_1 = T.alloc_barrier(arrive_count=256)
             bar_2 = T.alloc_barrier(arrive_count=384)
             bar_3 = T.alloc_barrier(arrive_count=128)
@@ -397,11 +399,13 @@ def tilelang_prepare_h(
                             v[batch_idx, left:right, bh, 0:DV],
                             v_shared[i_s % num_stages, :, :],
                         )
-                        # Load A  TODO: Mask A for the last chunk
-                        T.copy(
-                            a[batch_idx, left:right, bh, 0:block_S],
-                            a_shared[i_s % num_stages, :, :],
-                        )
+                        if store_h:
+                            # Keep the original 3-warp producer schedule when
+                            # the final store warp is occupied by output_h.
+                            T.copy(
+                                a[batch_idx, left:right, bh, 0:block_S],
+                                a_shared[i_s % num_stages, :, :],
+                            )
 
                         T.barrier_arrive(data_is_ready[i_s % num_stages])
 
@@ -447,17 +451,32 @@ def tilelang_prepare_h(
                         T.barrier_arrive(data_is_ready[i_s % num_stages])
 
                 else:
-                    for i_s in T.serial(num_iters):
-                        T.barrier_arrive(bar_0)
+                    if store_h:
+                        for i_s in T.serial(num_iters):
+                            T.barrier_arrive(bar_0)
 
-                        T.barrier_wait(bar_0, i_s % 2)
-                        T.barrier_wait(bar_1, i_s % 2)
-                        # Store S
-                        if store_h:
+                            T.barrier_wait(bar_0, i_s % 2)
+                            T.barrier_wait(bar_1, i_s % 2)
+                            # Store S
                             T.copy(
                                 h_shared,
                                 h[batch_idx, chunk_start_idx + i_s, bh, 0:DK, 0:DV],
                             )
+                    else:
+                        for i_s in T.serial(num_iters):
+                            T.barrier_wait(
+                                data_is_free[i_s % num_stages],
+                                (i_s // num_stages + 1) % 2,
+                            )
+                            left = seq_start_idx + i_s * block_S
+                            right = left + block_S
+
+                            T.copy(
+                                a[batch_idx, left:right, bh, 0:block_S],
+                                a_shared[i_s % num_stages, :, :],
+                            )
+
+                            T.barrier_arrive(data_is_ready[i_s % num_stages])
 
     return tilelang_prepare_h_kernel
 
