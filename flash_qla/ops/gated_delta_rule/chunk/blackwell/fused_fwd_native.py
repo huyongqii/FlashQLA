@@ -44,7 +44,6 @@ def _select_block_dv(real_batch_size: int, num_v_heads: int) -> int:
 @tilelang.jit(
     pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-        tilelang.PassConfigKey.TL_DEVICE_COMPILE_FLAGS: ["--maxrregcount=168"],
     },
 )
 def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
@@ -156,13 +155,6 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                 (block_S), dtype=accum_dtype, scope="shared"
             )
 
-            h_fragment = T.alloc_fragment((DK, block_DV), dtype=accum_dtype)
-            o_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
-            u_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
-            v_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
-            p_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
-            g_last_local = T.alloc_local((1), dtype=accum_dtype)
-
             h_tmem = T.alloc_tmem((DK, tmem_width), dtype=accum_dtype)
             uv_tmem = T.alloc_tmem((block_S, tmem_width), dtype=accum_dtype)
             o_tmem = T.alloc_tmem((block_S, tmem_width), dtype=accum_dtype)
@@ -187,9 +179,9 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
             tx = T.get_thread_binding()
 
             PRODUCER_NREG = 24
-            CONSUMER_S_NREG = 168
-            CONSUMER_V_NREG = 160
-            CONSUMER_O_NREG = 160
+            CONSUMER_S_NREG = 152
+            CONSUMER_V_NREG = 152
+            CONSUMER_O_NREG = 152
 
             num_iters = T.ceildiv(seq_end_idx - seq_start_idx, block_S)
             if max_iters > 0 and num_iters > max_iters:
@@ -197,6 +189,8 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
 
             if tx < 128:
                 T.set_max_nreg(CONSUMER_S_NREG, 1)
+                h_fragment = T.alloc_fragment((DK, block_DV), dtype=accum_dtype)
+                g_last_local = T.alloc_local((1), dtype=accum_dtype)
                 if use_initial_state:
                     T.copy(
                         h0[bb, bh, 0:DK, bv * block_DV : (bv + 1) * block_DV],
@@ -250,6 +244,8 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
 
             elif tx < 256:
                 T.set_max_nreg(CONSUMER_V_NREG, 1)
+                u_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
+                v_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
 
                 for i_s in T.serial(num_iters):
                     stage = i_s % 2
@@ -321,6 +317,8 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
 
             elif tx < 384:
                 T.set_max_nreg(CONSUMER_O_NREG, 1)
+                o_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
+                p_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
 
                 for i_s in T.serial(num_iters):
                     stage = i_s % 2
