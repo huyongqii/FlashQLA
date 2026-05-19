@@ -3,6 +3,7 @@
 
 import math
 import os
+import sys
 
 import torch
 import tilelang
@@ -306,11 +307,13 @@ def _prepare_cp_buffers(
         "FLASHQLA_CP_PREPARE_DEBUG_MODE", ""
     ).strip().lower()
     if prepare_debug_mode:
-        raise RuntimeError(
-            "FLASHQLA_CP_PREPARE_DEBUG_MODE="
-            f"{prepare_debug_mode} passed prepare_h/fused_gdr_h sync; "
-            "stopping before correction because buffers are intentionally partial."
+        _debug_cp_log(
+            "debug stop: "
+            f"FLASHQLA_CP_PREPARE_DEBUG_MODE={prepare_debug_mode} passed "
+            "prepare_h/fused_gdr_h sync; exiting before correction because buffers "
+            "are intentionally partial."
         )
+        sys.exit(0)
     if needs_correction and mt is None:
         raise RuntimeError("CP correction needs mt, but fused_gdr_h did not return it")
     _debug_cp_log(
