@@ -164,25 +164,26 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                 raw_seq_end_idx == seq_end_idx
             )
 
-            # Pipeline depth = 1 (was 2). NCU showed 87% Long Scoreboard
-            # stalls and occupancy capped at 1 block/SM by SMEM (~150 KB).
-            # Halving q/k/v/a buffers saves ~44 KB so 2 blocks/SM may fit
-            # and provide better L1TEX latency hiding via cross-block
-            # warp scheduling (single block had only 24% achieved occ).
-            q_shared = T.alloc_shared((1, block_S, DK), dtype=qkva_dtype)
-            k_shared = T.alloc_shared((1, block_S, DK), dtype=qkva_dtype)
-            v_shared = T.alloc_shared((1, block_S, block_DV), dtype=qkva_dtype)
-            a_shared = T.alloc_shared((1, block_S, block_S), dtype=qkva_dtype)
+            # Pipeline depth = 2 (double buffering). Confirmed by ablation:
+            # going to depth=1 saved 52KB SMEM but kept Block Limit Reg=1 hard
+            # cap (128 reg/thread x 512 threads = full SM register file), so
+            # occupancy did not improve, and Long Scoreboard stall actually
+            # GREW from 41.3 to 57.4 cycles (q/k prefetch was hiding ~16 cyc
+            # of global load latency). Real bottleneck is registers; depth=2
+            # restored.
+            q_shared = T.alloc_shared((2, block_S, DK), dtype=qkva_dtype)
+            k_shared = T.alloc_shared((2, block_S, DK), dtype=qkva_dtype)
+            v_shared = T.alloc_shared((2, block_S, block_DV), dtype=qkva_dtype)
+            a_shared = T.alloc_shared((2, block_S, block_S), dtype=qkva_dtype)
             h_shared = T.alloc_shared((DK, block_DV), dtype=qkva_dtype)
             vd_shared = T.alloc_shared((block_S, block_DV), dtype=qkva_dtype)
             vn_shared = T.alloc_shared((block_S, block_DV), dtype=qkva_dtype)
-            p_shared = T.alloc_shared((block_S, block_S), dtype=qkva_dtype)
             o_shared = T.alloc_shared((block_S, block_DV), dtype=o_dtype)
-            g_shared = T.alloc_shared((1, block_S), dtype=accum_dtype, scope="shared")
+            g_shared = T.alloc_shared((2, block_S), dtype=accum_dtype, scope="shared")
             g_exp_shared = T.alloc_shared(
                 (block_S), dtype=accum_dtype, scope="shared"
             )
-            b_shared = T.alloc_shared((1, block_S), dtype=accum_dtype, scope="shared")
+            b_shared = T.alloc_shared((2, block_S), dtype=accum_dtype, scope="shared")
             g_rev_exp_shared = T.alloc_shared(
                 (block_S), dtype=accum_dtype, scope="shared"
             )
@@ -190,7 +191,8 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
             h_tmem = T.alloc_tmem((DK, tmem_width), dtype=accum_dtype)
             uv_tmem = T.alloc_tmem((block_S, tmem_width), dtype=accum_dtype)
             o_tmem = T.alloc_tmem((block_S, tmem_width), dtype=accum_dtype)
-            p_tmem = T.alloc_tmem((block_S, block_S), dtype=accum_dtype)
+            p_acc_tmem = T.alloc_tmem((block_S, block_S), dtype=accum_dtype)
+            p_tmem = T.alloc_tmem((block_S, block_S), dtype=qkva_dtype)
 
             mbar_u = T.alloc_barrier(arrive_count=[1] * 8)
             mbar_v = T.alloc_barrier(arrive_count=[1] * 8)
@@ -198,9 +200,8 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
             mbar_o0 = T.alloc_barrier(arrive_count=[1] * 8)
             mbar_o1 = T.alloc_barrier(arrive_count=[1] * 8)
             mbar_h = T.alloc_barrier(arrive_count=[1] * 8)
-            # depth=1: a single ready/free barrier pair, phase flips every iter
-            data_is_ready = T.alloc_barrier(arrive_count=[96] * 1)
-            data_is_free = T.alloc_barrier(arrive_count=[384] * 1)
+            data_is_ready = T.alloc_barrier(arrive_count=[96] * 2)
+            data_is_free = T.alloc_barrier(arrive_count=[384] * 2)
             bar_o = T.alloc_barrier(arrive_count=128)
             bar_0 = T.alloc_barrier(arrive_count=416)
             bar_1 = T.alloc_barrier(arrive_count=256)
@@ -233,10 +234,10 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     T.clear(h_fragment)
 
                 for i_s in T.serial(num_iters):
-                    stage = 0
+                    stage = i_s % 2
                     mbar_slot = i_s % 8
                     mbar_phase = (i_s // 8) % 2
-                    T.barrier_wait(data_is_ready[0], i_s % 2)
+                    T.barrier_wait(data_is_ready[stage], (i_s // 2) % 2)
                     T.barrier_arrive(bar_0)
 
                     T.barrier_wait(bar_0, i_s % 2)
@@ -262,7 +263,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     T.mbarrier_wait_parity(mbar_h[mbar_slot], mbar_phase)
                     T.copy(h_tmem[:, 0:block_DV], h_fragment)
 
-                    T.barrier_arrive(data_is_free[0])
+                    T.barrier_arrive(data_is_free[stage])
 
                 if need_store_final_state:
                     T.copy(
@@ -281,12 +282,12 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                 v_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
 
                 for i_s in T.serial(num_iters):
-                    stage = 0
+                    stage = i_s % 2
                     mbar_slot = i_s % 8
                     mbar_phase = (i_s // 8) % 2
                     left = seq_start_idx + i_s * block_S
 
-                    T.barrier_wait(data_is_ready[0], i_s % 2)
+                    T.barrier_wait(data_is_ready[stage], (i_s // 2) % 2)
                     T.barrier_arrive(bar_0)
 
                     T.barrier_wait(bar_0, i_s % 2)
@@ -354,7 +355,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
 
                     T.barrier_wait(bar_5, i_s % 2)
 
-                    T.barrier_arrive(data_is_free[0])
+                    T.barrier_arrive(data_is_free[stage])
 
             elif tx < 384:
                 T.set_max_nreg(CONSUMER_O_NREG, 1)
@@ -363,11 +364,11 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                 decay_local = T.alloc_local((1), dtype=accum_dtype)
 
                 for i_s in T.serial(num_iters):
-                    stage = 0
+                    stage = i_s % 2
                     mbar_slot = i_s % 8
                     mbar_phase = (i_s // 8) % 2
 
-                    T.barrier_wait(data_is_ready[0], i_s % 2)
+                    T.barrier_wait(data_is_ready[stage], (i_s // 2) % 2)
                     T.barrier_arrive(bar_0)
 
                     # ---- async issue: P = Q @ K^T (depends on bar_0 only) ----
@@ -375,7 +376,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     T.tcgen05_gemm(
                         q_shared[stage, :, :],
                         k_shared[stage, :, :],
-                        p_tmem,
+                        p_acc_tmem,
                         transpose_B=True,
                         clear_accum=True,
                         mbar=mbar_p[mbar_slot],
@@ -395,7 +396,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
 
                     # ---- wait P, do its scalar post-processing ----
                     T.mbarrier_wait_parity(mbar_p[mbar_slot], mbar_phase)
-                    T.copy(p_tmem, p_fragment)
+                    T.copy(p_acc_tmem, p_fragment)
 
                     for j_s, j_t in T.Parallel(block_S, block_S):
                         if j_s >= j_t:
@@ -413,8 +414,8 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                             p_fragment[j_s, j_t] = 0
                             a_shared[stage, j_s, j_t] = 0
 
-                    T.copy(p_fragment, p_shared)
                     T.barrier_arrive(bar_3)
+                    T.copy(p_fragment, p_tmem)
 
                     # ---- wait O0, do its scalar post-processing ----
                     T.mbarrier_wait_parity(mbar_o0[mbar_slot], mbar_phase)
@@ -426,7 +427,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
 
                     T.barrier_wait(bar_4, i_s % 2)
                     T.tcgen05_gemm(
-                        p_shared,
+                        p_tmem,
                         vd_shared,
                         o_tmem[:, 0:block_DV],
                         clear_accum=False,
@@ -439,7 +440,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     T.barrier_wait(bar_5, i_s % 2)
                     T.copy(o_fragment, o_shared)
 
-                    T.barrier_arrive(data_is_free[0])
+                    T.barrier_arrive(data_is_free[stage])
 
                 T.barrier_arrive(bar_o)
 
@@ -447,8 +448,8 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                 T.set_max_nreg(PRODUCER_NREG, 0)
                 if tx < 416:
                     for i_s in T.serial(num_iters):
-                        stage = 0
-                        T.barrier_wait(data_is_free[0], (i_s + 1) % 2)
+                        stage = i_s % 2
+                        T.barrier_wait(data_is_free[stage], (i_s // 2 + 1) % 2)
                         left = seq_start_idx + i_s * block_S
                         right = left + block_S
 
@@ -474,12 +475,12 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                                     q_shared[stage, j_s, j_k] = 0
                                     k_shared[stage, j_s, j_k] = 0
 
-                        T.barrier_arrive(data_is_ready[0])
+                        T.barrier_arrive(data_is_ready[stage])
 
                 elif tx < 448:
                     for i_s in T.serial(num_iters):
-                        stage = 0
-                        T.barrier_wait(data_is_free[0], (i_s + 1) % 2)
+                        stage = i_s % 2
+                        T.barrier_wait(data_is_free[stage], (i_s // 2 + 1) % 2)
                         left = seq_start_idx + i_s * block_S
                         right = left + block_S
 
@@ -514,12 +515,12 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                                 else:
                                     b_shared[stage, j_s] = 0
 
-                        T.barrier_arrive(data_is_ready[0])
+                        T.barrier_arrive(data_is_ready[stage])
 
                 elif tx < 480:
                     for i_s in T.serial(num_iters):
-                        stage = 0
-                        T.barrier_wait(data_is_free[0], (i_s + 1) % 2)
+                        stage = i_s % 2
+                        T.barrier_wait(data_is_free[stage], (i_s // 2 + 1) % 2)
                         left = seq_start_idx + i_s * block_S
                         right = left + block_S
 
@@ -550,7 +551,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                                         batch_idx, seq_end_idx - 1, bh
                                     ]
 
-                        T.barrier_arrive(data_is_ready[0])
+                        T.barrier_arrive(data_is_ready[stage])
 
                 else:
                     for i_s in T.serial(num_iters):
