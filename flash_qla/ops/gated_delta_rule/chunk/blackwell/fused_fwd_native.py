@@ -159,8 +159,6 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
             u_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
             v_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
             p_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
-            a_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
-            g_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
             g_last_local = T.alloc_local((1), dtype=accum_dtype)
 
             h_tmem = T.alloc_tmem((DK, tmem_width), dtype=accum_dtype)
@@ -343,24 +341,28 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     T.copy(p_tmem, p_fragment)
 
                     for j_s, j_t in T.Parallel(block_S, block_S):
-                        g_fragment[j_s, j_t] = (
-                            g_shared[stage, j_s] - g_shared[stage, j_t]
-                        )
-                    for j_s, j_t in T.Parallel(block_S, block_S):
                         if j_s >= j_t:
-                            g_fragment[j_s, j_t] = T.exp2(
-                                g_fragment[j_s, j_t] * 1.442695
+                            p_fragment[j_s, j_t] *= (
+                                scale
+                                * T.exp2(
+                                    (
+                                        g_shared[stage, j_s]
+                                        - g_shared[stage, j_t]
+                                    )
+                                    * 1.442695
+                                )
                             )
+                            a_shared[stage, j_s, j_t] *= T.exp2(
+                                (
+                                    g_shared[stage, j_s]
+                                    - g_shared[stage, j_t]
+                                )
+                                * 1.442695
+                            )
+                            a_shared[stage, j_s, j_t] *= b_shared[stage, j_t]
                         else:
-                            g_fragment[j_s, j_t] = 0
-                    for j_s, j_t in T.Parallel(block_S, block_S):
-                        a_fragment[j_s, j_t] = a_shared[stage, j_s, j_t]
-                    for j_s, j_t in T.Parallel(block_S, block_S):
-                        a_fragment[j_s, j_t] *= g_fragment[j_s, j_t]
-                    for j_s, j_t in T.Parallel(block_S, block_S):
-                        a_fragment[j_s, j_t] *= b_shared[stage, j_t]
-                    for j_s, j_t in T.Parallel(block_S, block_S):
-                        a_shared[stage, j_s, j_t] = a_fragment[j_s, j_t]
+                            p_fragment[j_s, j_t] = 0
+                            a_shared[stage, j_s, j_t] = 0
 
                     T.barrier_arrive(bar_3)
 
@@ -375,8 +377,6 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     T.mbarrier_wait_parity(mbar_o0[mbar_slot], mbar_phase)
                     T.copy(o_tmem[:, 0:block_DV], o_fragment)
 
-                    for j_s, j_t in T.Parallel(block_S, block_S):
-                        p_fragment[j_s, j_t] *= scale * g_fragment[j_s, j_t]
                     T.copy(p_fragment, p_shared)
                     for j_s, j_v in T.Parallel(block_S, block_DV):
                         o_fragment[j_s, j_v] *= scale * g_exp_shared[j_s]
