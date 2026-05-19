@@ -306,23 +306,19 @@ def tilelang_kkt_solve(
             T.set_max_nreg(PRODUCER_NREG, 0)
 
             if tx < 128 + 32:
-                # Load K + b on the same warp. Both feed ``data_is_ready``
-                # so the consumer can launch the GEMM immediately on entry.
-                if right <= seq_end_idx:
-                    T.copy(k[bb, left:right, bhg, 0:DK], k_shared)
-                    for j_s in T.Parallel(block_S):
+                # Use explicit dynamic-index loads. A dynamic global slice
+                # copy with `left:right` can fail TileLang layout inference in
+                # the single varlen kernel.
+                for j_s, j_k in T.Parallel(block_S, DK):
+                    if left + j_s < seq_end_idx:
+                        k_shared[j_s, j_k] = k[bb, left + j_s, bhg, j_k]
+                    else:
+                        k_shared[j_s, j_k] = 0
+                for j_s in T.Parallel(block_S):
+                    if left + j_s < seq_end_idx:
                         b_shared[j_s] = b[bb, left + j_s, bh]
-                else:
-                    for j_s, j_k in T.Parallel(block_S, DK):
-                        if left + j_s < seq_end_idx:
-                            k_shared[j_s, j_k] = k[bb, left + j_s, bhg, j_k]
-                        else:
-                            k_shared[j_s, j_k] = 0
-                    for j_s in T.Parallel(block_S):
-                        if left + j_s < seq_end_idx:
-                            b_shared[j_s] = b[bb, left + j_s, bh]
-                        else:
-                            b_shared[j_s] = 0
+                    else:
+                        b_shared[j_s] = 0
 
                 T.barrier_arrive(data_is_ready)
 
@@ -335,12 +331,9 @@ def tilelang_kkt_solve(
                 # while making the masked path run on 96 threads instead
                 # of 64.
                 T.barrier_wait(a_is_ready, 0)
-                if right <= seq_end_idx:
-                    T.copy(a64_shared, a[bb, left:right, bh, 0:block_S])
-                else:
-                    for j_s, j_t in T.Parallel(block_S, block_S):
-                        if left + j_s < seq_end_idx:
-                            a[bb, left + j_s, bh, j_t] = a64_shared[j_s, j_t]
+                for j_s, j_t in T.Parallel(block_S, block_S):
+                    if left + j_s < seq_end_idx:
+                        a[bb, left + j_s, bh, j_t] = a64_shared[j_s, j_t]
 
     @T.prim_func
     def tilelang_kkt_solve_kernel(
