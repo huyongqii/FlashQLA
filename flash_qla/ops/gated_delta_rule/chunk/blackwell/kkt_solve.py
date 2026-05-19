@@ -275,14 +275,16 @@ def tilelang_kkt_solve(
             T.mbarrier_wait_parity(mma_mbar, 0)
             T.copy(a64_tmem, a64_fragment)
 
-            # A <- I + StrictLower(b * A)
+            # A <- I + StrictLower(b * A). Keep this as one pass over A:
+            # the solve kernel is small enough that an extra 64x64 elementwise
+            # sweep shows up in profiles.
             for j_s, j_t in T.Parallel(block_S, block_S):
-                a64_fragment[j_s, j_t] *= b_shared[j_s]
-            for j_s, j_t in T.Parallel(block_S, block_S):
-                if j_s < j_t:
-                    a64_fragment[j_s, j_t] = 0
+                if j_s > j_t:
+                    a64_fragment[j_s, j_t] *= b_shared[j_s]
                 elif j_s == j_t:
                     a64_fragment[j_s, j_t] = 1
+                else:
+                    a64_fragment[j_s, j_t] = 0
 
             _invert_64x64_lower_tri(
                 block_S,
@@ -454,12 +456,12 @@ def tilelang_kkt_solve_fixed_fast(
             T.mbarrier_wait_parity(mma_mbar, 0)
             T.copy(a64_tmem, a64_fragment)
             for j_s, j_t in T.Parallel(block_S, block_S):
-                a64_fragment[j_s, j_t] *= b_shared[j_s]
-            for j_s, j_t in T.Parallel(block_S, block_S):
-                if j_s < j_t:
-                    a64_fragment[j_s, j_t] = 0
+                if j_s > j_t:
+                    a64_fragment[j_s, j_t] *= b_shared[j_s]
                 elif j_s == j_t:
                     a64_fragment[j_s, j_t] = 1
+                else:
+                    a64_fragment[j_s, j_t] = 0
 
             _invert_64x64_lower_tri(
                 block_S,

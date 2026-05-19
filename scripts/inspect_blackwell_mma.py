@@ -271,13 +271,28 @@ def main() -> int:
     if len(hits) > args.limit:
         print(f"... omitted {len(hits) - args.limit} hits; increase --limit to show more")
 
-    if any(has_tcgen for _, has_tcgen, _, _, _ in hits):
-        print("RESULT: Blackwell tensor core instructions detected.")
+    any_tcgen = any(has_tcgen for _, has_tcgen, _, _, _ in hits)
+    any_wgmma = any(has_wgmma for _, _, has_wgmma, _, _ in hits)
+    any_hmma = any(has_hmma for _, _, _, has_hmma, _ in hits)
+    any_tmem = any(has_tmem for _, _, _, _, has_tmem in hits)
+
+    if any_tcgen and any_hmma:
+        suffix = "+TMEM" if any_tmem else ""
+        print(
+            "RESULT: mixed Blackwell tcgen05"
+            f"{suffix} and legacy HMMA instructions detected. This is expected "
+            "when part of the kernel intentionally uses T.gemm/HMMA while the "
+            "main Blackwell accumulators still use TCGEN05/TMEM."
+        )
         return 0
-    if any(has_wgmma for _, _, has_wgmma, _, _ in hits):
+    if any_tcgen:
+        suffix = "+TMEM" if any_tmem else ""
+        print(f"RESULT: Blackwell tcgen05{suffix} instructions detected.")
+        return 0
+    if any_wgmma:
         print("RESULT: Hopper WGMMA instructions detected; Blackwell-native path is missing.")
         return 2
-    if any(has_hmma for _, _, _, has_hmma, _ in hits):
+    if any_hmma:
         print(
             "RESULT: legacy HMMA instructions detected; Blackwell-native "
             "tcgen05/TMEM path is missing."
