@@ -526,8 +526,6 @@ def tilelang_prepare_h_cp_v2(
     store_final_correction,
     use_fallback_mask,
     is_varlen,
-    debug_skip_ht=False,
-    debug_skip_mt=False,
 ):
     batch_size = T.dynamic("batch_size")
     num_tokens = T.dynamic("num_tokens")
@@ -841,6 +839,8 @@ def tilelang_prepare_h_cp_v3(
     store_final_correction,
     use_fallback_mask,
     is_varlen,
+    debug_skip_ht=False,
+    debug_skip_mt=False,
 ):
     batch_size = T.dynamic("batch_size")
     num_tokens = T.dynamic("num_tokens")
