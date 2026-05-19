@@ -634,8 +634,9 @@ def fused_gdr_fwd(
     o = torch.empty_like(v)
 
     block_DV = _select_block_dv(real_batch_size, H)
-    if is_cp and block_DV > 64:
-        block_DV = 64
+    _override = os.environ.get("FLASHQLA_BLOCK_DV", "")
+    if _override:
+        block_DV = int(_override)
     if block_DV not in (32, 64, 128):
         raise ValueError(
             f"Blackwell native fwd selected invalid block_DV={block_DV}"
@@ -650,7 +651,8 @@ def fused_gdr_fwd(
         has_ragged_tail = bool((seqlens % chunk_size != 0).any().item())
     _debug(
         f"threads={num_threads} block_DV={block_DV} tmem_width={tmem_width} "
-        f"ragged_tail={has_ragged_tail}"
+        f"batch={batch_size} real_batch={real_batch_size} raw_batch={raw_batch_size} "
+        f"is_cp={is_cp} ragged_tail={has_ragged_tail}"
     )
     tilelang_fused_chunk_gdr_fwd_kernel = tilelang_fused_chunk_gdr_fwd_blackwell_ag(
         H,
