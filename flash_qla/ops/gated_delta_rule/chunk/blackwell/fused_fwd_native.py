@@ -286,37 +286,24 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     T.barrier_arrive(bar_1)
 
                     T.barrier_wait(bar_1, i_s % 2)
-                    T.gemm(
-                        k_shared[stage, :, :],
-                        h_shared,
-                        u_fragment,
-                        clear_accum=True,
-                    )
+                    # PERF EXPERIMENT 5: kill cons-V's two GEMMs and the
+                    # SMEM elementwise between them. cons-V is the last
+                    # suspect after S and O have been ruled out. If gdr
+                    # drops materially, cons-V is the bottleneck. Result
+                    # is intentionally wrong.
+                    T.clear(u_fragment)
+                    # T.gemm(k, h, u_fragment, clear_accum=True)
 
-                    # Move wait bar_3 up: it overlaps with the GEMM's commit
-                    # window. The v_shared elementwise below implicitly
-                    # waits on u_fragment, so the wait does not delay it.
-                    # cons-O now arrives bar_3 right after a_shared writes
-                    # (before T.copy(p, p_shared)), so this wait is even
-                    # more likely to be already-arrived by the time we hit it.
                     T.barrier_wait(bar_3, i_s % 2)
 
-                    # In-place: v_new = v - g_exp * u, written back to
-                    # v_shared so the next GEMM can use it as B operand.
-                    # NOTE: this is the SMEM RAW path; Step E (fragment B)
-                    # broke correctness and was reverted.
-                    for j_s, j_v in T.Parallel(block_S, block_DV):
-                        v_shared[stage, j_s, j_v] = (
-                            v_shared[stage, j_s, j_v]
-                            - g_exp_shared[j_s] * u_fragment[j_s, j_v]
-                        )
+                    # for j_s, j_v in T.Parallel(block_S, block_DV):
+                    #     v_shared[stage, j_s, j_v] = (
+                    #         v_shared[stage, j_s, j_v]
+                    #         - g_exp_shared[j_s] * u_fragment[j_s, j_v]
+                    #     )
 
-                    T.gemm(
-                        a_shared[stage, :, :],
-                        v_shared[stage, :, :],
-                        v_fragment,
-                        clear_accum=True,
-                    )
+                    T.clear(v_fragment)
+                    # T.gemm(a, v, v_fragment, clear_accum=True)
 
                     # Write vd_shared first (un-scaled v), arrive bar_4 ASAP
                     # so consumer-O can start O += P @ Vd in parallel.
@@ -537,24 +524,17 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
 
                         T.barrier_arrive(bar_0)
                         T.barrier_wait(bar_0, i_s % 2)
-                        # PERF EXPERIMENT 4: skip the per-chunk HBM store of
-                        # o_shared. cons-O's wait bar_5 (which gates the
-                        # next iter) is currently held back by this 16KB
-                        # HBM write. If gdr time drops materially with this
-                        # store removed, the per-chunk HBM store-back is
-                        # the real critical path. Result is intentionally
-                        # wrong.
-                        # if i_s > 0 and store_o:
-                        #     T.copy(
-                        #         o_shared,
-                        #         o[
-                        #             batch_idx,
-                        #             left:right,
-                        #             bh,
-                        #             bv * block_DV : (bv + 1) * block_DV,
-                        #         ],
-                        #         coalesced_width=8,
-                        #     )
+                        if i_s > 0 and store_o:
+                            T.copy(
+                                o_shared,
+                                o[
+                                    batch_idx,
+                                    left:right,
+                                    bh,
+                                    bv * block_DV : (bv + 1) * block_DV,
+                                ],
+                                coalesced_width=8,
+                            )
                         T.barrier_arrive(bar_5)
 
                     seq_split_idx = seq_start_idx + (num_iters - 1) * block_S
