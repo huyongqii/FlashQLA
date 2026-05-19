@@ -119,6 +119,9 @@ def _calc_cp_seqs(
             seq_map_c2r.append(i)
         seq_map_r2c.append(len(cp_cu_seqlens))
     cp_cu_seqlens.append(raw_cu_seqlens[-1])
+    max_cp_segments = max(
+        seq_map_r2c[i + 1] - seq_map_r2c[i] for i in range(raw_batch_size)
+    )
 
     # Disable CP when B * H naturally saturates SM occupancy.
     # For varlen inputs, use `total_chunks / max_seq_chunks` as effective B,
@@ -167,7 +170,7 @@ def _calc_cp_seqs(
     else:
         cp_cu_seqlens, seq_map_r2c, ht_mask = None, None, None
 
-    return use_cp, cp_cu_seqlens, seq_map_r2c, seq_map_c2r, ht_mask
+    return use_cp, cp_cu_seqlens, seq_map_r2c, seq_map_c2r, ht_mask, max_cp_segments
 
 
 def intra_card_cp_preprocess(
@@ -194,7 +197,14 @@ def intra_card_cp_preprocess(
             device_idx = torch.cuda.current_device()
         raw_cu_seqlens = _create_cu_seqlens(batch_size, num_tokens, device_idx)
 
-    use_cp, cp_cu_seqlens, seq_map_r2c, seq_map_c2r, ht_mask = _calc_cp_seqs(
+    (
+        use_cp,
+        cp_cu_seqlens,
+        seq_map_r2c,
+        seq_map_c2r,
+        ht_mask,
+        max_cp_segments,
+    ) = _calc_cp_seqs(
         raw_cu_seqlens,
         chunk_size,
         num_v_heads,
@@ -250,6 +260,7 @@ def intra_card_cp_preprocess(
         fallback_mask=fallback_mask,
         seq_map_r2c=seq_map_r2c,
         needs_correction=needs_correction,
+        max_cp_segments=max_cp_segments,
     )
 
     return cp_h0, cp_cu_seqlens, seq_map_c2r, raw_cu_seqlens
@@ -337,6 +348,7 @@ def _correct_cp_initial_states(
     fallback_mask: torch.Tensor,
     seq_map_r2c: torch.Tensor,
     needs_correction: bool,
+    max_cp_segments: int,
 ) -> torch.Tensor:
     if not needs_correction and correct_initial_states_no_fallback is not None:
         _debug_cp_log("correct_h0 path=no_fallback")
@@ -344,6 +356,7 @@ def _correct_cp_initial_states(
             raw_h0=raw_h0,
             ht_buffer=ht_buffer,
             seq_map_r2c=seq_map_r2c,
+            max_cp_segments=max_cp_segments,
         )
         _debug_cp_sync("correct_h0/no_fallback")
         return cp_h0
@@ -362,13 +375,23 @@ def _correct_cp_initial_states(
         )
 
     _debug_cp_log("correct_h0 path=tilelang_with_correction")
-    cp_h0 = correct_initial_states(
-        raw_h0=raw_h0,
-        ht_buffer=ht_buffer,
-        mt_buffer=mt_buffer,
-        fallback_mask=fallback_mask,
-        seq_map_r2c=seq_map_r2c,
-    )
+    if is_blackwell(_cc):
+        cp_h0 = correct_initial_states(
+            raw_h0=raw_h0,
+            ht_buffer=ht_buffer,
+            mt_buffer=mt_buffer,
+            fallback_mask=fallback_mask,
+            seq_map_r2c=seq_map_r2c,
+            max_cp_segments=max_cp_segments,
+        )
+    else:
+        cp_h0 = correct_initial_states(
+            raw_h0=raw_h0,
+            ht_buffer=ht_buffer,
+            mt_buffer=mt_buffer,
+            fallback_mask=fallback_mask,
+            seq_map_r2c=seq_map_r2c,
+        )
     _debug_cp_sync("correct_h0/with_correction")
     return cp_h0
 

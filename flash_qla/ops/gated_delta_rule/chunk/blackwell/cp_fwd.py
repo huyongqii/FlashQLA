@@ -227,13 +227,15 @@ def correct_initial_states_no_fallback(
     | None,  # [raw_batch_size, num_v_heads, k_head_dim, v_head_dim]
     ht_buffer: torch.Tensor,  # [cp_batch_size, num_v_heads, k_head_dim, v_head_dim]
     seq_map_r2c: torch.Tensor,  # [raw_batch_size + 1]
+    max_cp_segments: int | None = None,
 ):
     cp_batch_size, num_heads, k_head_dim, v_head_dim = ht_buffer.shape
     assert k_head_dim == v_head_dim == 128
-    max_cp_segments = max(
-        1,
-        int((seq_map_r2c[1:] - seq_map_r2c[:-1]).max().item()),
-    )
+    if max_cp_segments is None:
+        max_cp_segments = max(
+            1,
+            int((seq_map_r2c[1:] - seq_map_r2c[:-1]).max().item()),
+        )
 
     if raw_h0 is None:
         res_dtype = torch.float32
@@ -436,14 +438,16 @@ def correct_initial_states(
     mt_buffer: torch.Tensor,  # [cp_batch_size, num_v_heads, k_head_dim, k_head_dim]
     fallback_mask: torch.Tensor,  # [cp_batch_size, num_v_heads]
     seq_map_r2c: torch.Tensor,  # [raw_batch_size + 1]
+    max_cp_segments: int | None = None,
 ):
     cp_batch_size = fallback_mask.shape[0]
     _, num_heads, k_head_dim, v_head_dim = ht_buffer.shape
     assert k_head_dim == v_head_dim == 128
-    max_cp_segments = max(
-        1,
-        int((seq_map_r2c[1:] - seq_map_r2c[:-1]).max().item()),
-    )
+    if max_cp_segments is None:
+        max_cp_segments = max(
+            1,
+            int((seq_map_r2c[1:] - seq_map_r2c[:-1]).max().item()),
+        )
 
     if raw_h0 is None:
         res_dtype = torch.float32
