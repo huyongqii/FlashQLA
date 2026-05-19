@@ -81,12 +81,6 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
     num_tokens = T.dynamic("num_tokens")
     block_S = chunk_size
 
-    # Commit 1: TMEM path for cons-V's u/v accumulators. tcgen05_gemm
-    # requires N >= 64 for bf16 inputs / fp32 accum, so fall back to the
-    # legacy T.gemm + register-fragment path when block_DV == 32 (the
-    # under-filled-grid case).
-    use_tmem_v = block_DV >= 64
-
     if is_varlen:
         q_shape = (1, num_tokens, Hg, DK)
         k_shape = (1, num_tokens, Hg, DK)
@@ -189,14 +183,6 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
             bar_4 = T.alloc_barrier(arrive_count=128)
             bar_5 = T.alloc_barrier(arrive_count=416)
 
-            # Commit 1: cons-V's u and v accumulators move to TMEM.
-            # Each tcgen05_gemm needs its own completion mbarrier with
-            # arrive_count=1 (one issue per iter, signaled by hw).
-            # Only allocated on the TMEM path (block_DV >= 64).
-            if use_tmem_v:
-                u_mbar = T.alloc_barrier(arrive_count=1)
-                v_mbar = T.alloc_barrier(arrive_count=1)
-
             T.use_swizzle(10)
             tx = T.get_thread_binding()
 
@@ -263,14 +249,8 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
 
             elif tx < 256:
                 T.set_max_nreg(CONSUMER_V_NREG, 1)
-                # Commit 1: u/v accumulators live in TMEM when block_DV >= 64
-                # (tcgen05 N >= 64 requirement). Fall back to register
-                # fragments otherwise.
                 u_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
                 v_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
-                if use_tmem_v:
-                    u_tmem = T.alloc_tmem((block_S, block_DV), dtype=accum_dtype)
-                    v_tmem = T.alloc_tmem((block_S, block_DV), dtype=accum_dtype)
 
                 for i_s in T.serial(num_iters):
                     stage = i_s % num_stages
