@@ -26,7 +26,6 @@ def _alloc_inversion_buffers(block_S, accum_dtype, qkva_dtype):
         a16i_shared=T.alloc_shared((4, 17, 16), dtype=accum_dtype),
         a16o_shared=T.alloc_shared((2, 17, 16), dtype=accum_dtype),
         a16o_fragment=T.alloc_fragment((2, 16, 16), dtype=accum_dtype),
-        a32i_fragment=T.alloc_fragment((2, 32, 32), dtype=accum_dtype),
         a32i0_shared=T.alloc_shared((32, 32), dtype=accum_dtype),
         a32i1_shared=T.alloc_shared((32, 32), dtype=accum_dtype),
         a32o_shared=T.alloc_shared((32, 32), dtype=accum_dtype),
@@ -71,7 +70,6 @@ def _invert_64x64_lower_tri(block_S, bufs):
     a16i_shared = bufs["a16i_shared"]
     a16o_shared = bufs["a16o_shared"]
     a16o_fragment = bufs["a16o_fragment"]
-    a32i_fragment = bufs["a32i_fragment"]
     a32i0_shared = bufs["a32i0_shared"]
     a32i1_shared = bufs["a32i1_shared"]
     a32o_shared = bufs["a32o_shared"]
@@ -125,23 +123,25 @@ def _invert_64x64_lower_tri(block_S, bufs):
             )
     T.copy(a16o_fragment, a16o_shared[:, 0:16, 0:16])
 
-    # Pack the two 32x32 inverses into a32i0_shared / a32i1_shared.
-    for j_s, k_s, k_t in T.Parallel(2, 32, 32):
+    # Pack the two 32x32 inverses directly into a32i0_shared / a32i1_shared.
+    # Skipping the previous fragment round-trip saves ~8KB of register file
+    # per warpgroup; ``a32i?_shared`` are pure-shared and the GEMMs below
+    # only consume them, so this is safe. Three mutually-exclusive passes
+    # mirror the original layout (upper-right zero / lower-left from a16o /
+    # diagonal from a16i) so each ``T.Parallel`` body remains a single
+    # straight-line write.
+    for k_s, k_t in T.Parallel(32, 32):
         if k_s < 16 and k_t >= 16:
-            a32i_fragment[j_s, k_s, k_t] = 0
-    for j_s, k_s, k_t in T.Parallel(2, 32, 32):
+            a32i0_shared[k_s, k_t] = 0
+            a32i1_shared[k_s, k_t] = 0
+    for k_s, k_t in T.Parallel(32, 32):
         if k_s >= 16 and k_t < 16:
-            a32i_fragment[j_s, k_s, k_t] = a16o_shared[j_s, k_s - 16, k_t]
-    for j_s, k_s, k_t in T.Parallel(2, 32, 32):
+            a32i0_shared[k_s, k_t] = a16o_shared[0, k_s - 16, k_t]
+            a32i1_shared[k_s, k_t] = a16o_shared[1, k_s - 16, k_t]
+    for k_s, k_t in T.Parallel(32, 32):
         if k_s // 16 == k_t // 16:
-            a32i_fragment[j_s, k_s, k_t] = a16i_shared[
-                j_s * 2 + k_s // 16, k_s % 16, k_t % 16
-            ]
-    for j_s, k_s, k_t in T.Parallel(2, 32, 32):
-        if j_s == 0:
-            a32i0_shared[k_s, k_t] = a32i_fragment[j_s, k_s, k_t]
-        else:
-            a32i1_shared[k_s, k_t] = a32i_fragment[j_s, k_s, k_t]
+            a32i0_shared[k_s, k_t] = a16i_shared[k_s // 16, k_s % 16, k_t % 16]
+            a32i1_shared[k_s, k_t] = a16i_shared[2 + k_s // 16, k_s % 16, k_t % 16]
 
     # Second-level 1x32x32. The small FP32 32x32 solves are not a supported
     # TCGEN05 operand pattern in TileLang 0.1.9, but hand-unrolled CUDA-core
@@ -153,8 +153,14 @@ def _invert_64x64_lower_tri(block_S, bufs):
     T.gemm(a32o_shared, a32i0_shared, a32o_fragment, clear_accum=True)
 
     # Combine the four 32x32 blocks into the final 64x64 inverse.
-    for j_s, k_s, k_t in T.Parallel(2, 32, 32):
-        a64_shared[j_s * 32 + k_s, j_s * 32 + k_t] = a32i_fragment[j_s, k_s, k_t]
+    #   * top-left  (rows 0..31,  cols 0..31)  <- a32i0_shared
+    #   * bot-right (rows 32..63, cols 32..63) <- a32i1_shared
+    #   * bot-left  (rows 32..63, cols 0..31)  <- a32o_fragment (last gemm)
+    #   * top-right (rows 0..31,  cols 32..63) <- 0
+    for k_s, k_t in T.Parallel(32, 32):
+        a64_shared[k_s, k_t] = a32i0_shared[k_s, k_t]
+    for k_s, k_t in T.Parallel(32, 32):
+        a64_shared[32 + k_s, 32 + k_t] = a32i1_shared[k_s, k_t]
     for k_s, k_t in T.Parallel(32, 32):
         a64_shared[32 + k_s, k_t] = a32o_fragment[k_s, k_t]
     for k_s, k_t in T.Parallel(32, 32):
@@ -210,7 +216,11 @@ def tilelang_kkt_solve(
         a64_fragment = bufs["a64_fragment"]
         a64_shared = bufs["a64_shared"]
 
-        k_is_ready = T.alloc_barrier(arrive_count=32)
+        # ``data_is_ready`` is published by the K-load producer warp once
+        # both ``k_shared`` and ``b_shared`` are populated, so the consumer
+        # can fire ``tcgen05_gemm`` immediately on entry without first
+        # going through a serial b-load.
+        data_is_ready = T.alloc_barrier(arrive_count=32)
         a_is_ready = T.alloc_barrier(arrive_count=128)
         mma_mbar = T.alloc_barrier(arrive_count=1)
 
@@ -222,18 +232,7 @@ def tilelang_kkt_solve(
         if tx < 128:
             T.set_max_nreg(CONSUMER_NREG, 1)
 
-            # Load b
-            if right <= seq_end_idx:
-                for j_s in T.Parallel(block_S):
-                    b_shared[j_s] = b[bb, left + j_s, bh]
-            else:
-                for j_s in T.Parallel(block_S):
-                    if left + j_s < seq_end_idx:
-                        b_shared[j_s] = b[bb, left + j_s, bh]
-                    else:
-                        b_shared[j_s] = 0
-
-            T.barrier_wait(k_is_ready, 0)
+            T.barrier_wait(data_is_ready, 0)
 
             # A = K @ K^T (TCGEN05 / TMEM)
             T.tcgen05_gemm(
@@ -264,17 +263,25 @@ def tilelang_kkt_solve(
             T.set_max_nreg(PRODUCER_NREG, 0)
 
             if tx < 128 + 32:
-                # Load K
+                # Load K + b on the same warp. Both feed ``data_is_ready``
+                # so the consumer can launch the GEMM immediately on entry.
                 if right <= seq_end_idx:
                     T.copy(k[bb, left:right, bhg, 0:DK], k_shared)
+                    for j_s in T.Parallel(block_S):
+                        b_shared[j_s] = b[bb, left + j_s, bh]
                 else:
                     for j_s, j_k in T.Parallel(block_S, DK):
                         if left + j_s < seq_end_idx:
                             k_shared[j_s, j_k] = k[bb, left + j_s, bhg, j_k]
                         else:
                             k_shared[j_s, j_k] = 0
+                    for j_s in T.Parallel(block_S):
+                        if left + j_s < seq_end_idx:
+                            b_shared[j_s] = b[bb, left + j_s, bh]
+                        else:
+                            b_shared[j_s] = 0
 
-                T.barrier_arrive(k_is_ready)
+                T.barrier_arrive(data_is_ready)
 
             else:
                 # The remaining 96 producer threads jointly store A back
