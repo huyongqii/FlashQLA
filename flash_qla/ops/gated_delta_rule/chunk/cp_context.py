@@ -172,22 +172,76 @@ def intra_card_cp_preprocess(
     if not use_cp:
         return raw_h0, raw_cu_seqlens, None, None
 
+    warmup_threshold = _resolve_warmup_threshold(warmup_threshold)
+    num_warmup_chunks, fallback_mask = _select_warmup_chunks(
+        g=g,
+        cp_cu_seqlens=cp_cu_seqlens,
+        ht_mask=ht_mask,
+        chunk_size=chunk_size,
+        warmup_threshold=warmup_threshold,
+    )
+    needs_correction = bool(fallback_mask.any().item())
+
+    ht, mt = _prepare_cp_buffers(
+        k=k,
+        v=v,
+        a=a,
+        g=g,
+        b=b,
+        cu_seqlens=cp_cu_seqlens,
+        num_warmup_chunks=num_warmup_chunks,
+        fallback_mask=fallback_mask,
+        needs_correction=needs_correction,
+    )
+
+    cp_h0 = _correct_cp_initial_states(
+        raw_h0=raw_h0,
+        ht_buffer=ht,
+        mt_buffer=mt,
+        fallback_mask=fallback_mask,
+        seq_map_r2c=seq_map_r2c,
+        needs_correction=needs_correction,
+    )
+
+    return cp_h0, cp_cu_seqlens, seq_map_c2r, raw_cu_seqlens
+
+
+def _resolve_warmup_threshold(warmup_threshold: float) -> float:
     threshold_env = os.environ.get("FLASHQLA_CP_WARMUP_THRESHOLD", "").strip()
     if threshold_env:
         warmup_threshold = float(threshold_env)
-    exact_cp = os.environ.get("FLASHQLA_CP_EXACT", "") == "1"
-    if exact_cp:
-        warmup_threshold = float("-inf")
+    if os.environ.get("FLASHQLA_CP_EXACT", "") == "1":
+        return float("-inf")
+    return warmup_threshold
 
-    num_warmup_chunks, fallback_mask = get_warmup_chunks(
+
+def _select_warmup_chunks(
+    g: torch.Tensor,
+    cp_cu_seqlens: torch.Tensor,
+    ht_mask: torch.Tensor,
+    chunk_size: int,
+    warmup_threshold: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return get_warmup_chunks(
         g=g,
         cu_seqlens=cp_cu_seqlens,
         ht_mask=ht_mask,
         chunk_size=chunk_size,
         threshold=warmup_threshold,
-    )  # [cp_batch_size, num_v_heads]
-    needs_correction = bool(fallback_mask.any().item())
+    )
 
+
+def _prepare_cp_buffers(
+    k: torch.Tensor,
+    v: torch.Tensor,
+    a: torch.Tensor,
+    g: torch.Tensor,
+    b: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    num_warmup_chunks: torch.Tensor,
+    fallback_mask: torch.Tensor,
+    needs_correction: bool,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
     fwd_h_kwargs = dict(
         k=k,
         v=v,
@@ -197,38 +251,55 @@ def intra_card_cp_preprocess(
         initial_state=None,
         output_final_state=True,
         output_h=False,
-        cu_seqlens=cp_cu_seqlens,
+        cu_seqlens=cu_seqlens,
         num_warmup_chunks=num_warmup_chunks,
     )
     if is_blackwell(_cc):
+        # When correction is needed, fused_gdr_h intentionally falls back to the
+        # original prepare_h kernel that computes ht and mt in one launch.
         fwd_h_kwargs["output_correction"] = needs_correction
         fwd_h_kwargs["fallback_mask"] = fallback_mask
+
     _, ht, mt = fused_gdr_h(**fwd_h_kwargs)
+    if needs_correction and mt is None:
+        raise RuntimeError("CP correction needs mt, but fused_gdr_h did not return it")
+    return ht, mt
 
+
+def _correct_cp_initial_states(
+    raw_h0: torch.Tensor | None,
+    ht_buffer: torch.Tensor,
+    mt_buffer: torch.Tensor | None,
+    fallback_mask: torch.Tensor,
+    seq_map_r2c: torch.Tensor,
+    needs_correction: bool,
+) -> torch.Tensor:
     if not needs_correction and correct_initial_states_no_fallback is not None:
-        cp_h0 = correct_initial_states_no_fallback(
+        return correct_initial_states_no_fallback(
             raw_h0=raw_h0,
-            ht_buffer=ht,
+            ht_buffer=ht_buffer,
             seq_map_r2c=seq_map_r2c,
         )
-    elif os.environ.get("FLASHQLA_CP_CORRECT_H0_TORCH", "") == "1":
-        cp_h0 = _correct_initial_states_torch(
+
+    if mt_buffer is None:
+        raise RuntimeError("CP correction needs mt_buffer")
+
+    if os.environ.get("FLASHQLA_CP_CORRECT_H0_TORCH", "") == "1":
+        return _correct_initial_states_torch(
             raw_h0=raw_h0,
-            ht_buffer=ht,
-            mt_buffer=mt,
-            fallback_mask=fallback_mask,
-            seq_map_r2c=seq_map_r2c,
-        )
-    else:
-        cp_h0 = correct_initial_states(
-            raw_h0=raw_h0,
-            ht_buffer=ht,
-            mt_buffer=mt,
+            ht_buffer=ht_buffer,
+            mt_buffer=mt_buffer,
             fallback_mask=fallback_mask,
             seq_map_r2c=seq_map_r2c,
         )
 
-    return cp_h0, cp_cu_seqlens, seq_map_c2r, raw_cu_seqlens
+    return correct_initial_states(
+        raw_h0=raw_h0,
+        ht_buffer=ht_buffer,
+        mt_buffer=mt_buffer,
+        fallback_mask=fallback_mask,
+        seq_map_r2c=seq_map_r2c,
+    )
 
 
 def _correct_initial_states_torch(
