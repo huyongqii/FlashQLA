@@ -606,6 +606,8 @@ def tilelang_prepare_h_cp(
             data_loaded = T.alloc_barrier(arrive_count=384)
             bar_1 = T.alloc_barrier(arrive_count=256)
             bar_2 = T.alloc_barrier(arrive_count=384)
+            if store_final_correction:
+                state_ready = T.alloc_barrier(arrive_count=128)
             iter_done = T.alloc_barrier(arrive_count=384)
 
             T.use_swizzle(10)
@@ -670,6 +672,8 @@ def tilelang_prepare_h_cp(
                         transpose_A=True,
                         clear_accum=False,
                     )
+                    if store_final_correction:
+                        T.barrier_arrive(state_ready)
                     T.barrier_arrive(iter_done)
 
                 T.copy(
@@ -724,6 +728,7 @@ def tilelang_prepare_h_cp(
 
                     if store_final_correction:
                         if calc_mt:
+                            T.barrier_wait(state_ready, i_s % 2)
                             g_prod_M[0] += g_shared[block_S - 1]
                             T.copy(m_fragment, m_shared)
                             T.gemm(
