@@ -447,13 +447,12 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                                 g_shared[stage, j_s] = g[batch_idx, left + j_s, bh]
                         else:
                             for j_s, j_t in T.Parallel(block_S, block_S):
-                                if left + j_s < seq_end_idx:
-                                    if left + j_t < seq_end_idx:
-                                        a_shared[stage, j_s, j_t] = a[
-                                            batch_idx, left + j_s, bh, j_t
-                                        ]
-                                    else:
-                                        a_shared[stage, j_s, j_t] = 0
+                                if (left + j_s < seq_end_idx) and (
+                                    left + j_t < seq_end_idx
+                                ):
+                                    a_shared[stage, j_s, j_t] = a[
+                                        batch_idx, left + j_s, bh, j_t
+                                    ]
                                 else:
                                     a_shared[stage, j_s, j_t] = 0
                             for j_s in T.Parallel(block_S):
