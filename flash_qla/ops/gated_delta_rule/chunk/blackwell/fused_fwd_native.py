@@ -213,6 +213,15 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
             # allocation beyond that pool — causing a hard hang on SM100.
             _disable_wg_reg = os.environ.get("FLASHQLA_DISABLE_WG_REG", "0") == "1"
 
+            # Feasibility-check knob: skip all of cons-O's compute (Q@K^T,
+            # Q@H, P-postprocess, P@Vd, o_shared write) while keeping every
+            # barrier_wait / barrier_arrive intact so the rest of the pipeline
+            # still drains correctly. Used to measure how much of the 5 µs
+            # per-chunk steady state is attributable to cons-O work; if
+            # per_chunk drops to ~2 µs with this on, an FLA-style kernel
+            # split (H-only fused + separate O kernel) is justified.
+            _cons_o_noop = os.environ.get("FLASHQLA_CONS_O_NOOP", "0") == "1"
+
             num_iters = T.ceildiv(seq_end_idx - seq_start_idx, block_S)
             if max_iters > 0 and num_iters > max_iters:
                 num_iters = max_iters
@@ -387,35 +396,48 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     # keep it in a fragment instead of round-tripping through
                     # TMEM. TMEM is more useful for the long-lived O/H/UV
                     # accumulators below.
-                    T.gemm(
-                        q_shared[stage, :, :],
-                        k_shared[stage, :, :],
-                        p_fragment,
-                        transpose_B=True,
-                        clear_accum=True,
-                    )
+                    if not _cons_o_noop:
+                        T.gemm(
+                            q_shared[stage, :, :],
+                            k_shared[stage, :, :],
+                            p_fragment,
+                            transpose_B=True,
+                            clear_accum=True,
+                        )
 
                     # O tile is only consumed by scalar postprocess and one
                     # short P@Vd accumulation, so keep it in a fragment.
                     T.barrier_wait(bar_1, i_s % 2)
-                    T.gemm(
-                        q_shared[stage, :, :],
-                        h_shared,
-                        o_fragment,
-                        clear_accum=True,
-                    )
-                    # ---- P scalar post-processing ----
-                    for j_s, j_t in T.Parallel(block_S, block_S):
-                        if j_s >= j_t:
-                            decay_local[0] = (
-                                g_exp_shared[j_s] * g_inv_exp_shared[j_t]
-                            )
-                            p_fragment[j_s, j_t] *= scale * decay_local[0]
-                            a_shared[stage, j_s, j_t] *= decay_local[0]
-                            a_shared[stage, j_s, j_t] *= b_shared[stage, j_t]
-                        else:
-                            p_fragment[j_s, j_t] = 0
-                            a_shared[stage, j_s, j_t] = 0
+                    if not _cons_o_noop:
+                        T.gemm(
+                            q_shared[stage, :, :],
+                            h_shared,
+                            o_fragment,
+                            clear_accum=True,
+                        )
+                        # ---- P scalar post-processing ----
+                        for j_s, j_t in T.Parallel(block_S, block_S):
+                            if j_s >= j_t:
+                                decay_local[0] = (
+                                    g_exp_shared[j_s] * g_inv_exp_shared[j_t]
+                                )
+                                p_fragment[j_s, j_t] *= scale * decay_local[0]
+                                a_shared[stage, j_s, j_t] *= decay_local[0]
+                                a_shared[stage, j_s, j_t] *= b_shared[stage, j_t]
+                            else:
+                                p_fragment[j_s, j_t] = 0
+                                a_shared[stage, j_s, j_t] = 0
+                    else:
+                        # NO-OP variant: cons-V still reads a_shared in this
+                        # iter to do its big GEMM. We still must zero-fill
+                        # the upper triangle (j_s < j_t) so that GEMM result
+                        # is well-defined; otherwise we'd inject garbage into
+                        # the H recurrence and skew the timing measurement.
+                        # Skip the multiplications by g_exp / b — those are
+                        # the actual work we're trying to elide.
+                        for j_s, j_t in T.Parallel(block_S, block_S):
+                            if j_s < j_t:
+                                a_shared[stage, j_s, j_t] = 0
 
                     # arrive bar_3 ASAP: cons-V only needs a_shared's writes
                     # (done above), it does NOT read p_shared. Releasing
@@ -424,22 +446,25 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     # the SMEM store + elementwise here.
                     T.barrier_arrive(bar_3)
 
-                    T.copy(p_fragment, p_shared)
+                    if not _cons_o_noop:
+                        T.copy(p_fragment, p_shared)
 
-                    for j_s, j_v in T.Parallel(block_S, block_DV):
-                        o_fragment[j_s, j_v] *= scale * g_exp_shared[j_s]
+                        for j_s, j_v in T.Parallel(block_S, block_DV):
+                            o_fragment[j_s, j_v] *= scale * g_exp_shared[j_s]
 
                     T.barrier_wait(bar_4, i_s % 2)
-                    T.gemm(
-                        p_shared,
-                        vd_shared,
-                        o_fragment,
-                        clear_accum=False,
-                    )
+                    if not _cons_o_noop:
+                        T.gemm(
+                            p_shared,
+                            vd_shared,
+                            o_fragment,
+                            clear_accum=False,
+                        )
                     T.barrier_arrive(bar_5)
 
                     T.barrier_wait(bar_5, i_s % 2)
-                    T.copy(o_fragment, o_shared)
+                    if not _cons_o_noop:
+                        T.copy(o_fragment, o_shared)
 
                     T.barrier_arrive(data_is_free[stage])
 

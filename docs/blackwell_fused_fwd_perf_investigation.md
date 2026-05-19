@@ -217,19 +217,92 @@ python3 tests/test_gdr.py --set profile --nkh 8 --nvh 32 --skip-bwd
 
 ---
 
-## 9. Open questions / next directions
+## 9. Hypothesis 5: grid is the bottleneck — **DISPROVEN**
 
-The remaining gap (3.84 → 0.75 ms gdr) appears to require **grid-level changes**, not micro-tuning:
+After the `disable_wg_reg` win, re-ran a clean H-scan and a T-scan to verify whether the remaining 3.84 ms gap is from grid (small grid → SM idle) or from per-CTA work (SM saturated).
 
-1. **Grid is too small**. With `B=1, Hk=8, Hv=32, block_DV=32` we have 128 CTAs total. SM100 has 132 SMs. Single-wave kernel can't amortize per-CTA setup or hide cross-chunk latency.
-   - FLA's grid = `(V/BV) × N × HV` is 4–8× larger because it moves the chunk dimension into the grid via H-state separation.
-   - Possible mitigation: split the chunk loop across CTAs (à la stream-K) and pass H state via HBM (FLA-style).
+### Hv-scan (vary V-heads, hence vary grid)
+`B=1, Hk=8, T=32768`, with `_select_block_dv` auto-sized so `grid = Hv × ceildiv(DV, block_DV)`.
 
-2. **`tensor_cycles_active` is still only 12.44%**. The tensor pipe spends 87% of cycles idle. This suggests there's still serial dependency between GEMMs and the surrounding elementwise/SMEM traffic. Most plausible:
-   - TMEM read-back (`tcgen05.ld`) creates dependencies that current 1-CTA-per-SM occupancy can't hide.
-   - SMEM bank conflicts (LDS wavefront ratio 320M / 51M = 6.3× expected ≈ 1.57× extra over ideal 4-way).
+| Hv | est_grid | total fwd | ratio vs Hv=32 |
+|---|---|---|---|
+| 32 | 128 | 2.64 ms | 1.0× |
+| 64 | 256 | 3.46 ms | 1.31× |
+| 128 | 512 | **9.15 ms** | **3.47×** |
+| 256 | 1024 | **18.02 ms** | **6.83×** |
 
-3. **Hopper's win was free**. SM90's wgmma + register accumulator + cheap setmaxnreg made warp-spec pure upside. SM100 charges latency on TMEM accumulator read-back and synchronization on pool resize. **Any future SM100 fused kernel design should default to flat register allocation (`disable_warp_group_reg_alloc()`)** unless a specific test proves otherwise.
+**4× the work → 3.47× the time** (near-linear). The earlier H-scan that suggested "3-4× spare capacity" was an artifact of the `setmaxnreg` scheduling tax — not real headroom.
+
+After `disable_wg_reg`, the SM is **already saturated** by a single CTA per SM. Increasing grid linearly increases time — there's no slack to absorb extra CTAs.
+
+### T-scan (fix work/CTA, vary serial chunk loop)
+`B=1, Hk=8, Hv=32` — grid stays at 128 CTAs; only the serial chunk loop length changes.
+
+| T | NT | time | per_chunk |
+|---|---|---|---|
+| 4096 | 64 | 0.39 ms | 6.12 µs |
+| 8192 | 128 | 0.71 ms | 5.55 µs |
+| 16384 | 256 | 1.36 ms | 5.29 µs |
+| 32768 | 512 | 2.63 ms | 5.14 µs |
+| 65536 | 1024 | 5.20 ms | 5.07 µs |
+| 131072 | 2048 | 10.32 ms | **5.04 µs** |
+
+**Per-chunk time converges to 5.04 µs.** Short-sequence overhead (~1 µs from cumsum/solve startup) bleeds out as T grows; the steady state is the chunk-loop body.
+
+### Comparison with FLA
+| | per_chunk in chunk loop | what runs in chunk loop |
+|---|---|---|
+| FLA H-kernel | **1.46 µs** | 2 GEMM (`w@h`, `k^T @ v_new`) + 1 FMA (`h *= exp(g)`) |
+| FLA O-kernel | (separate kernel, large grid) | 3 GEMM + softmax (parallelizable across NT) |
+| **FlashQLA fused** | **5.04 µs** | 6 GEMM (`q@k^T`, `q@h`, `p@v_new`, `w@h`, `k^T@v_new`, plus aux) + softmax + all SMEM staging — **all serialised in the chunk loop** |
+
+Ratio: **5.04 / 1.46 ≈ 3.45×** — exactly matches the count of extra GEMM+staging that FlashQLA's fused architecture forces into the same serial chunk loop.
+
+### Root cause statement (final)
+
+> **The 5× gap to FLA on Blackwell is not an implementation bug — it is the cost of fusing the O computation into the H chunk loop. With the SM saturated (post-`disable_wg_reg`), every extra GEMM in the loop directly extends per-chunk time.**
+
+On Hopper, the SM was *not* saturated (because `wgmma` register accumulators + free `setmaxnreg` left scheduling headroom), so the fused architecture's extra work cost almost nothing — the SM hid it. On Blackwell, with `tcgen05` TMEM accumulators and `setmaxnreg` scheduling tax, the SM saturates with much smaller work, and the extra GEMMs now bill in full.
+
+---
+
+## 10. Two paths forward
+
+### Path A — FLA-style kernel split (architectural)
+Two kernels: H-only (chunk loop), O-only (chunk-parallel grid).
+- H kernel: only `w@h`, `k^T @ v_new`, `h *= exp(g)` — store h to HBM each chunk.
+- O kernel: grid = `(NT, B×Hv, V/BV)`, fully parallel across chunks.
+- Expected per-chunk in H: ~1.5 µs → total H ≈ 0.75 ms.
+- O kernel runs in parallel with no serial dependency.
+
+**Expected total fwd ≈ 1.5–1.8 ms** (FLA-equivalent).
+
+Cost: ~1–2 weeks of refactor. Loses some HBM-traffic saving from fusion (h has to round-trip through HBM).
+
+### Path B — keep fused, optimise per-chunk internals
+- Eliminate `vd_shared` / `vn_shared` SMEM round-trips.
+- Move some accumulators off TMEM back to registers.
+- Reduce LDS bank conflicts (current LDS wavefront ratio 320M / 51M ≈ 1.57× over ideal).
+
+**Optimistic floor: ~3.5–4 µs/chunk → total gdr ≈ 1.8–2.0 ms ≈ 0.5× FLA.**
+
+Cost: a few days, but ceiling is bounded by the 6-GEMM/chunk math.
+
+### Recommendation
+**Path A.** The math is decisive: per-chunk floor for any 6-GEMM fused chunk loop is fundamentally above FLA's 1.46 µs. Path B can close some of the 3.45× gap but cannot win.
+
+Before committing to Path A, run **the falsifiability experiment in §11**.
+
+---
+
+## 11. Feasibility check before committing to Path A
+
+Disable cons-O (skip `Q@H`, `P@V_new`, softmax, write-out) inside the existing fused kernel. Measure the resulting `per_chunk`.
+
+- If `per_chunk` drops from 5.04 µs to ~2.0–2.5 µs → Path A's expected floor (~1.5 µs after losing aux I/O) is reachable. **Commit to Path A.**
+- If `per_chunk` only drops to ~3.5–4 µs → cons-O is not the dominant cost. Re-evaluate before refactoring.
+
+This experiment costs ~30 minutes (one patch + one run) and decisively gates the architectural decision.
 
 ---
 
