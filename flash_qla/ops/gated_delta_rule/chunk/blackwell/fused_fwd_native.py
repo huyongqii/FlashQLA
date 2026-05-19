@@ -42,6 +42,7 @@ def _select_block_dv(real_batch_size: int, num_v_heads: int) -> int:
 @tilelang.jit(
     pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
+        tilelang.PassConfigKey.TL_DEVICE_COMPILE_FLAGS: ["--maxrregcount=168"],
     },
 )
 def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
