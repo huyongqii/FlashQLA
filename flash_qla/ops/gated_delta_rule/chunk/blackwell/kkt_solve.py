@@ -197,10 +197,9 @@ def tilelang_kkt_solve(
     b_dtype,
     seqlen_dtype,
 ):
-    # Generic varlen kernel. Used only when at least one sequence is not
-    # chunk-aligned, otherwise the caller dispatches to
-    # ``tilelang_kkt_solve_fixed_fast``. So this kernel does not need a
-    # non-varlen specialisation.
+    # Single Blackwell KKT path. Dense inputs are flattened by the caller and
+    # passed through synthetic cu_seqlens, so this kernel always observes the
+    # varlen layout: batch dim 0 contains all packed tokens.
     data_batch_size = T.dynamic("data_batch_size")
     real_batch_size = T.dynamic("real_batch_size")
     num_tokens = T.dynamic("num_tokens")
@@ -374,120 +373,6 @@ def tilelang_kkt_solve(
     return tilelang_kkt_solve_kernel
 
 
-@tilelang.jit(pass_configs=_PASS_CONFIGS)
-def tilelang_kkt_solve_fixed_fast(
-    H,
-    Hg,
-    DK,
-    chunk_size,
-    accum_dtype,
-    qkva_dtype,
-    b_dtype,
-):
-    data_batch_size = T.dynamic("data_batch_size")
-    num_tokens = T.dynamic("num_tokens")
-    block_S = chunk_size
-
-    k_shape = (data_batch_size, num_tokens, Hg, DK)
-    a_shape = (data_batch_size, num_tokens, H, chunk_size)
-    b_shape = (data_batch_size, num_tokens, H)
-
-    @T.prim_func
-    def tilelang_kkt_solve_fixed_fast_kernel(
-        k: T.Tensor(k_shape, dtype=qkva_dtype),
-        b: T.Tensor(b_shape, dtype=b_dtype),
-        a: T.Tensor(a_shape, dtype=qkva_dtype),
-        num_chunks: T.int32,
-    ):
-        with T.Kernel(num_chunks * H, threads=128) as (bch,):
-            bc, bh = bch // H, bch % H
-            bhg = bh // (H // Hg)
-            bb = bc % data_batch_size
-            chunk_idx = bc // data_batch_size
-            left = chunk_idx * block_S
-            right = left + block_S
-
-            k_shared = T.alloc_shared((block_S, DK), dtype=qkva_dtype)
-            b_shared = T.alloc_shared((block_S), dtype=accum_dtype, scope="shared")
-            a64_tmem = T.alloc_tmem((block_S, block_S), dtype=accum_dtype)
-
-            (
-                a64_fragment,
-                a16i_row,
-                a16i_sum,
-                a16i_shared,
-                a16o_shared,
-                a16o_fragment,
-                a32i0_shared,
-                a32i1_shared,
-                a32o_shared,
-                a32o_fragment,
-                a64_shared,
-            ) = _alloc_inversion_buffers(block_S, accum_dtype, qkva_dtype)
-
-            mma_mbar = T.alloc_barrier(arrive_count=1)
-
-            # Load K + b
-            if right <= num_tokens:
-                T.copy(k[bb, left:right, bhg, 0:DK], k_shared)
-                for j_s in T.Parallel(block_S):
-                    b_shared[j_s] = b[bb, left + j_s, bh]
-            else:
-                for j_s, j_k in T.Parallel(block_S, DK):
-                    if left + j_s < num_tokens:
-                        k_shared[j_s, j_k] = k[bb, left + j_s, bhg, j_k]
-                    else:
-                        k_shared[j_s, j_k] = 0
-                for j_s in T.Parallel(block_S):
-                    if left + j_s < num_tokens:
-                        b_shared[j_s] = b[bb, left + j_s, bh]
-                    else:
-                        b_shared[j_s] = 0
-
-            # A <- I + StrictLower(beta * K @ K^T)
-            T.tcgen05_gemm(
-                k_shared,
-                k_shared,
-                a64_tmem,
-                transpose_B=True,
-                clear_accum=True,
-                mbar=mma_mbar,
-            )
-            T.mbarrier_wait_parity(mma_mbar, 0)
-            T.copy(a64_tmem, a64_fragment)
-            for j_s, j_t in T.Parallel(block_S, block_S):
-                if j_s > j_t:
-                    a64_fragment[j_s, j_t] *= b_shared[j_s]
-                elif j_s == j_t:
-                    a64_fragment[j_s, j_t] = 1
-                else:
-                    a64_fragment[j_s, j_t] = 0
-
-            _invert_64x64_lower_tri(
-                block_S,
-                a64_fragment,
-                a16i_row,
-                a16i_sum,
-                a16i_shared,
-                a16o_shared,
-                a16o_fragment,
-                a32i0_shared,
-                a32i1_shared,
-                a32o_shared,
-                a32o_fragment,
-                a64_shared,
-            )
-
-            if right <= num_tokens:
-                T.copy(a64_shared, a[bb, left:right, bh, 0:block_S])
-            else:
-                for j_s, j_t in T.Parallel(block_S, block_S):
-                    if left + j_s < num_tokens:
-                        a[bb, left + j_s, bh, j_t] = a64_shared[j_s, j_t]
-
-    return tilelang_kkt_solve_fixed_fast_kernel
-
-
 def kkt_solve(
     k: torch.Tensor,
     b: torch.Tensor,
@@ -499,48 +384,31 @@ def kkt_solve(
     assert K == 128
     assert chunk_size == 64
 
-    # Decide whether the flattened "fixed-fast" kernel can be used. It can
-    # whenever every sequence's chunks are aligned, i.e.:
-    #   * dense input (cu_seqlens is None), or
-    #   * a single ragged sequence (one row in cu_seqlens), since the only
-    #     unaligned chunk is the tail and fixed-fast handles tail masks, or
-    #   * a batch of ragged sequences whose lengths are all multiples of
-    #     chunk_size (no chunk crosses sequence boundaries).
-    can_use_fixed_fast = cu_seqlens is None
-    if cu_seqlens is not None:
-        seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
-        is_single_sequence = cu_seqlens.numel() == 2
-        can_use_fixed_fast = (
-            int(cu_seqlens[0].item()) == 0
-            and int(cu_seqlens[-1].item()) == num_tokens
-            and bool((seqlens > 0).all().item())
-            and (
-                is_single_sequence
-                or bool((seqlens % chunk_size == 0).all().item())
+    output_shape = (batch_size, num_tokens, H, chunk_size)
+    if cu_seqlens is None:
+        total_tokens = batch_size * num_tokens
+        k_work = k.reshape(1, total_tokens, Hg, K)
+        b_work = b.reshape(1, total_tokens, H)
+        cu_seqlens = torch.arange(
+            0,
+            total_tokens + 1,
+            num_tokens,
+            dtype=torch.int32,
+            device=k.device,
+        )
+    else:
+        if batch_size != 1:
+            raise ValueError(
+                "Blackwell KKT varlen expects packed inputs with batch dimension 1 "
+                f"when cu_seqlens is provided, got batch_size={batch_size}."
             )
-        )
+        k_work = k
+        b_work = b
+        total_tokens = num_tokens
 
-    a = torch.empty(
-        (batch_size, num_tokens, H, chunk_size), dtype=k.dtype, device=k.device
+    a_work = torch.empty(
+        (1, total_tokens, H, chunk_size), dtype=k.dtype, device=k.device
     )
-
-    if can_use_fixed_fast:
-        num_chunks = batch_size * tilelang.cdiv(num_tokens, chunk_size)
-        kernel = tilelang_kkt_solve_fixed_fast(
-            H,
-            Hg,
-            K,
-            chunk_size,
-            qkva_dtype=k.dtype,
-            b_dtype=b.dtype,
-            accum_dtype="float32",
-        )
-        kernel(k, b, a, num_chunks)
-        return a
-
-    # Reaching here implies ``cu_seqlens is not None`` (the dense / aligned
-    # cases were handled by the fixed-fast path above). The generic kernel
-    # respects per-sequence boundaries via ``chunk_indices``.
     chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
     kernel = tilelang_kkt_solve(
         H,
@@ -552,6 +420,6 @@ def kkt_solve(
         seqlen_dtype=cu_seqlens.dtype,
         accum_dtype="float32",
     )
-    kernel(k, b, cu_seqlens, chunk_indices, a)
+    kernel(k_work, b_work, cu_seqlens, chunk_indices, a_work)
 
-    return a
+    return a_work.reshape(output_shape)
