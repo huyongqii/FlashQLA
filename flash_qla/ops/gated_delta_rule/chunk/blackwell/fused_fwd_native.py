@@ -319,6 +319,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                 T.set_max_nreg(CONSUMER_O_NREG, 1)
                 o_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
                 p_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
+                decay_local = T.alloc_local((1), dtype=accum_dtype)
 
                 for i_s in T.serial(num_iters):
                     stage = i_s % 2
@@ -342,23 +343,15 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
 
                     for j_s, j_t in T.Parallel(block_S, block_S):
                         if j_s >= j_t:
-                            p_fragment[j_s, j_t] *= (
-                                scale
-                                * T.exp2(
-                                    (
-                                        g_shared[stage, j_s]
-                                        - g_shared[stage, j_t]
-                                    )
-                                    * 1.442695
-                                )
-                            )
-                            a_shared[stage, j_s, j_t] *= T.exp2(
+                            decay_local[0] = T.exp2(
                                 (
                                     g_shared[stage, j_s]
                                     - g_shared[stage, j_t]
                                 )
                                 * 1.442695
                             )
+                            p_fragment[j_s, j_t] *= scale * decay_local[0]
+                            a_shared[stage, j_s, j_t] *= decay_local[0]
                             a_shared[stage, j_s, j_t] *= b_shared[stage, j_t]
                         else:
                             p_fragment[j_s, j_t] = 0
@@ -634,6 +627,8 @@ def fused_gdr_fwd(
     o = torch.empty_like(v)
 
     block_DV = _select_block_dv(real_batch_size, H)
+    if is_cp and block_DV > 64:
+        block_DV = 64
     _override = os.environ.get("FLASHQLA_BLOCK_DV", "")
     if _override:
         block_DV = int(_override)
