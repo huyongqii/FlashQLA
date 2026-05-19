@@ -897,6 +897,7 @@ def tilelang_prepare_h_cp_v3(
     is_varlen,
     debug_skip_ht=False,
     debug_skip_mt=False,
+    min_blocks_per_sm=1,
 ):
     batch_size = T.dynamic("batch_size")
     warmup_count = T.dynamic("warmup_count")
@@ -958,6 +959,8 @@ def tilelang_prepare_h_cp_v3(
             seq_end_idx = T.alloc_var("int32")
             num_iters = T.alloc_var("int32")
             tx = T.get_thread_binding()
+            if min_blocks_per_sm > 1:
+                T.annotate_min_blocks_per_sm(min_blocks_per_sm)
 
             k_shared = T.alloc_shared((block_S, DK), dtype=qkva_dtype)
             a_shared = T.alloc_shared((block_S, block_S), dtype=qkva_dtype)
@@ -1296,8 +1299,22 @@ def fused_gdr_h(
         (real_batch_size, H, K, V), dtype=ht_dtype, device=k.device
     )
     if is_cp and output_final_state and not output_h:
-        block_DV = 64
+        block_DV_env = os.environ.get("FLASHQLA_CP_H_BLOCK_DV", "").strip()
+        block_DV = int(block_DV_env) if block_DV_env else 32
+        if block_DV not in (32, 64):
+            raise ValueError(
+                "FLASHQLA_CP_H_BLOCK_DV must be 32 or 64, "
+                f"got {block_DV}"
+            )
         assert V % block_DV == 0
+        min_blocks_per_sm = int(
+            os.environ.get("FLASHQLA_CP_H_MIN_BLOCKS_PER_SM", "1")
+        )
+        if min_blocks_per_sm < 1:
+            raise ValueError(
+                "FLASHQLA_CP_H_MIN_BLOCKS_PER_SM must be >= 1, "
+                f"got {min_blocks_per_sm}"
+            )
         cp_prepare_debug_mode = os.environ.get(
             "FLASHQLA_CP_PREPARE_DEBUG_MODE", ""
         ).strip().lower()
@@ -1410,6 +1427,7 @@ def fused_gdr_h(
             is_varlen=is_varlen,
             debug_skip_ht=debug_skip_ht,
             debug_skip_mt=debug_skip_mt,
+            min_blocks_per_sm=min_blocks_per_sm,
         )
         if os.environ.get("FLASHQLA_DEBUG_CP", "") == "1":
             print(
@@ -1418,6 +1436,7 @@ def fused_gdr_h(
                 f"batch={batch_size} real_batch={real_batch_size} "
                 f"is_varlen={is_varlen} output_correction={output_correction} "
                 f"use_fallback_mask={use_fallback_mask} "
+                f"min_blocks_per_sm={min_blocks_per_sm} "
                 f"warmup_count={warmup_indices.numel()} "
                 f"fallback_count={fallback_indices.numel()} "
                 f"debug_mode={cp_prepare_debug_mode or 'off'} "

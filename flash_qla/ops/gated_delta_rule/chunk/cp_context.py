@@ -145,11 +145,12 @@ def _calc_cp_seqs(
             )
     elif is_blackwell(_cc):
         # On SM100 after disabling warp-group register reallocation, CP speeds
-        # up the main fused GDR kernel but only amortizes cp-w/cp-h/cp-c at long
-        # sequence lengths. B=1,H=32 profiling shows the break-even between
-        # 256 and 512 chunks; keep the automatic path conservative. Users can
-        # still force CP with FLASHQLA_AUTOCP=1 or tune this threshold.
-        min_chunks = 512
+        # up the main fused GDR kernel but must amortize cp-w/cp-h/cp-c.
+        # B=1,H=32 profiling after the CP prepare_h shared-memory refactor
+        # shows the break-even between 128 and 256 chunks; keep automatic CP
+        # enabled from 256 chunks onward. Users can still force CP with
+        # FLASHQLA_AUTOCP=1 or tune this threshold.
+        min_chunks = 256
     else:
         min_chunks = 1
     use_cp = use_cp and max(num_chunks) >= min_chunks
