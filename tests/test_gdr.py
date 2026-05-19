@@ -424,9 +424,11 @@ def test_gated_delta_rule(
             "tilelang_prepare_h_kernel_kernel",
             "tilelang_prepare_h_cp_ht_kernel_kernel",
         )
-        if "tilelang_get_warmup_chunks_kernel_kernel" in prof_qla.keys() or any(
+        cp_forced = auto_cp and os.environ.get("FLASHQLA_AUTOCP", "").strip() == "1"
+        cp_profiled = "tilelang_get_warmup_chunks_kernel_kernel" in prof_qla.keys() or any(
             name in prof_qla.keys() for name in cp_h_kernels
-        ):
+        )
+        if cp_forced or cp_profiled:
             result_fla["[fwd] cp-w"] = None
             result_fla["[fwd] cp-h"] = None
             result_fla["[fwd] cp-c"] = None
