@@ -134,7 +134,16 @@ def _calc_cp_seqs(
                 "FLASHQLA_CP_MIN_CHUNKS must be a positive integer, "
                 f"got {min_chunks}"
             )
-        use_cp = use_cp and max(num_chunks) >= min_chunks
+    elif is_blackwell(_cc):
+        # On SM100 after disabling warp-group register reallocation, CP speeds
+        # up the main fused GDR kernel but only amortizes cp-w/cp-h/cp-c at long
+        # sequence lengths. B=1,H=32 profiling shows the break-even between
+        # 256 and 512 chunks; keep the automatic path conservative. Users can
+        # still force CP with FLASHQLA_AUTOCP=1 or tune this threshold.
+        min_chunks = 512
+    else:
+        min_chunks = 1
+    use_cp = use_cp and max(num_chunks) >= min_chunks
 
     # Allow forcibly disabling/enabling CP for benchmarking on new archs.
     _cp_env = os.environ.get("FLASHQLA_AUTOCP", "").strip()
