@@ -994,8 +994,6 @@ def tilelang_prepare_h_cp_v3(
                 T.use_swizzle(10)
 
                 if tx < 128:
-                    T.set_max_nreg(112, 1)
-
                     if use_initial_state:
                         T.copy(
                             h0[
@@ -1046,8 +1044,6 @@ def tilelang_prepare_h_cp_v3(
                     )
 
                 elif tx < 256:
-                    T.set_max_nreg(112, 1)
-
                     for i_s in T.serial(num_iters):
                         if i_s > 0:
                             T.barrier_wait(iter_done, (i_s - 1) % 2)
@@ -1080,8 +1076,6 @@ def tilelang_prepare_h_cp_v3(
                         T.barrier_arrive(iter_done)
 
                 else:
-                    T.set_max_nreg(96, 1)
-
                     for i_s in T.serial(num_iters):
                         if i_s > 0:
                             T.barrier_wait(iter_done, (i_s - 1) % 2)
@@ -1151,7 +1145,6 @@ def tilelang_prepare_h_cp_v3(
                 iter_done = T.alloc_barrier(arrive_count=256)
 
                 if tx < 128:
-                    T.set_max_nreg(128, 1)
                     if calc_mt:
                         for j_k, j_v in T.Parallel(DK, block_DV):
                             if j_k == bm * block_DV + j_v:
@@ -1161,7 +1154,7 @@ def tilelang_prepare_h_cp_v3(
                         g_prod_M[0] = 0
 
                 elif tx < 256:
-                    T.set_max_nreg(96, 1)
+                    pass
 
                 if calc_mt:
                     if tx < 256:
