@@ -132,6 +132,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
             h_shared = T.alloc_shared((DK, block_DV), dtype=qkva_dtype)
             vd_shared = T.alloc_shared((block_S, block_DV), dtype=qkva_dtype)
             vn_shared = T.alloc_shared((block_S, block_DV), dtype=qkva_dtype)
+            p_shared = T.alloc_shared((block_S, block_S), dtype=qkva_dtype)
             g_shared = T.alloc_shared(
                 (num_stages, block_S), dtype=accum_dtype, scope="shared"
             )
@@ -354,7 +355,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                         else:
                             p_fragment[j_s, j_t] = 0
                             a_shared[stage, j_s, j_t] = 0
-                    T.copy(p_fragment, q_shared[stage, :, 0:block_S])
+                    T.copy(p_fragment, p_shared)
 
                     for j_s, j_v in T.Parallel(block_S, block_DV):
                         x_fragment[j_s, j_v] *= scale * g_exp_shared[j_s]
@@ -367,7 +368,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     )
                     T.copy(p_fragment, vd_shared)
                     T.gemm(
-                        q_shared[stage, :, 0:block_S],
+                        p_shared,
                         vd_shared,
                         x_fragment,
                         clear_accum=False,
