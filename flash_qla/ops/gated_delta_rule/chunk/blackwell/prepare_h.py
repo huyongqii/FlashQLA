@@ -505,7 +505,7 @@ def tilelang_prepare_h(
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     },
 )
-def tilelang_prepare_h_cp_ht(
+def tilelang_prepare_h_cp(
     H,
     Hg,
     DK,
@@ -518,8 +518,11 @@ def tilelang_prepare_h_cp_ht(
     b_dtype,
     h0_dtype,
     ht_dtype,
+    mask_dtype,
     seqlen_dtype,
     use_initial_state,
+    store_final_correction,
+    use_fallback_mask,
     is_varlen,
 ):
     batch_size = T.dynamic("batch_size")
@@ -541,9 +544,11 @@ def tilelang_prepare_h_cp_ht(
         b_shape = (batch_size, num_tokens, H)
     h0_shape = (batch_size, H, DK, DV)
     ht_shape = (batch_size, H, DK, DV)
+    m_shape = (batch_size, H, DK, DK)
+    fallback_mask_shape = (batch_size, H)
 
     @T.prim_func
-    def tilelang_prepare_h_cp_ht_kernel(
+    def tilelang_prepare_h_cp_kernel(
         k: T.Tensor(k_shape, dtype=qkva_dtype),
         v: T.Tensor(v_shape, dtype=qkva_dtype),
         a: T.Tensor(a_shape, dtype=qkva_dtype),
@@ -552,7 +557,9 @@ def tilelang_prepare_h_cp_ht(
         h0: T.Tensor(h0_shape, dtype=h0_dtype),
         cu_seqlens: T.Tensor([batch_size + 1], dtype=seqlen_dtype),
         num_warmup_chunks: T.Tensor([batch_size, H], dtype=seqlen_dtype),
+        fallback_mask: T.Tensor(fallback_mask_shape, dtype=mask_dtype),
         ht: T.Tensor(ht_shape, dtype=ht_dtype),
+        mt: T.Tensor(m_shape, dtype=ht_dtype),
     ):
         with T.Kernel(batch_size * H * num_DV_blocks, threads=384) as (bbhv,):
             bbh, bv = bbhv // num_DV_blocks, bbhv % num_DV_blocks
@@ -581,25 +588,41 @@ def tilelang_prepare_h_cp_ht(
             g_rev_exp_shared = T.alloc_shared(
                 (block_S), dtype=accum_dtype, scope="shared"
             )
+            if store_final_correction:
+                m_shared = T.alloc_shared((DK, block_DV), dtype=qkva_dtype)
+                z_shared = T.alloc_shared((block_S, block_DV), dtype=qkva_dtype)
 
             h_fragment = T.alloc_fragment((DK, block_DV), dtype=accum_dtype)
             x_fragment = T.alloc_fragment((block_S, DK), dtype=accum_dtype)
             y_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
+            if store_final_correction:
+                m_fragment = T.alloc_fragment((DK, block_DV), dtype=accum_dtype)
+                z_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
             g_last_local_S = T.alloc_local((1), dtype=accum_dtype)
             g_last_local_Y = T.alloc_local((1), dtype=accum_dtype)
+            if store_final_correction:
+                g_prod_M = T.alloc_local((1), dtype=accum_dtype)
 
             data_loaded = T.alloc_barrier(arrive_count=384)
             bar_1 = T.alloc_barrier(arrive_count=256)
             bar_2 = T.alloc_barrier(arrive_count=384)
-            state_done = T.alloc_barrier(arrive_count=128)
+            iter_done = T.alloc_barrier(arrive_count=384)
 
             T.use_swizzle(10)
 
             tx = T.get_thread_binding()
 
             CONSUMER_S_NREG = 112
-            CONSUMER_X_NREG = 112
+            CONSUMER_X_NREG = 128 if store_final_correction else 112
             CONSUMER_Y_NREG = 96
+
+            calc_mt = T.alloc_var("bool")
+            if store_final_correction:
+                calc_mt = True
+                if use_fallback_mask:
+                    calc_mt = fallback_mask[bb, bh]
+            else:
+                calc_mt = False
 
             if tx < 128:
                 T.set_max_nreg(CONSUMER_S_NREG, 1)
@@ -619,7 +642,7 @@ def tilelang_prepare_h_cp_ht(
 
                 for i_s in T.serial(num_iters):
                     if i_s > 0:
-                        T.barrier_wait(state_done, (i_s - 1) % 2)
+                        T.barrier_wait(iter_done, (i_s - 1) % 2)
 
                     left = seq_start_idx + i_s * block_S
                     right = left + block_S
@@ -647,7 +670,7 @@ def tilelang_prepare_h_cp_ht(
                         transpose_A=True,
                         clear_accum=False,
                     )
-                    T.barrier_arrive(state_done)
+                    T.barrier_arrive(iter_done)
 
                 T.copy(
                     h_fragment,
@@ -657,9 +680,18 @@ def tilelang_prepare_h_cp_ht(
             elif tx < 256:
                 T.set_max_nreg(CONSUMER_X_NREG, 1)
 
+                if store_final_correction:
+                    if calc_mt:
+                        for j_k, j_v in T.Parallel(DK, block_DV):
+                            if j_k == bv * block_DV + j_v:
+                                m_fragment[j_k, j_v] = 1
+                            else:
+                                m_fragment[j_k, j_v] = 0
+                        g_prod_M[0] = 0
+
                 for i_s in T.serial(num_iters):
                     if i_s > 0:
-                        T.barrier_wait(state_done, (i_s - 1) % 2)
+                        T.barrier_wait(iter_done, (i_s - 1) % 2)
 
                     left = seq_start_idx + i_s * block_S
                     right = left + block_S
@@ -690,12 +722,42 @@ def tilelang_prepare_h_cp_ht(
                         x_shared[j_s, j_k] = x_fragment[j_s, j_k] * -b_shared[j_s]
                     T.barrier_arrive(bar_2)
 
+                    if store_final_correction:
+                        if calc_mt:
+                            g_prod_M[0] += g_shared[block_S - 1]
+                            T.copy(m_fragment, m_shared)
+                            T.gemm(
+                                k_shared,
+                                m_shared,
+                                z_fragment,
+                                clear_accum=True,
+                            )
+                            T.copy(z_fragment, z_shared)
+                            T.gemm(
+                                x_shared,
+                                z_shared,
+                                m_fragment,
+                                transpose_A=True,
+                                clear_accum=False,
+                            )
+                    T.barrier_arrive(iter_done)
+
+                if store_final_correction:
+                    if calc_mt:
+                        g_prod_M[0] = T.exp2(g_prod_M[0] * 1.442695)
+                        for j_k, j_v in T.Parallel(DK, block_DV):
+                            m_fragment[j_k, j_v] *= g_prod_M[0]
+                        T.copy(
+                            m_fragment,
+                            mt[bb, bh, 0:DK, bv * block_DV : (bv + 1) * block_DV],
+                        )
+
             else:
                 T.set_max_nreg(CONSUMER_Y_NREG, 1)
 
                 for i_s in T.serial(num_iters):
                     if i_s > 0:
-                        T.barrier_wait(state_done, (i_s - 1) % 2)
+                        T.barrier_wait(iter_done, (i_s - 1) % 2)
 
                     left = seq_start_idx + i_s * block_S
                     right = left + block_S
@@ -741,8 +803,9 @@ def tilelang_prepare_h_cp_ht(
                             - v_shared[j_s, j_v] * g_rev_exp_shared[j_s]
                         )
                     T.barrier_arrive(bar_2)
+                    T.barrier_arrive(iter_done)
 
-    return tilelang_prepare_h_cp_ht_kernel
+    return tilelang_prepare_h_cp_kernel
 
 
 def fused_gdr_h(
@@ -804,10 +867,13 @@ def fused_gdr_h(
     final_state = torch.empty(
         (real_batch_size, H, K, V), dtype=ht_dtype, device=k.device
     )
-    if is_cp and output_final_state and not output_h and not output_correction:
-        block_DV = 64
+    if is_cp and output_final_state and not output_h:
+        block_DV = 32 if output_correction else 64
         assert V % block_DV == 0
-        tilelang_prepare_h_cp_ht_kernel = tilelang_prepare_h_cp_ht(
+        final_correction = torch.empty(
+            (real_batch_size, H, K, K), dtype=ht_dtype, device=k.device
+        )
+        tilelang_prepare_h_cp_kernel = tilelang_prepare_h_cp(
             H,
             Hg,
             K,
@@ -819,12 +885,15 @@ def fused_gdr_h(
             b_dtype=b.dtype,
             h0_dtype=initial_state.dtype,
             ht_dtype=final_state.dtype,
+            mask_dtype=fallback_mask.dtype,
             seqlen_dtype=cu_seqlens.dtype,
             accum_dtype="float32",
             use_initial_state=use_initial_state,
+            store_final_correction=output_correction,
+            use_fallback_mask=use_fallback_mask,
             is_varlen=is_varlen,
         )
-        tilelang_prepare_h_cp_ht_kernel(
+        tilelang_prepare_h_cp_kernel(
             k,
             v,
             a,
@@ -833,9 +902,13 @@ def fused_gdr_h(
             initial_state,
             cu_seqlens,
             num_warmup_chunks,
+            fallback_mask,
             final_state,
+            final_correction,
         )
-        return None, final_state, None
+        if not output_correction:
+            final_correction = None
+        return None, final_state, final_correction
 
     h = torch.empty((batch_size, num_chunks, H, K, V), dtype=k.dtype, device=k.device)
     final_correction = torch.empty(

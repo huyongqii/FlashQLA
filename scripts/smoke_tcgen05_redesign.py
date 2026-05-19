@@ -11,9 +11,10 @@ Validates three preconditions that the redesign depends on:
    ``c_tmem += A1 @ B1`` (clear_accum=False)
    Result must equal ``A0@B0 + A1@B1``.
 
-2. Multiple coexisting ``T.alloc_tmem`` in the same kernel
-   We allocate three independent tmem regions (mirrors H + P + O usage)
-   and verify each holds the correct value.
+2. Multiple coexisting ``T.alloc_tmem`` in the same kernel, both written
+   by ``tcgen05_gemm`` (this is the only legal write path: TileLang's
+   TMEM layout is established by the gemm tile op, so non-gemm writes
+   like T.copy(frag -> tmem) without a prior gemm fail to compile).
 
 3. Producer / MM WG split with mbarrier handshake
    Thread block is partitioned into a producer WG (loads A/B into shared)
@@ -42,8 +43,6 @@ def smoke_kernel(M: int, N: int, K: int):
       tx <  128 : MM WG. Issues two tcgen05_gemm into c_tmem (the second
                   with ``clear_accum=False`` to test accumulation), and one
                   independent tcgen05_gemm into d_tmem (multi-TMEM check).
-                  Also stores a constant into e_tmem to confirm a third
-                  coexisting tmem region is fine.
       tx >= 128 : Producer WG. Single warp loads A0/B0, then A1/B1, signaling
                   the MM WG via mbarriers (cross-WG handshake check).
     """
@@ -57,8 +56,6 @@ def smoke_kernel(M: int, N: int, K: int):
         c: T.Tensor((M, N), dtype="float32"),
         # d = a1@b1            (independent second TMEM)
         d: T.Tensor((M, N), dtype="float32"),
-        # e = constant 7.0     (third TMEM, written elementwise)
-        e: T.Tensor((M, N), dtype="float32"),
     ):
         with T.Kernel(1, threads=160) as (_,):
             a0_shared = T.alloc_shared((M, K), dtype="bfloat16")
@@ -66,14 +63,12 @@ def smoke_kernel(M: int, N: int, K: int):
             a1_shared = T.alloc_shared((M, K), dtype="bfloat16")
             b1_shared = T.alloc_shared((K, N), dtype="bfloat16")
 
-            # Three coexisting TMEM regions.
+            # Two coexisting TMEM regions (each populated by tcgen05_gemm).
             c_tmem = T.alloc_tmem((M, N), dtype="float32")
             d_tmem = T.alloc_tmem((M, N), dtype="float32")
-            e_tmem = T.alloc_tmem((M, N), dtype="float32")
 
             c_frag = T.alloc_fragment((M, N), dtype="float32")
             d_frag = T.alloc_fragment((M, N), dtype="float32")
-            e_frag = T.alloc_fragment((M, N), dtype="float32")
 
             # Cross-WG handshake: producer signals when each tile is ready.
             ab0_ready = T.alloc_barrier(arrive_count=32)
@@ -111,19 +106,12 @@ def smoke_kernel(M: int, N: int, K: int):
                     mbar=mma_c1_done,
                 )
 
-                # Third TMEM region: just write a constant into it.
-                for j_m, j_n in T.Parallel(M, N):
-                    e_frag[j_m, j_n] = 7.0
-                T.copy(e_frag, e_tmem)
-
                 T.mbarrier_wait_parity(mma_c1_done, 0)
                 T.mbarrier_wait_parity(mma_d_done, 0)
                 T.copy(c_tmem, c_frag)
                 T.copy(d_tmem, d_frag)
-                T.copy(e_tmem, e_frag)
                 T.copy(c_frag, c)
                 T.copy(d_frag, d)
-                T.copy(e_frag, e)
             else:
                 # --- Producer WG (single warp = 32 threads) ---
                 if tx < 160:
@@ -159,25 +147,22 @@ def main() -> int:
 
     c = torch.empty((M, N), device="cuda", dtype=torch.float32)
     d = torch.empty((M, N), device="cuda", dtype=torch.float32)
-    e = torch.empty((M, N), device="cuda", dtype=torch.float32)
 
     ref_c = a0.float() @ b0.float() + a1.float() @ b1.float()
     ref_d = a1.float() @ b1.float()
-    ref_e = torch.full_like(c, 7.0)
 
     print("Compiling smoke kernel...")
     kernel = smoke_kernel(M, N, K)
     print("Launching...")
-    kernel(a0, b0, a1, b1, c, d, e)
+    kernel(a0, b0, a1, b1, c, d)
     torch.cuda.synchronize()
     print("Done. Checking results:")
 
     ok_c = _check("tmem accum (c)", c, ref_c)
     ok_d = _check("multi-tmem (d)", d, ref_d)
-    ok_e = _check("multi-tmem (e)", e, ref_e)
 
     print()
-    if ok_c and ok_d and ok_e:
+    if ok_c and ok_d:
         print("RESULT: ALL PRECONDITIONS PASS - safe to start the 2-WG + TMEM redesign.")
         return 0
     else:
@@ -186,8 +171,6 @@ def main() -> int:
             print("  - TMEM accumulation (clear_accum=False) is broken or not supported.")
         if not ok_d:
             print("  - A second coexisting alloc_tmem does not work; redesign needs rework.")
-        if not ok_e:
-            print("  - A third alloc_tmem region (or T.copy frag->tmem) is broken.")
         return 1
 
 
