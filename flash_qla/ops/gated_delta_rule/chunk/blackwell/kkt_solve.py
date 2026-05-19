@@ -229,7 +229,6 @@ def tilelang_kkt_solve(
 
         k_shared = T.alloc_shared((block_S, DK), dtype=qkva_dtype)
         b_shared = T.alloc_shared((block_S), dtype=accum_dtype, scope="shared")
-        a64_tmem = T.alloc_tmem((block_S, block_S), dtype=accum_dtype)
 
         (
             a64_fragment,
@@ -248,12 +247,9 @@ def tilelang_kkt_solve(
 
         # ``data_is_ready`` is published by the K-load producer warp once
         # both ``k_shared`` and ``b_shared`` are populated, so the consumer
-        # can fire ``tcgen05_gemm`` immediately on entry without first
-        # going through a serial b-load.
+        # can fire the small KKT GEMM immediately on entry.
         data_is_ready = T.alloc_barrier(arrive_count=32)
         a_is_ready = T.alloc_barrier(arrive_count=128)
-        mma_mbar = T.alloc_barrier(arrive_count=1)
-
         tx = T.get_thread_binding()
 
         PRODUCER_NREG = 24
@@ -264,17 +260,13 @@ def tilelang_kkt_solve(
 
             T.barrier_wait(data_is_ready, 0)
 
-            # A = K @ K^T (TCGEN05 / TMEM)
-            T.tcgen05_gemm(
+            T.gemm(
                 k_shared,
                 k_shared,
-                a64_tmem,
+                a64_fragment,
                 transpose_B=True,
                 clear_accum=True,
-                mbar=mma_mbar,
             )
-            T.mbarrier_wait_parity(mma_mbar, 0)
-            T.copy(a64_tmem, a64_fragment)
 
             # A <- I + StrictLower(b * A). Keep this as one pass over A:
             # the solve kernel is small enough that an extra 64x64 elementwise
@@ -386,7 +378,6 @@ def tilelang_kkt_solve(
 
                 k_shared = T.alloc_shared((block_S, DK), dtype=qkva_dtype)
                 b_shared = T.alloc_shared((block_S), dtype=accum_dtype, scope="shared")
-                a64_tmem = T.alloc_tmem((block_S, block_S), dtype=accum_dtype)
 
                 (
                     a64_fragment,
@@ -402,8 +393,6 @@ def tilelang_kkt_solve(
                     a32o_fragment,
                     a64_shared,
                 ) = _alloc_inversion_buffers(block_S, accum_dtype, qkva_dtype)
-
-                mma_mbar = T.alloc_barrier(arrive_count=1)
 
                 if right <= num_tokens:
                     T.copy(k[bb, left:right, bhg, 0:DK], k_shared)
@@ -421,16 +410,13 @@ def tilelang_kkt_solve(
                         else:
                             b_shared[j_s] = 0
 
-                T.tcgen05_gemm(
+                T.gemm(
                     k_shared,
                     k_shared,
-                    a64_tmem,
+                    a64_fragment,
                     transpose_B=True,
                     clear_accum=True,
-                    mbar=mma_mbar,
                 )
-                T.mbarrier_wait_parity(mma_mbar, 0)
-                T.copy(a64_tmem, a64_fragment)
                 for j_s, j_t in T.Parallel(block_S, block_S):
                     if j_s > j_t:
                         a64_fragment[j_s, j_t] *= b_shared[j_s]
