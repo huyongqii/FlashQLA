@@ -147,6 +147,13 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                 (num_stages, block_S, block_S), dtype=qkva_dtype
             )
             h_shared = T.alloc_shared((DK, block_DV), dtype=qkva_dtype)
+            # u_temp_shared: bf16 staging buffer for the fp32->bf16 + layout
+            # transition of u_fragment (GEMM C-layout) into the elementwise
+            # producer of vu_fragment (GEMM B-layout). Direct fragment->
+            # fragment copy across these two layouts triggers TileLang's
+            # LayoutInference conflict, so we round-trip through SMEM.
+            # Cost: 64*64*2 = 8KB extra SMEM; trivial vs the 147KB block.
+            u_temp_shared = T.alloc_shared((block_S, block_DV), dtype=qkva_dtype)
             vd_shared = T.alloc_shared((block_S, block_DV), dtype=qkva_dtype)
             vn_shared = T.alloc_shared((block_S, block_DV), dtype=qkva_dtype)
             p_shared = T.alloc_shared((block_S, block_S), dtype=qkva_dtype)
@@ -301,23 +308,21 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                         clear_accum=True,
                     )
 
-                    # Convert u_fragment from fp32 GEMM C-layout to bf16
-                    # GEMM B-layout via T.copy. We can't fuse the subtract
-                    # below directly using u_fragment because u_fragment's
-                    # fp32 MMA C-layout (replicate=2) and vu_fragment's bf16
-                    # MMA B-layout (replicate=1) cannot coexist in one
-                    # T.Parallel loop (TileLang layout-infer conflict).
-                    T.copy(u_fragment, vu_fragment)
+                    # Stage u_fragment to SMEM. fragment->fragment copy
+                    # across fp32 C-layout and bf16 B-layout fails
+                    # LayoutInference; fragment->shared is single-layout
+                    # and TileLang handles the dtype/layout cast cleanly.
+                    T.copy(u_fragment, u_temp_shared)
 
-                    # Compute v_new = v - g_exp * u in-place into vu_fragment.
-                    # Only one fragment touched here, so layout-infer is
-                    # unambiguous. Same numerics as the prior SMEM version
-                    # since u would be narrowed to bf16 anyway before being
-                    # consumed by the A @ V_new GEMM.
+                    # Compute v_new = v - g_exp * u into vu_fragment.
+                    # All RHS sources are SMEM, only one fragment touched
+                    # in this T.Parallel loop -> layout-infer is unambiguous.
+                    # The downstream GEMM still pulls B from registers,
+                    # which is the actual SMEM-RAW-elimination win.
                     for j_s, j_v in T.Parallel(block_S, block_DV):
                         vu_fragment[j_s, j_v] = (
                             v_shared[stage, j_s, j_v]
-                            - g_exp_shared[j_s] * vu_fragment[j_s, j_v]
+                            - g_exp_shared[j_s] * u_temp_shared[j_s, j_v]
                         )
 
                     T.barrier_wait(bar_3, i_s % 2)

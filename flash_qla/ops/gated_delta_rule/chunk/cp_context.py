@@ -11,7 +11,7 @@ from flash_qla.utils import tensor_cache, assert_supported, is_blackwell
 
 _cc = assert_supported()
 if is_blackwell(_cc):
-    from .blackwell.prepare_h import fused_gdr_h
+    from .blackwell.prepare_h import fused_gdr_h, fused_gdr_mt
     from .blackwell.cp_fwd import (
         correct_initial_states,
         correct_initial_states_no_fallback,
@@ -21,6 +21,7 @@ else:
     from .hopper import get_warmup_chunks, fused_gdr_h, correct_initial_states
 
     correct_initial_states_no_fallback = None
+    fused_gdr_mt = None
 
 
 MULTI_PROCESSOR_COUNT = torch.cuda.get_device_properties().multi_processor_count
@@ -196,7 +197,7 @@ def intra_card_cp_preprocess(
         num_warmup_chunks=num_warmup_chunks,
     )
     if is_blackwell(_cc):
-        fwd_h_kwargs["output_correction"] = needs_correction
+        fwd_h_kwargs["output_correction"] = False
     _, ht, mt = fused_gdr_h(**fwd_h_kwargs)
 
     if not needs_correction and correct_initial_states_no_fallback is not None:
@@ -206,6 +207,16 @@ def intra_card_cp_preprocess(
             seq_map_r2c=seq_map_r2c,
         )
     elif os.environ.get("FLASHQLA_CP_CORRECT_H0_TORCH", "") == "1":
+        if mt is None and fused_gdr_mt is not None:
+            mt = fused_gdr_mt(
+                k=k,
+                a=a,
+                g=g,
+                b=b,
+                fallback_indices=fallback_mask.nonzero(),
+                cu_seqlens=cp_cu_seqlens,
+                chunk_size=chunk_size,
+            )
         cp_h0 = _correct_initial_states_torch(
             raw_h0=raw_h0,
             ht_buffer=ht,
@@ -214,6 +225,16 @@ def intra_card_cp_preprocess(
             seq_map_r2c=seq_map_r2c,
         )
     else:
+        if mt is None and fused_gdr_mt is not None:
+            mt = fused_gdr_mt(
+                k=k,
+                a=a,
+                g=g,
+                b=b,
+                fallback_indices=fallback_mask.nonzero(),
+                cu_seqlens=cp_cu_seqlens,
+                chunk_size=chunk_size,
+            )
         cp_h0 = correct_initial_states(
             raw_h0=raw_h0,
             ht_buffer=ht,
