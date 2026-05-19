@@ -42,33 +42,6 @@ def _select_block_dv(real_batch_size: int, num_v_heads: int) -> int:
     return 32
 
 
-def _select_tmem_width(block_DV: int) -> int:
-    """Select TMEM column width for the per-CTA accumulators.
-
-    Blackwell's `tcgen05.alloc` granularity is a power-of-two number of
-    columns with a minimum of 32. Previously this was hard-coded to 128 even
-    when `block_DV` was 32 or 64, wasting 50%~75% of the per-CTA TMEM
-    accumulator footprint and inflating alloc / dealloc / barrier latency.
-    Match the actual `[:, 0:block_DV]` slice used inside the kernel so the
-    allocation is tight (still respecting the 32-column minimum).
-    """
-    override = os.environ.get("FLASHQLA_TMEM_WIDTH", "")
-    if override:
-        return int(override)
-    if block_DV <= 32:
-        return 32
-    if block_DV <= 64:
-        return 64
-    return 128
-
-
-def _env_int(name: str, default: int) -> int:
-    raw = os.environ.get(name, "")
-    if not raw:
-        return default
-    return int(raw)
-
-
 @tilelang.jit(
     pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
@@ -101,7 +74,6 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
     is_cp,
     num_threads=128,
     block_DV=64,
-    tmem_width=128,
 ):
     batch_size = T.dynamic("batch_size")
     raw_batch_size = T.dynamic("raw_batch_size")
@@ -193,9 +165,6 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                 (block_S), dtype=accum_dtype, scope="shared"
             )
 
-            h_tmem = T.alloc_tmem((DK, tmem_width), dtype=accum_dtype)
-
-            mbar_h = T.alloc_barrier(arrive_count=[1] * 8)
             data_is_ready = T.alloc_barrier(arrive_count=[96] * 2)
             data_is_free = T.alloc_barrier(arrive_count=[384] * 2)
             bar_o = T.alloc_barrier(arrive_count=128)
@@ -231,8 +200,6 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
 
                 for i_s in T.serial(num_iters):
                     stage = i_s % 2
-                    mbar_slot = i_s % 8
-                    mbar_phase = (i_s // 8) % 2
                     T.barrier_wait(data_is_ready[stage], (i_s // 2) % 2)
                     T.barrier_arrive(bar_0)
 
@@ -247,17 +214,13 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     T.barrier_arrive(bar_5)
 
                     T.barrier_wait(bar_5, i_s % 2)
-                    T.copy(h_fragment, h_tmem[:, 0:block_DV])
-                    T.tcgen05_gemm(
+                    T.gemm(
                         k_shared[stage, :, :],
                         vn_shared,
-                        h_tmem[:, 0:block_DV],
+                        h_fragment,
                         transpose_A=True,
                         clear_accum=False,
-                        mbar=mbar_h[mbar_slot],
                     )
-                    T.mbarrier_wait_parity(mbar_h[mbar_slot], mbar_phase)
-                    T.copy(h_tmem[:, 0:block_DV], h_fragment)
 
                     T.barrier_arrive(data_is_free[stage])
 
@@ -659,12 +622,6 @@ def fused_gdr_fwd(
         raise ValueError(
             f"Blackwell native fwd selected invalid block_DV={block_DV}"
         )
-    tmem_width = _select_tmem_width(block_DV)
-    if tmem_width < block_DV:
-        raise ValueError(
-            f"Blackwell native fwd: tmem_width={tmem_width} smaller than "
-            f"block_DV={block_DV}"
-        )
     max_iters = 0
     num_threads = 512
     if cu_seqlens is None:
@@ -673,7 +630,7 @@ def fused_gdr_fwd(
         seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
         has_ragged_tail = bool((seqlens % chunk_size != 0).any().item())
     _debug(
-        f"threads={num_threads} block_DV={block_DV} tmem_width={tmem_width} "
+        f"threads={num_threads} block_DV={block_DV} "
         f"batch={batch_size} real_batch={real_batch_size} raw_batch={raw_batch_size} "
         f"is_cp={is_cp} ragged_tail={has_ragged_tail}"
     )
@@ -704,7 +661,6 @@ def fused_gdr_fwd(
         is_cp=is_cp,
         num_threads=num_threads,
         block_DV=block_DV,
-        tmem_width=tmem_width,
     )
     tilelang_fused_chunk_gdr_fwd_kernel(
         q,
