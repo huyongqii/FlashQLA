@@ -318,7 +318,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
             elif tx < 384:
                 T.set_max_nreg(CONSUMER_O_NREG, 1)
                 o_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
-                p_fragment = T.alloc_fragment((16, block_S), dtype=accum_dtype)
+                p_fragment = T.alloc_fragment((32, 32), dtype=accum_dtype)
 
                 for i_s in T.serial(num_iters):
                     stage = i_s % 2
@@ -339,39 +339,55 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     )
                     T.mbarrier_wait_parity(mbar_p[mbar_slot], mbar_phase)
 
-                    for j_pb in T.serial(block_S // 16):
+                    for j_pb, j_tb in T.serial(block_S // 32, block_S // 32):
                         T.copy(
-                            p_tmem[j_pb * 16 : (j_pb + 1) * 16, 0:block_S],
+                            p_tmem[
+                                j_pb * 32 : (j_pb + 1) * 32,
+                                j_tb * 32 : (j_tb + 1) * 32,
+                            ],
                             p_fragment,
                         )
-                        for j_r, j_t in T.Parallel(16, block_S):
-                            if j_pb * 16 + j_r >= j_t:
-                                p_fragment[j_r, j_t] *= (
+                        for j_r, j_c in T.Parallel(32, 32):
+                            if j_pb * 32 + j_r >= j_tb * 32 + j_c:
+                                p_fragment[j_r, j_c] *= (
                                     scale
                                     * T.exp2(
                                         (
-                                            g_shared[stage, j_pb * 16 + j_r]
-                                            - g_shared[stage, j_t]
+                                            g_shared[stage, j_pb * 32 + j_r]
+                                            - g_shared[stage, j_tb * 32 + j_c]
                                         )
                                         * 1.442695
                                     )
                                 )
-                                a_shared[stage, j_pb * 16 + j_r, j_t] *= T.exp2(
+                                a_shared[
+                                    stage,
+                                    j_pb * 32 + j_r,
+                                    j_tb * 32 + j_c,
+                                ] *= T.exp2(
                                     (
-                                        g_shared[stage, j_pb * 16 + j_r]
-                                        - g_shared[stage, j_t]
+                                        g_shared[stage, j_pb * 32 + j_r]
+                                        - g_shared[stage, j_tb * 32 + j_c]
                                     )
                                     * 1.442695
                                 )
-                                a_shared[stage, j_pb * 16 + j_r, j_t] *= b_shared[
-                                    stage, j_t
-                                ]
+                                a_shared[
+                                    stage,
+                                    j_pb * 32 + j_r,
+                                    j_tb * 32 + j_c,
+                                ] *= b_shared[stage, j_tb * 32 + j_c]
                             else:
-                                p_fragment[j_r, j_t] = 0
-                                a_shared[stage, j_pb * 16 + j_r, j_t] = 0
+                                p_fragment[j_r, j_c] = 0
+                                a_shared[
+                                    stage,
+                                    j_pb * 32 + j_r,
+                                    j_tb * 32 + j_c,
+                                ] = 0
                         T.copy(
                             p_fragment,
-                            p_shared[j_pb * 16 : (j_pb + 1) * 16, 0:block_S],
+                            p_shared[
+                                j_pb * 32 : (j_pb + 1) * 32,
+                                j_tb * 32 : (j_tb + 1) * 32,
+                            ],
                         )
                     T.barrier_arrive(bar_3)
 
@@ -642,6 +658,8 @@ def fused_gdr_fwd(
     o = torch.empty_like(v)
 
     block_DV = _select_block_dv(real_batch_size, H)
+    if is_cp and block_DV > 64:
+        block_DV = 64
     if block_DV not in (32, 64, 128):
         raise ValueError(
             f"Blackwell native fwd selected invalid block_DV={block_DV}"
