@@ -2,6 +2,7 @@
 # Licensed under The MIT License [see LICENSE for details]
 
 import os
+from typing import Any
 
 import torch
 import tilelang
@@ -146,7 +147,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
         ):
             bbh, bv = bbhv // T.ceildiv(DV, block_DV), bbhv % T.ceildiv(DV, block_DV)
             bb, bh = bbh // H, bbh % H
-            bhg = bh // (H // Hg)
+            bhg: Any = bh // (H // Hg)
             batch_idx = T.alloc_var("int32")
             seq_start_idx = T.alloc_var("int32")
             seq_end_idx = T.alloc_var("int32")
@@ -192,9 +193,11 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
             h_tmem = T.alloc_tmem((DK, tmem_width), dtype=accum_dtype)
             uv_tmem = T.alloc_tmem((block_S, tmem_width), dtype=accum_dtype)
             o_tmem = T.alloc_tmem((block_S, tmem_width), dtype=accum_dtype)
+            p_tmem = T.alloc_tmem((block_S, block_S), dtype=accum_dtype)
 
             mbar_u = T.alloc_barrier(arrive_count=[1] * 8)
             mbar_v = T.alloc_barrier(arrive_count=[1] * 8)
+            mbar_p = T.alloc_barrier(arrive_count=[1] * 8)
             mbar_o0 = T.alloc_barrier(arrive_count=[1] * 8)
             mbar_o1 = T.alloc_barrier(arrive_count=[1] * 8)
             mbar_h = T.alloc_barrier(arrive_count=[1] * 8)
@@ -369,16 +372,17 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     T.barrier_wait(data_is_ready[stage], (i_s // 2) % 2)
                     T.barrier_arrive(bar_0)
 
-                    # P is consumed immediately by scalar decay/masking, so keep
-                    # it in registers instead of round-tripping through TMEM.
+                    # ---- async issue: P = Q @ K^T (depends on bar_0 only) ----
                     T.barrier_wait(bar_0, i_s % 2)
-                    T.gemm(
+                    T.tcgen05_gemm(
                         q_shared[stage, :, :],
                         k_shared[stage, :, :],
-                        p_fragment,
+                        p_tmem,
                         transpose_B=True,
                         clear_accum=True,
+                        mbar=mbar_p[mbar_slot],
                     )
+                    # NOTE: do NOT wait on mbar_p yet -- let it run in background.
 
                     # ---- async issue: O = Q @ h (needs h_shared via bar_1) ----
                     T.barrier_wait(bar_1, i_s % 2)
@@ -389,9 +393,12 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                         clear_accum=True,
                         mbar=mbar_o0[mbar_slot],
                     )
-                    # O0 is now in flight while this warpgroup post-processes P.
+                    # Two TCGEN05 GEMMs are now in flight concurrently.
 
-                    # ---- scalar post-processing for P ----
+                    # ---- wait P, do its scalar post-processing ----
+                    T.mbarrier_wait_parity(mbar_p[mbar_slot], mbar_phase)
+                    T.copy(p_tmem, p_fragment)
+
                     for j_s, j_t in T.Parallel(block_S, block_S):
                         if j_s >= j_t:
                             decay_local[0] = T.exp2(

@@ -196,10 +196,8 @@ def tilelang_kkt_solve(
     qkva_dtype,
     b_dtype,
     seqlen_dtype,
+    is_varlen,
 ):
-    # Single Blackwell KKT path. Dense inputs are flattened by the caller and
-    # passed through synthetic cu_seqlens, so this kernel always observes the
-    # varlen layout: batch dim 0 contains all packed tokens.
     data_batch_size = T.dynamic("data_batch_size")
     real_batch_size = T.dynamic("real_batch_size")
     num_tokens = T.dynamic("num_tokens")
@@ -212,6 +210,7 @@ def tilelang_kkt_solve(
 
     @T.macro
     def kernel_body(
+        bb,
         bh,
         bhg,
         chunk_idx,
@@ -221,8 +220,6 @@ def tilelang_kkt_solve(
         b,
         a,
     ):
-        # Varlen packs all sequences into batch dim 0.
-        bb = 0
         left = seq_start_idx + chunk_idx * block_S
         right = left + block_S
 
@@ -306,9 +303,6 @@ def tilelang_kkt_solve(
             T.set_max_nreg(PRODUCER_NREG, 0)
 
             if tx < 128 + 32:
-                # Use explicit dynamic-index loads. A dynamic global slice
-                # copy with `left:right` can fail TileLang layout inference in
-                # the single varlen kernel.
                 for j_s, j_k in T.Parallel(block_S, DK):
                     if left + j_s < seq_end_idx:
                         k_shared[j_s, j_k] = k[bb, left + j_s, bhg, j_k]
@@ -335,33 +329,67 @@ def tilelang_kkt_solve(
                     if left + j_s < seq_end_idx:
                         a[bb, left + j_s, bh, j_t] = a64_shared[j_s, j_t]
 
-    @T.prim_func
-    def tilelang_kkt_solve_kernel(
-        k: T.Tensor(k_shape, dtype=qkva_dtype),
-        b: T.Tensor(b_shape, dtype=b_dtype),
-        cu_seqlens: T.Tensor([real_batch_size + 1], dtype=seqlen_dtype),
-        chunk_indices: T.Tensor([num_chunks, 2], dtype=seqlen_dtype),
-        a: T.Tensor(a_shape, dtype=qkva_dtype),
-    ):
-        with T.Kernel(num_chunks * H, threads=256) as (bch,):
-            bc, bh = bch // H, bch % H
-            bhg = bh // (H // Hg)
+    if is_varlen:
 
-            batch_idx = chunk_indices[bc, 0]
-            chunk_idx = chunk_indices[bc, 1]
-            seq_start_idx = cu_seqlens[batch_idx]
-            seq_end_idx = cu_seqlens[batch_idx + 1]
+        @T.prim_func
+        def tilelang_kkt_solve_kernel(
+            k: T.Tensor(k_shape, dtype=qkva_dtype),
+            b: T.Tensor(b_shape, dtype=b_dtype),
+            cu_seqlens: T.Tensor([real_batch_size + 1], dtype=seqlen_dtype),
+            chunk_indices: T.Tensor([num_chunks, 2], dtype=seqlen_dtype),
+            a: T.Tensor(a_shape, dtype=qkva_dtype),
+        ):
+            with T.Kernel(num_chunks * H, threads=256) as (bch,):
+                bc, bh = bch // H, bch % H
+                bhg = bh // (H // Hg)
 
-            kernel_body(
-                bh,
-                bhg,
-                chunk_idx,
-                seq_start_idx,
-                seq_end_idx,
-                k,
-                b,
-                a,
-            )
+                bb = 0
+                batch_idx = chunk_indices[bc, 0]
+                chunk_idx = chunk_indices[bc, 1]
+                seq_start_idx = cu_seqlens[batch_idx]
+                seq_end_idx = cu_seqlens[batch_idx + 1]
+
+                kernel_body(
+                    bb,
+                    bh,
+                    bhg,
+                    chunk_idx,
+                    seq_start_idx,
+                    seq_end_idx,
+                    k,
+                    b,
+                    a,
+                )
+
+    else:
+
+        @T.prim_func
+        def tilelang_kkt_solve_kernel(
+            k: T.Tensor(k_shape, dtype=qkva_dtype),
+            b: T.Tensor(b_shape, dtype=b_dtype),
+            a: T.Tensor(a_shape, dtype=qkva_dtype),
+            num_chunks: T.int32,
+        ):
+            with T.Kernel(num_chunks * H, threads=256) as (bch,):
+                bc, bh = bch // H, bch % H
+                bhg = bh // (H // Hg)
+
+                bb = bc % data_batch_size
+                chunk_idx = bc // data_batch_size
+                seq_start_idx = 0
+                seq_end_idx = num_tokens
+
+                kernel_body(
+                    bb,
+                    bh,
+                    bhg,
+                    chunk_idx,
+                    seq_start_idx,
+                    seq_end_idx,
+                    k,
+                    b,
+                    a,
+                )
 
     return tilelang_kkt_solve_kernel
 
@@ -377,32 +405,23 @@ def kkt_solve(
     assert K == 128
     assert chunk_size == 64
 
-    output_shape = (batch_size, num_tokens, H, chunk_size)
     if cu_seqlens is None:
-        total_tokens = batch_size * num_tokens
-        k_work = k.reshape(1, total_tokens, Hg, K)
-        b_work = b.reshape(1, total_tokens, H)
-        cu_seqlens = torch.arange(
-            0,
-            total_tokens + 1,
-            num_tokens,
-            dtype=torch.int32,
-            device=k.device,
-        )
+        num_chunks = batch_size * tilelang.cdiv(num_tokens, chunk_size)
+        seqlen_dtype = "int32"
+        is_varlen = False
     else:
         if batch_size != 1:
             raise ValueError(
                 "Blackwell KKT varlen expects packed inputs with batch dimension 1 "
                 f"when cu_seqlens is provided, got batch_size={batch_size}."
             )
-        k_work = k
-        b_work = b
-        total_tokens = num_tokens
+        chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
+        seqlen_dtype = cu_seqlens.dtype
+        is_varlen = True
 
-    a_work = torch.empty(
-        (1, total_tokens, H, chunk_size), dtype=k.dtype, device=k.device
+    a = torch.empty(
+        (batch_size, num_tokens, H, chunk_size), dtype=k.dtype, device=k.device
     )
-    chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
     kernel = tilelang_kkt_solve(
         H,
         Hg,
@@ -410,9 +429,13 @@ def kkt_solve(
         chunk_size,
         qkva_dtype=k.dtype,
         b_dtype=b.dtype,
-        seqlen_dtype=cu_seqlens.dtype,
+        seqlen_dtype=seqlen_dtype,
         accum_dtype="float32",
+        is_varlen=is_varlen,
     )
-    kernel(k_work, b_work, cu_seqlens, chunk_indices, a_work)
+    if is_varlen:
+        kernel(k, b, cu_seqlens, chunk_indices, a)
+    else:
+        kernel(k, b, a, num_chunks)
 
-    return a_work.reshape(output_shape)
+    return a
