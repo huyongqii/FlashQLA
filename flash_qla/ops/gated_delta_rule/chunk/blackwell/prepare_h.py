@@ -872,8 +872,8 @@ def fused_gdr_h(
     final_state = torch.empty(
         (real_batch_size, H, K, V), dtype=ht_dtype, device=k.device
     )
-    if is_cp and output_final_state and not output_h:
-        block_DV = 32 if output_correction else 64
+    if is_cp and output_final_state and not output_h and not output_correction:
+        block_DV = 64
         assert V % block_DV == 0
         final_correction = torch.empty(
             (real_batch_size, H, K, K), dtype=ht_dtype, device=k.device
