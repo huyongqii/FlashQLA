@@ -227,11 +227,22 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                 num_iters = max_iters
 
             if tx < 128:
+                # Phase 1 sub-commit 1: cons-S now carries the full H pipeline
+                # (formerly split between cons-S and cons-V). Per
+                # docs/blackwell_fused_fwd_phase1_plan.md §3, the goal is to
+                # eliminate the cons-S<->cons-V SMEM round-trips
+                # (h_shared/v_shared/vn_shared) and the bar_1/bar_5 cross-WG
+                # rendezvous by having a single WG own the recurrence. In this
+                # sub-commit we keep cons-V alive (as an empty WG that still
+                # arrives all barriers) so the rest of the pipeline (cons-O,
+                # producers) is unchanged. Sub-commit 2 will delete cons-V.
                 if _disable_wg_reg:
                     T.disable_warp_group_reg_alloc()
                 else:
                     T.set_max_nreg(CONSUMER_S_NREG, 1)
                 h_fragment = T.alloc_fragment((DK, block_DV), dtype=accum_dtype)
+                u_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
+                vd_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
                 g_last_local = T.alloc_local((1), dtype=accum_dtype)
                 if use_initial_state:
                     T.copy(
@@ -244,22 +255,86 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                 for i_s in T.serial(num_iters):
                     stage = i_s % num_stages
                     stage_phase = (i_s // num_stages) % 2
+                    left = seq_start_idx + i_s * block_S
                     T.barrier_wait(data_is_ready[stage], stage_phase)
 
-                    # Drop bar_0: h_shared WAR vs cons-V/O is covered by bar_5
-                    # (all three warpgroups rendezvous before cons-S overwrites
-                    # h_shared via T.copy below). bar_1 still serializes the
-                    # write against cons-V/O reading in the prev iter.
+                    # g_*_shared (was cons-V). Must complete before arrive
+                    # bar_1 so cons-O can read them after wait bar_1.
+                    for j_s in T.Parallel(block_S):
+                        g_exp_shared[j_s] = T.exp2(
+                            g_shared[stage, j_s] * 1.442695
+                        )
+                        g_inv_exp_shared[j_s] = T.exp2(
+                            -g_shared[stage, j_s] * 1.442695
+                        )
+                    for j_s in T.Parallel(block_S):
+                        g_rev_exp_shared[j_s] = T.if_then_else(
+                            left + j_s < seq_end_idx,
+                            T.exp2(
+                                (
+                                    g_shared[stage, block_S - 1]
+                                    - g_shared[stage, j_s]
+                                )
+                                * 1.442695
+                            ),
+                            0.0,
+                        )
+
+                    # h_shared still feeds cons-O's Q@H gemm.
                     T.copy(h_fragment, h_shared)
                     T.barrier_arrive(bar_1)
 
                     T.barrier_wait(bar_1, i_s % 2)
+
+                    # u = K^T @ h_shared (SS gemm; was cons-V).
+                    T.gemm(
+                        k_shared[stage, :, :],
+                        h_shared,
+                        u_fragment,
+                        clear_accum=True,
+                    )
+
+                    # bar_3: cons-O signals that its a_shared rewrites
+                    # (decay+b_shared, upper-triangle zero) are committed.
+                    # Move wait up so it overlaps the K^T@h commit window.
+                    T.barrier_wait(bar_3, i_s % 2)
+
+                    # v_new = v - g_exp * u (in-place SMEM RAW; was cons-V).
+                    for j_s, j_v in T.Parallel(block_S, block_DV):
+                        v_shared[stage, j_s, j_v] = (
+                            v_shared[stage, j_s, j_v]
+                            - g_exp_shared[j_s] * u_fragment[j_s, j_v]
+                        )
+
+                    # vd = a @ v_new (was cons-V).
+                    T.gemm(
+                        a_shared[stage, :, :],
+                        v_shared[stage, :, :],
+                        vd_fragment,
+                        clear_accum=True,
+                    )
+
+                    # vd_shared for cons-O. Arrive bar_4 ASAP so cons-O can
+                    # start P @ Vd in parallel with our remaining work.
+                    T.copy(vd_fragment, vd_shared)
+                    T.barrier_arrive(bar_4)
+
+                    # vn_shared = vd * g_rev_exp (fused; was cons-V).
+                    # Goes back to SMEM because tcgen05 SS gemm requires
+                    # SMEM B operand.
+                    for j_s, j_v in T.Parallel(block_S, block_DV):
+                        vn_shared[j_s, j_v] = (
+                            vd_fragment[j_s, j_v] * g_rev_exp_shared[j_s]
+                        )
+
+                    # h *= g_last (was cons-S; unchanged role).
                     g_last_local[0] = g_exp_shared[block_S - 1]
                     for j_k, j_v in T.Parallel(DK, block_DV):
                         h_fragment[j_k, j_v] *= g_last_local[0]
                     T.barrier_arrive(bar_5)
-
                     T.barrier_wait(bar_5, i_s % 2)
+
+                    # h += K^T @ vn_shared (was cons-S; unchanged role).
                     T.gemm(
                         k_shared[stage, :, :],
                         vn_shared,

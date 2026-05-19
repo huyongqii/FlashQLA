@@ -959,6 +959,17 @@ def tilelang_prepare_h_cp_v3(
             num_iters = T.alloc_var("int32")
             tx = T.get_thread_binding()
 
+            k_shared = T.alloc_shared((block_S, DK), dtype=qkva_dtype)
+            a_shared = T.alloc_shared((block_S, block_S), dtype=qkva_dtype)
+            g_shared = T.alloc_shared((block_S), dtype=accum_dtype, scope="shared")
+            b_shared = T.alloc_shared((block_S), dtype=accum_dtype, scope="shared")
+            state_shared = T.alloc_shared((DK, block_DV), dtype=qkva_dtype)
+            x_shared = T.alloc_shared((block_S, DK), dtype=qkva_dtype)
+            rhs_shared = T.alloc_shared((block_S, block_DV), dtype=qkva_dtype)
+            g_rev_exp_shared = T.alloc_shared(
+                (block_S), dtype=accum_dtype, scope="shared"
+            )
+
             if bbht < num_ht_tiles:
                 warmup_i, bv = bbht // active_DV_blocks, bbht % active_DV_blocks
                 warmup_linear = warmup_indices[warmup_i]
@@ -971,22 +982,6 @@ def tilelang_prepare_h_cp_v3(
                 seq_end_idx = cu_seqlens[bb + 1] if is_varlen else num_tokens
                 num_iters = num_warmup_chunks[bb, bh]
                 seq_start_idx = seq_end_idx - num_iters * block_S
-
-                k_shared = T.alloc_shared((block_S, DK), dtype=qkva_dtype)
-                v_shared = T.alloc_shared((block_S, block_DV), dtype=qkva_dtype)
-                a_shared = T.alloc_shared((block_S, block_S), dtype=qkva_dtype)
-                g_shared = T.alloc_shared(
-                    (block_S), dtype=accum_dtype, scope="shared"
-                )
-                b_shared = T.alloc_shared(
-                    (block_S), dtype=accum_dtype, scope="shared"
-                )
-                h_shared = T.alloc_shared((DK, block_DV), dtype=qkva_dtype)
-                x_shared = T.alloc_shared((block_S, DK), dtype=qkva_dtype)
-                y_shared = T.alloc_shared((block_S, block_DV), dtype=qkva_dtype)
-                g_rev_exp_shared = T.alloc_shared(
-                    (block_S), dtype=accum_dtype, scope="shared"
-                )
 
                 h_fragment = T.alloc_fragment((DK, block_DV), dtype=accum_dtype)
                 x_fragment = T.alloc_fragment((block_S, DK), dtype=accum_dtype)
@@ -1027,7 +1022,7 @@ def tilelang_prepare_h_cp_v3(
                         T.barrier_arrive(data_loaded)
                         T.barrier_wait(data_loaded, i_s % 2)
 
-                        T.copy(h_fragment, h_shared)
+                        T.copy(h_fragment, state_shared)
                         T.barrier_arrive(bar_1)
 
                         T.barrier_wait(bar_1, i_s % 2)
@@ -1041,7 +1036,7 @@ def tilelang_prepare_h_cp_v3(
                         T.barrier_wait(bar_2, i_s % 2)
                         T.gemm(
                             x_shared,
-                            y_shared,
+                            rhs_shared,
                             h_fragment,
                             transpose_A=True,
                             clear_accum=False,
@@ -1099,7 +1094,7 @@ def tilelang_prepare_h_cp_v3(
                                 bh,
                                 bv * block_DV : (bv + 1) * block_DV,
                             ],
-                            v_shared,
+                            rhs_shared,
                         )
                         if right <= seq_end_idx:
                             for j_s in T.Parallel(block_S):
@@ -1122,11 +1117,11 @@ def tilelang_prepare_h_cp_v3(
                         T.barrier_arrive(bar_1)
 
                         T.barrier_wait(bar_1, i_s % 2)
-                        T.gemm(k_shared, h_shared, y_fragment, clear_accum=True)
+                        T.gemm(k_shared, state_shared, y_fragment, clear_accum=True)
                         for j_s, j_v in T.Parallel(block_S, block_DV):
-                            y_shared[j_s, j_v] = (
+                            rhs_shared[j_s, j_v] = (
                                 y_fragment[j_s, j_v] * g_last_local_Y[0]
-                                - v_shared[j_s, j_v] * g_rev_exp_shared[j_s]
+                                - rhs_shared[j_s, j_v] * g_rev_exp_shared[j_s]
                             )
                         T.barrier_arrive(bar_2)
                         T.barrier_arrive(iter_done)
@@ -1147,14 +1142,6 @@ def tilelang_prepare_h_cp_v3(
                 seq_end_idx = cu_seqlens[bb + 1] if is_varlen else num_tokens
                 num_iters = num_warmup_chunks[bb, bh]
                 seq_start_idx = seq_end_idx - num_iters * block_S
-
-                k_shared = T.alloc_shared((block_S, DK), dtype=qkva_dtype)
-                a_shared = T.alloc_shared((block_S, block_S), dtype=qkva_dtype)
-                g_shared = T.alloc_shared((block_S), dtype=accum_dtype, scope="shared")
-                b_shared = T.alloc_shared((block_S), dtype=accum_dtype, scope="shared")
-                x_shared = T.alloc_shared((block_S, DK), dtype=qkva_dtype)
-                m_shared = T.alloc_shared((DK, block_DV), dtype=qkva_dtype)
-                z_shared = T.alloc_shared((block_S, block_DV), dtype=qkva_dtype)
 
                 m_fragment = T.alloc_fragment((DK, block_DV), dtype=accum_dtype)
                 x_fragment = T.alloc_fragment((block_S, DK), dtype=accum_dtype)
@@ -1219,17 +1206,17 @@ def tilelang_prepare_h_cp_v3(
                                     x_fragment[j_s, j_k] * -b_shared[j_s]
                                 )
                             g_prod_M[0] += g_shared[block_S - 1]
-                            T.copy(m_fragment, m_shared)
+                            T.copy(m_fragment, state_shared)
                             T.gemm(
                                 k_shared,
-                                m_shared,
+                                state_shared,
                                 z_fragment,
                                 clear_accum=True,
                             )
-                            T.copy(z_fragment, z_shared)
+                            T.copy(z_fragment, rhs_shared)
                             T.gemm(
                                 x_shared,
-                                z_shared,
+                                rhs_shared,
                                 m_fragment,
                                 transpose_A=True,
                                 clear_accum=False,
@@ -1262,6 +1249,7 @@ def fused_gdr_h(
     cu_seqlens: torch.LongTensor | None = None,
     num_warmup_chunks: torch.LongTensor | None = None,
     fallback_mask: torch.Tensor | None = None,
+    warmup_indices: torch.Tensor | None = None,
 ):
     batch_size, num_tokens, Hg, K = k.shape
     _, _, H, V = v.shape
@@ -1369,6 +1357,8 @@ def fused_gdr_h(
             warmup_indices = torch.empty(
                 (1,), dtype=cu_seqlens.dtype, device=k.device
             )
+        elif warmup_indices is not None:
+            warmup_indices = warmup_indices.to(cu_seqlens.dtype).contiguous()
         else:
             warmup_indices = (
                 torch.nonzero(

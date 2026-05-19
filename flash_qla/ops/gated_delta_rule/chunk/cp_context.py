@@ -122,6 +122,12 @@ def _calc_cp_seqs(
     max_cp_segments = max(
         seq_map_r2c[i + 1] - seq_map_r2c[i] for i in range(raw_batch_size)
     )
+    warmup_indices = [
+        cp_b * H + i_h
+        for cp_b, is_tail in enumerate(ht_mask)
+        if not is_tail
+        for i_h in range(H)
+    ]
 
     # Disable CP when B * H naturally saturates SM occupancy.
     # For varlen inputs, use `total_chunks / max_seq_chunks` as effective B,
@@ -164,13 +170,24 @@ def _calc_cp_seqs(
         seq_map_r2c = torch.tensor(
             seq_map_r2c, dtype=seqlen_dtype, device=device, requires_grad=False
         )
+        warmup_indices = torch.tensor(
+            warmup_indices, dtype=seqlen_dtype, device=device, requires_grad=False
+        )
         ht_mask = torch.tensor(
             ht_mask, dtype=torch.bool, device=device, requires_grad=False
         )
     else:
-        cp_cu_seqlens, seq_map_r2c, ht_mask = None, None, None
+        cp_cu_seqlens, seq_map_r2c, warmup_indices, ht_mask = None, None, None, None
 
-    return use_cp, cp_cu_seqlens, seq_map_r2c, seq_map_c2r, ht_mask, max_cp_segments
+    return (
+        use_cp,
+        cp_cu_seqlens,
+        seq_map_r2c,
+        seq_map_c2r,
+        warmup_indices,
+        ht_mask,
+        max_cp_segments,
+    )
 
 
 def intra_card_cp_preprocess(
@@ -202,6 +219,7 @@ def intra_card_cp_preprocess(
         cp_cu_seqlens,
         seq_map_r2c,
         seq_map_c2r,
+        warmup_indices,
         ht_mask,
         max_cp_segments,
     ) = _calc_cp_seqs(
@@ -228,7 +246,13 @@ def intra_card_cp_preprocess(
         warmup_threshold=warmup_threshold,
     )
     _debug_cp_sync("get_warmup_chunks")
-    needs_correction = bool(fallback_mask.any().item())
+    if is_blackwell(_cc):
+        # The Blackwell CP hot path almost always has fallback heads under the
+        # default threshold, and prepare_h still needs a compact fallback list
+        # for the correction tiles. Avoid an extra host/GPU synchronization here.
+        needs_correction = True
+    else:
+        needs_correction = bool(fallback_mask.any().item())
     if _debug_cp_enabled():
         fallback_count = int(fallback_mask.sum().item())
         warmup_min = int(num_warmup_chunks.min().item())
@@ -249,6 +273,7 @@ def intra_card_cp_preprocess(
         b=b,
         cu_seqlens=cp_cu_seqlens,
         num_warmup_chunks=num_warmup_chunks,
+        warmup_indices=warmup_indices,
         fallback_mask=fallback_mask,
         needs_correction=needs_correction,
     )
@@ -299,6 +324,7 @@ def _prepare_cp_buffers(
     b: torch.Tensor,
     cu_seqlens: torch.Tensor,
     num_warmup_chunks: torch.Tensor,
+    warmup_indices: torch.Tensor,
     fallback_mask: torch.Tensor,
     needs_correction: bool,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
@@ -317,6 +343,7 @@ def _prepare_cp_buffers(
     if is_blackwell(_cc):
         fwd_h_kwargs["output_correction"] = needs_correction
         fwd_h_kwargs["fallback_mask"] = fallback_mask
+        fwd_h_kwargs["warmup_indices"] = warmup_indices
 
     _, ht, mt = fused_gdr_h(**fwd_h_kwargs)
     _debug_cp_sync("prepare_h/fused_gdr_h")
