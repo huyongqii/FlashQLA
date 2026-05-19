@@ -226,13 +226,24 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     T.barrier_arrive(bar_5)
 
                     T.barrier_wait(bar_5, i_s % 2)
-                    T.gemm(
-                        k_shared[stage, :, :],
-                        vn_shared,
-                        h_fragment,
-                        transpose_A=True,
-                        clear_accum=False,
-                    )
+                    # PERF EXPERIMENT: comment out the H-update GEMM to see
+                    # the upper bound. cons-S currently does:
+                    #   wait bar_5 (until cons-V's vn_shared ready)
+                    #   gemm(K^T, vn, h_fragment, accum=True)
+                    # This GEMM is the ONLY work cons-S does that depends on
+                    # the late-iter vn_shared. If commenting it out makes the
+                    # kernel materially faster, then this GEMM is on the
+                    # critical path and we should pipeline H (use prev-iter
+                    # vn). If perf is unchanged, then 4-WG sync chain is the
+                    # real bottleneck. Result is intentionally wrong; only
+                    # measure timing, not correctness.
+                    # T.gemm(
+                    #     k_shared[stage, :, :],
+                    #     vn_shared,
+                    #     h_fragment,
+                    #     transpose_A=True,
+                    #     clear_accum=False,
+                    # )
 
                     T.barrier_arrive(data_is_free[stage])
 
