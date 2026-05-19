@@ -526,6 +526,8 @@ def tilelang_prepare_h_cp_v2(
     store_final_correction,
     use_fallback_mask,
     is_varlen,
+    debug_skip_ht=False,
+    debug_skip_mt=False,
 ):
     batch_size = T.dynamic("batch_size")
     num_tokens = T.dynamic("num_tokens")
@@ -845,9 +847,13 @@ def tilelang_prepare_h_cp_v3(
     block_S = chunk_size
     num_DV_blocks = T.ceildiv(DV, block_DV)
     num_M_blocks = T.ceildiv(DK, block_DV)
-    tiles_per_head = num_DV_blocks + (
-        num_M_blocks if store_final_correction else 0
+    active_DV_blocks = 0 if debug_skip_ht else num_DV_blocks
+    active_M_blocks = (
+        num_M_blocks
+        if store_final_correction and not debug_skip_mt
+        else 0
     )
+    tiles_per_head = active_DV_blocks + active_M_blocks
 
     if is_varlen:
         k_shape = (1, num_tokens, Hg, DK)
@@ -897,7 +903,7 @@ def tilelang_prepare_h_cp_v3(
             num_iters = num_warmup_chunks[bb, bh]
             seq_start_idx = seq_end_idx - num_iters * block_S
 
-            if tile < num_DV_blocks:
+            if tile < active_DV_blocks:
                 bv = tile
 
                 k_shared = T.alloc_shared((block_S, DK), dtype=qkva_dtype)
@@ -1070,7 +1076,7 @@ def tilelang_prepare_h_cp_v3(
                         T.barrier_arrive(iter_done)
 
             else:
-                bm = tile - num_DV_blocks
+                bm = tile - active_DV_blocks
                 calc_mt = T.alloc_var("bool")
                 calc_mt = True
                 if use_fallback_mask:
@@ -1245,6 +1251,18 @@ def fused_gdr_h(
     if is_cp and output_final_state and not output_h:
         block_DV = 64
         assert V % block_DV == 0
+        cp_prepare_debug_mode = os.environ.get(
+            "FLASHQLA_CP_PREPARE_DEBUG_MODE", ""
+        ).strip().lower()
+        if cp_prepare_debug_mode not in ("", "ht_only", "mt_only"):
+            raise ValueError(
+                "FLASHQLA_CP_PREPARE_DEBUG_MODE must be empty, ht_only, or mt_only; "
+                f"got {cp_prepare_debug_mode!r}"
+            )
+        debug_skip_ht = cp_prepare_debug_mode == "mt_only"
+        debug_skip_mt = cp_prepare_debug_mode == "ht_only"
+        if debug_skip_ht and not output_correction:
+            raise RuntimeError("mt_only prepare debug mode requires output_correction=True")
         final_correction = torch.empty(
             (real_batch_size, H, K, K), dtype=ht_dtype, device=k.device
         )
@@ -1267,6 +1285,8 @@ def fused_gdr_h(
             store_final_correction=output_correction,
             use_fallback_mask=use_fallback_mask,
             is_varlen=is_varlen,
+            debug_skip_ht=debug_skip_ht,
+            debug_skip_mt=debug_skip_mt,
         )
         if (
             os.environ.get("FLASHQLA_DEBUG_CP", "") == "1"
@@ -1277,7 +1297,9 @@ def fused_gdr_h(
                 f"threads=384 block_DV={block_DV} H={H} Hg={Hg} K={K} V={V} "
                 f"batch={batch_size} real_batch={real_batch_size} "
                 f"is_varlen={is_varlen} output_correction={output_correction} "
-                f"use_fallback_mask={use_fallback_mask} ht_dtype={final_state.dtype}",
+                f"use_fallback_mask={use_fallback_mask} "
+                f"debug_mode={cp_prepare_debug_mode or 'off'} "
+                f"ht_dtype={final_state.dtype}",
                 flush=True,
             )
         tilelang_prepare_h_cp_kernel(

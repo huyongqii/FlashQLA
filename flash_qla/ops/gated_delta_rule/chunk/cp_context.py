@@ -302,6 +302,15 @@ def _prepare_cp_buffers(
 
     _, ht, mt = fused_gdr_h(**fwd_h_kwargs)
     _debug_cp_sync("prepare_h/fused_gdr_h")
+    prepare_debug_mode = os.environ.get(
+        "FLASHQLA_CP_PREPARE_DEBUG_MODE", ""
+    ).strip().lower()
+    if prepare_debug_mode:
+        raise RuntimeError(
+            "FLASHQLA_CP_PREPARE_DEBUG_MODE="
+            f"{prepare_debug_mode} passed prepare_h/fused_gdr_h sync; "
+            "stopping before correction because buffers are intentionally partial."
+        )
     if needs_correction and mt is None:
         raise RuntimeError("CP correction needs mt, but fused_gdr_h did not return it")
     _debug_cp_log(
