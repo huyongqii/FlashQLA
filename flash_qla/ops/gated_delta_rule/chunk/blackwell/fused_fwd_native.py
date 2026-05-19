@@ -186,18 +186,26 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
             T.use_swizzle(10)
             tx = T.get_thread_binding()
 
-            # Occupancy experiment knob: force 2 CTA/SM
-            # NCU shows current 1 CTA/SM × 16 warps = 25% occupancy → 90%
-            # stall_long_scoreboard. SM has 3-4× spare capacity (H scan: 4× work
-            # only +19% time). Forcing 2 CTA/SM lets ptxas auto-shrink registers.
+            # Occupancy experiment knob: force 2 CTA/SM via __launch_bounds__.
+            # WARNING: combining this with warp-specialized set_max_nreg has
+            # been observed to hang on SM100 (likely a register-realloc /
+            # mbarrier interaction). Default OFF; only enable for diagnostic
+            # builds that ALSO manually reduce CONSUMER_*_NREG so the warp-
+            # group sum fits 2× occupancy.
             _min_blocks = int(os.environ.get("FLASHQLA_MIN_BLOCKS_PER_SM", "1"))
             if _min_blocks > 1:
                 T.annotate_min_blocks_per_sm(_min_blocks)
 
+            # nreg knobs: total per-CTA reg = 4*PRODUCER + 4*CONS_S + 4*CONS_V
+            # + 4*CONS_O (each multiplied by 32 threads/warp). To run 2 CTA/SM
+            # the per-CTA reg total must be ≤ 32768. Defaults below sum to
+            # 65536 (= 1 CTA/SM ceiling).
+            _scale_nreg = float(os.environ.get("FLASHQLA_NREG_SCALE", "1.0"))
+
             PRODUCER_NREG = 24
-            CONSUMER_S_NREG = 168
-            CONSUMER_V_NREG = 160
-            CONSUMER_O_NREG = 160
+            CONSUMER_S_NREG = int(168 * _scale_nreg) // 8 * 8
+            CONSUMER_V_NREG = int(160 * _scale_nreg) // 8 * 8
+            CONSUMER_O_NREG = int(160 * _scale_nreg) // 8 * 8
 
             num_iters = T.ceildiv(seq_end_idx - seq_start_idx, block_S)
             if max_iters > 0 and num_iters > max_iters:
