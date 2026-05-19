@@ -356,6 +356,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     T.barrier_wait(data_is_ready[stage], (i_s // 2) % 2)
                     T.barrier_arrive(bar_0)
 
+                    # ---- async issue: P = Q @ K^T (depends on bar_0 only) ----
                     T.barrier_wait(bar_0, i_s % 2)
                     T.tcgen05_gemm(
                         q_shared[stage, :, :],
@@ -365,6 +366,20 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                         clear_accum=True,
                         mbar=mbar_p[mbar_slot],
                     )
+                    # NOTE: do NOT wait on mbar_p yet -- let it run in background.
+
+                    # ---- async issue: O = Q @ h (needs h_shared via bar_1) ----
+                    T.barrier_wait(bar_1, i_s % 2)
+                    T.tcgen05_gemm(
+                        q_shared[stage, :, :],
+                        h_shared,
+                        o_tmem[:, 0:block_DV],
+                        clear_accum=True,
+                        mbar=mbar_o0[mbar_slot],
+                    )
+                    # Two TCGEN05 GEMMs are now in flight concurrently.
+
+                    # ---- wait P, do its scalar post-processing ----
                     T.mbarrier_wait_parity(mbar_p[mbar_slot], mbar_phase)
                     T.copy(p_tmem, p_fragment)
 
@@ -387,14 +402,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     T.copy(p_fragment, p_shared)
                     T.barrier_arrive(bar_3)
 
-                    T.barrier_wait(bar_1, i_s % 2)
-                    T.tcgen05_gemm(
-                        q_shared[stage, :, :],
-                        h_shared,
-                        o_tmem[:, 0:block_DV],
-                        clear_accum=True,
-                        mbar=mbar_o0[mbar_slot],
-                    )
+                    # ---- wait O0, do its scalar post-processing ----
                     T.mbarrier_wait_parity(mbar_o0[mbar_slot], mbar_phase)
                     T.copy(o_tmem[:, 0:block_DV], o_fragment)
 
