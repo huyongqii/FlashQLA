@@ -27,6 +27,35 @@ else:
 MULTI_PROCESSOR_COUNT = torch.cuda.get_device_properties().multi_processor_count
 
 
+def _nearest_power_of_two(value: float) -> int:
+    return 2 ** round(math.log2(max(value, 1.0)))
+
+
+def _default_cp_max_local_chunks(
+    num_chunks: list[int],
+    num_v_heads: int,
+) -> int:
+    total_chunks = sum(num_chunks)
+    max_seq_chunks = max(num_chunks)
+    base_chunks = _nearest_power_of_two(
+        math.sqrt(num_v_heads * total_chunks / MULTI_PROCESSOR_COUNT) * 3
+    )
+
+    if is_blackwell(_cc):
+        # SM100 fused GDR is now faster after disabling warp-group register
+        # reallocation, so the CP split should amortize prepare_h/correction
+        # more aggressively than the Hopper-tuned policy.  Keep the split
+        # count high enough for long sequences, but avoid doubling cp-h/cp-c
+        # work at 16K/32K tokens.
+        if max_seq_chunks >= 512:
+            base_chunks = max(base_chunks, 64)
+        elif max_seq_chunks >= 256:
+            base_chunks = max(base_chunks, 32)
+
+    # Set min to 4 to ensure multi-stage pipelining in fused_gdr.
+    return max(base_chunks, 4)
+
+
 def _debug_cp_enabled() -> bool:
     return os.environ.get("FLASHQLA_DEBUG_CP", "") == "1"
 
@@ -89,11 +118,7 @@ def _calc_cp_seqs(
                 f"got {max_local_chunks}"
             )
     else:
-        max_local_chunks = 2 ** round(
-            math.log2(math.sqrt(H * sum(num_chunks) / MULTI_PROCESSOR_COUNT) * 3)
-        )
-        # Set min to 4 to ensure multi-stage pipelining in fused_gdr.
-        max_local_chunks = max(max_local_chunks, 4)
+        max_local_chunks = _default_cp_max_local_chunks(num_chunks, H)
 
     use_cp = False
     cp_cu_seqlens = []
@@ -188,6 +213,7 @@ def _calc_cp_seqs(
         warmup_indices,
         ht_mask,
         max_cp_segments,
+        max_local_chunks,
     )
 
 
@@ -223,6 +249,7 @@ def intra_card_cp_preprocess(
         warmup_indices,
         ht_mask,
         max_cp_segments,
+        max_local_chunks,
     ) = _calc_cp_seqs(
         raw_cu_seqlens,
         chunk_size,
@@ -232,7 +259,9 @@ def intra_card_cp_preprocess(
         "split "
         f"use_cp={use_cp} batch={batch_size} tokens={num_tokens} "
         f"Hk={num_k_heads} Hv={num_v_heads} K={k_head_dim} V={v_head_dim} "
-        f"chunk={chunk_size}"
+        f"chunk={chunk_size} max_local_chunks={max_local_chunks} "
+        f"max_cp_segments={max_cp_segments} "
+        f"cp_real_batch={0 if cp_cu_seqlens is None else cp_cu_seqlens.numel() - 1}"
     )
 
     if not use_cp:
