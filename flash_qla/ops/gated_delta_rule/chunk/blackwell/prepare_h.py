@@ -505,7 +505,7 @@ def tilelang_prepare_h(
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     },
 )
-def tilelang_prepare_h_cp(
+def tilelang_prepare_h_cp_v2(
     H,
     Hg,
     DK,
@@ -548,7 +548,7 @@ def tilelang_prepare_h_cp(
     fallback_mask_shape = (batch_size, H)
 
     @T.prim_func
-    def tilelang_prepare_h_cp_kernel(
+    def tilelang_prepare_h_cp_v2_kernel(
         k: T.Tensor(k_shape, dtype=qkva_dtype),
         v: T.Tensor(v_shape, dtype=qkva_dtype),
         a: T.Tensor(a_shape, dtype=qkva_dtype),
@@ -810,7 +810,7 @@ def tilelang_prepare_h_cp(
                     T.barrier_arrive(bar_2)
                     T.barrier_arrive(iter_done)
 
-    return tilelang_prepare_h_cp_kernel
+    return tilelang_prepare_h_cp_v2_kernel
 
 
 def fused_gdr_h(
@@ -878,7 +878,7 @@ def fused_gdr_h(
         final_correction = torch.empty(
             (real_batch_size, H, K, K), dtype=ht_dtype, device=k.device
         )
-        tilelang_prepare_h_cp_kernel = tilelang_prepare_h_cp(
+        tilelang_prepare_h_cp_kernel = tilelang_prepare_h_cp_v2(
             H,
             Hg,
             K,

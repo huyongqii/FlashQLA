@@ -183,6 +183,12 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
             bar_4 = T.alloc_barrier(arrive_count=128)
             bar_5 = T.alloc_barrier(arrive_count=416)
 
+            # Commit 1: cons-V's u and v accumulators move to TMEM.
+            # Each tcgen05_gemm needs its own completion mbarrier with
+            # arrive_count=1 (one issue per iter, signaled by hw).
+            u_mbar = T.alloc_barrier(arrive_count=1)
+            v_mbar = T.alloc_barrier(arrive_count=1)
+
             T.use_swizzle(10)
             tx = T.get_thread_binding()
 
@@ -249,6 +255,12 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
 
             elif tx < 256:
                 T.set_max_nreg(CONSUMER_V_NREG, 1)
+                # Commit 1: u/v accumulators live in TMEM. They are written by
+                # tcgen05_gemm and read back into a small fragment for the two
+                # elementwise passes (v_new = v - g*u, vn = v * g_rev_exp) and
+                # for the T.copy(... -> vd_shared / vn_shared) stores.
+                u_tmem = T.alloc_tmem((block_S, block_DV), dtype=accum_dtype)
+                v_tmem = T.alloc_tmem((block_S, block_DV), dtype=accum_dtype)
                 u_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
                 v_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
 
@@ -286,11 +298,13 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     T.barrier_arrive(bar_1)
 
                     T.barrier_wait(bar_1, i_s % 2)
-                    T.gemm(
+                    # u = K @ H  (TMEM accumulator, async)
+                    T.tcgen05_gemm(
                         k_shared[stage, :, :],
                         h_shared,
-                        u_fragment,
+                        u_tmem,
                         clear_accum=True,
+                        mbar=u_mbar,
                     )
 
                     # Move wait bar_3 up: it overlaps with the GEMM's commit
@@ -300,6 +314,11 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     # (before T.copy(p, p_shared)), so this wait is even
                     # more likely to be already-arrived by the time we hit it.
                     T.barrier_wait(bar_3, i_s % 2)
+
+                    # Wait for u GEMM completion, then read u_tmem into
+                    # u_fragment for the elementwise pass below.
+                    T.mbarrier_wait_parity(u_mbar, i_s % 2)
+                    T.copy(u_tmem, u_fragment)
 
                     # In-place: v_new = v - g_exp * u, written back to
                     # v_shared so the next GEMM can use it as B operand.
@@ -311,12 +330,19 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                             - g_exp_shared[j_s] * u_fragment[j_s, j_v]
                         )
 
-                    T.gemm(
+                    # v_d = a @ v_new  (TMEM accumulator, async)
+                    T.tcgen05_gemm(
                         a_shared[stage, :, :],
                         v_shared[stage, :, :],
-                        v_fragment,
+                        v_tmem,
                         clear_accum=True,
+                        mbar=v_mbar,
                     )
+
+                    # Wait for v GEMM completion, then read v_tmem into
+                    # v_fragment for the two consumer-V output paths.
+                    T.mbarrier_wait_parity(v_mbar, i_s % 2)
+                    T.copy(v_tmem, v_fragment)
 
                     # Write vd_shared first (un-scaled v), arrive bar_4 ASAP
                     # so consumer-O can start O += P @ Vd in parallel.
