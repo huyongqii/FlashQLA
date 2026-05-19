@@ -147,13 +147,6 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                 (num_stages, block_S, block_S), dtype=qkva_dtype
             )
             h_shared = T.alloc_shared((DK, block_DV), dtype=qkva_dtype)
-            # u_temp_shared: bf16 staging buffer for the fp32->bf16 + layout
-            # transition of u_fragment (GEMM C-layout) into the elementwise
-            # producer of vu_fragment (GEMM B-layout). Direct fragment->
-            # fragment copy across these two layouts triggers TileLang's
-            # LayoutInference conflict, so we round-trip through SMEM.
-            # Cost: 64*64*2 = 8KB extra SMEM; trivial vs the 147KB block.
-            u_temp_shared = T.alloc_shared((block_S, block_DV), dtype=qkva_dtype)
             vd_shared = T.alloc_shared((block_S, block_DV), dtype=qkva_dtype)
             vn_shared = T.alloc_shared((block_S, block_DV), dtype=qkva_dtype)
             p_shared = T.alloc_shared((block_S, block_S), dtype=qkva_dtype)
@@ -258,14 +251,6 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                 T.set_max_nreg(CONSUMER_V_NREG, 1)
                 u_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
                 v_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
-                # vu_fragment holds v_new = v - g_exp * u in bf16 so that the
-                # subsequent A @ V_new GEMM can take its B operand directly
-                # from registers, breaking the v_shared SMEM RAW (write-back
-                # then re-load) that was the dominant L1TEX scoreboard stall
-                # in this warpgroup. Cost: ~16 reg/thread at block_DV=64.
-                vu_fragment = T.alloc_fragment(
-                    (block_S, block_DV), dtype=qkva_dtype
-                )
 
                 for i_s in T.serial(num_iters):
                     stage = i_s % num_stages
@@ -308,27 +293,20 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                         clear_accum=True,
                     )
 
-                    # Stage u_fragment to SMEM. fragment->fragment copy
-                    # across fp32 C-layout and bf16 B-layout fails
-                    # LayoutInference; fragment->shared is single-layout
-                    # and TileLang handles the dtype/layout cast cleanly.
-                    T.copy(u_fragment, u_temp_shared)
-
-                    # Compute v_new = v - g_exp * u into vu_fragment.
-                    # All RHS sources are SMEM, only one fragment touched
-                    # in this T.Parallel loop -> layout-infer is unambiguous.
-                    # The downstream GEMM still pulls B from registers,
-                    # which is the actual SMEM-RAW-elimination win.
+                    # In-place: v_new = v - g_exp * u, written back to
+                    # v_shared so the next GEMM can use it as B operand.
+                    # NOTE: this is the SMEM RAW path; Step E (fragment B)
+                    # broke correctness and was reverted.
                     for j_s, j_v in T.Parallel(block_S, block_DV):
-                        vu_fragment[j_s, j_v] = (
+                        v_shared[stage, j_s, j_v] = (
                             v_shared[stage, j_s, j_v]
-                            - g_exp_shared[j_s] * u_temp_shared[j_s, j_v]
+                            - g_exp_shared[j_s] * u_fragment[j_s, j_v]
                         )
 
                     T.barrier_wait(bar_3, i_s % 2)
                     T.gemm(
                         a_shared[stage, :, :],
-                        vu_fragment,
+                        v_shared[stage, :, :],
                         v_fragment,
                         clear_accum=True,
                     )
