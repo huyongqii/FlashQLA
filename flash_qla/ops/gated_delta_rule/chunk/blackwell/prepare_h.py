@@ -1,6 +1,8 @@
 # Copyright (c) 2026 The Qwen team, Alibaba Group.
 # Licensed under The MIT License [see LICENSE for details]
 
+import os
+
 import torch
 import tilelang
 import tilelang.language as T
@@ -878,7 +880,7 @@ def tilelang_prepare_h_cp_v3(
         ht: T.Tensor(ht_shape, dtype=ht_dtype),
         mt: T.Tensor(m_shape, dtype=ht_dtype),
     ):
-        with T.Kernel(batch_size * H * tiles_per_head, threads=512) as (bbht,):
+        with T.Kernel(batch_size * H * tiles_per_head, threads=384) as (bbht,):
             bbh, tile = bbht // tiles_per_head, bbht % tiles_per_head
             bb, bh = bbh // H, bbh % H
             bhg = bh // (H // Hg)
@@ -1017,7 +1019,7 @@ def tilelang_prepare_h_cp_v3(
                         T.barrier_arrive(bar_2)
                         T.barrier_arrive(iter_done)
 
-                elif tx < 384:
+                else:
                     T.set_max_nreg(96, 1)
 
                     for i_s in T.serial(num_iters):
@@ -1067,9 +1069,6 @@ def tilelang_prepare_h_cp_v3(
                         T.barrier_arrive(bar_2)
                         T.barrier_arrive(iter_done)
 
-                else:
-                    T.set_max_nreg(24, 0)
-
             else:
                 bm = tile - num_DV_blocks
                 calc_mt = T.alloc_var("bool")
@@ -1105,9 +1104,6 @@ def tilelang_prepare_h_cp_v3(
 
                 elif tx < 256:
                     T.set_max_nreg(96, 1)
-
-                else:
-                    T.set_max_nreg(24, 0)
 
                 if calc_mt:
                     if tx < 256:
@@ -1272,6 +1268,18 @@ def fused_gdr_h(
             use_fallback_mask=use_fallback_mask,
             is_varlen=is_varlen,
         )
+        if (
+            os.environ.get("FLASHQLA_DEBUG_CP", "") == "1"
+            or os.environ.get("FLASHQLA_DEBUG_BLACKWELL_DISPATCH", "") == "1"
+        ):
+            print(
+                "[FlashQLA CP] prepare_h v3 launch "
+                f"threads=384 block_DV={block_DV} H={H} Hg={Hg} K={K} V={V} "
+                f"batch={batch_size} real_batch={real_batch_size} "
+                f"is_varlen={is_varlen} output_correction={output_correction} "
+                f"use_fallback_mask={use_fallback_mask} ht_dtype={final_state.dtype}",
+                flush=True,
+            )
         tilelang_prepare_h_cp_kernel(
             k,
             v,

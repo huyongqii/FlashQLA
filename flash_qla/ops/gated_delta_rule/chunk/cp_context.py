@@ -26,6 +26,30 @@ else:
 MULTI_PROCESSOR_COUNT = torch.cuda.get_device_properties().multi_processor_count
 
 
+def _debug_cp_enabled() -> bool:
+    return (
+        os.environ.get("FLASHQLA_DEBUG_CP", "") == "1"
+        or os.environ.get("FLASHQLA_DEBUG_BLACKWELL_DISPATCH", "") == "1"
+    )
+
+
+def _debug_cp_log(message: str) -> None:
+    if _debug_cp_enabled():
+        print(f"[FlashQLA CP] {message}", flush=True)
+
+
+def _debug_cp_sync(label: str) -> None:
+    if not _debug_cp_enabled():
+        return
+    _debug_cp_log(f"sync begin: {label}")
+    try:
+        torch.cuda.synchronize()
+    except Exception as exc:
+        _debug_cp_log(f"sync failed after {label}: {type(exc).__name__}: {exc}")
+        raise
+    _debug_cp_log(f"sync ok: {label}")
+
+
 @tensor_cache
 def _create_cu_seqlens(
     batch_size: int,
@@ -168,6 +192,12 @@ def intra_card_cp_preprocess(
         chunk_size,
         num_v_heads,
     )
+    _debug_cp_log(
+        "split "
+        f"use_cp={use_cp} batch={batch_size} tokens={num_tokens} "
+        f"Hk={num_k_heads} Hv={num_v_heads} K={k_head_dim} V={v_head_dim} "
+        f"chunk={chunk_size}"
+    )
 
     if not use_cp:
         return raw_h0, raw_cu_seqlens, None, None
@@ -180,7 +210,19 @@ def intra_card_cp_preprocess(
         chunk_size=chunk_size,
         warmup_threshold=warmup_threshold,
     )
+    _debug_cp_sync("get_warmup_chunks")
     needs_correction = bool(fallback_mask.any().item())
+    if _debug_cp_enabled():
+        fallback_count = int(fallback_mask.sum().item())
+        warmup_min = int(num_warmup_chunks.min().item())
+        warmup_max = int(num_warmup_chunks.max().item())
+        _debug_cp_log(
+            "warmup "
+            f"threshold={warmup_threshold} needs_correction={needs_correction} "
+            f"fallback_count={fallback_count}/{fallback_mask.numel()} "
+            f"warmup_chunks=[{warmup_min}, {warmup_max}] "
+            f"cp_segments={cp_cu_seqlens.numel() - 1}"
+        )
 
     ht, mt = _prepare_cp_buffers(
         k=k,
@@ -259,8 +301,14 @@ def _prepare_cp_buffers(
         fwd_h_kwargs["fallback_mask"] = fallback_mask
 
     _, ht, mt = fused_gdr_h(**fwd_h_kwargs)
+    _debug_cp_sync("prepare_h/fused_gdr_h")
     if needs_correction and mt is None:
         raise RuntimeError("CP correction needs mt, but fused_gdr_h did not return it")
+    _debug_cp_log(
+        "prepare_h result "
+        f"ht_shape={tuple(ht.shape)} ht_dtype={ht.dtype} "
+        f"mt_shape={None if mt is None else tuple(mt.shape)}"
+    )
     return ht, mt
 
 
@@ -273,16 +321,20 @@ def _correct_cp_initial_states(
     needs_correction: bool,
 ) -> torch.Tensor:
     if not needs_correction and correct_initial_states_no_fallback is not None:
-        return correct_initial_states_no_fallback(
+        _debug_cp_log("correct_h0 path=no_fallback")
+        cp_h0 = correct_initial_states_no_fallback(
             raw_h0=raw_h0,
             ht_buffer=ht_buffer,
             seq_map_r2c=seq_map_r2c,
         )
+        _debug_cp_sync("correct_h0/no_fallback")
+        return cp_h0
 
     if mt_buffer is None:
         raise RuntimeError("CP correction needs mt_buffer")
 
     if os.environ.get("FLASHQLA_CP_CORRECT_H0_TORCH", "") == "1":
+        _debug_cp_log("correct_h0 path=torch_debug")
         return _correct_initial_states_torch(
             raw_h0=raw_h0,
             ht_buffer=ht_buffer,
@@ -291,13 +343,16 @@ def _correct_cp_initial_states(
             seq_map_r2c=seq_map_r2c,
         )
 
-    return correct_initial_states(
+    _debug_cp_log("correct_h0 path=tilelang_with_correction")
+    cp_h0 = correct_initial_states(
         raw_h0=raw_h0,
         ht_buffer=ht_buffer,
         mt_buffer=mt_buffer,
         fallback_mask=fallback_mask,
         seq_map_r2c=seq_map_r2c,
     )
+    _debug_cp_sync("correct_h0/with_correction")
+    return cp_h0
 
 
 def _correct_initial_states_torch(
