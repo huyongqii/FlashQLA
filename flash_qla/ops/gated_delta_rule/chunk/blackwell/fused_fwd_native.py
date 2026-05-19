@@ -399,12 +399,12 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                             T.copy(
                                 q[batch_idx, left:right, bhg, 0:DK],
                                 q_shared[stage, :, :],
-                                coalesced_width=16,
+                                coalesced_width=8,
                             )
                             T.copy(
                                 k[batch_idx, left:right, bhg, 0:DK],
                                 k_shared[stage, :, :],
-                                coalesced_width=16,
+                                coalesced_width=8,
                             )
                         else:
                             for j_s, j_k in T.Parallel(block_S, DK):
@@ -438,7 +438,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                                     bv * block_DV : (bv + 1) * block_DV,
                                 ],
                                 v_shared[stage, :, :],
-                                coalesced_width=16,
+                                coalesced_width=8,
                             )
                             for j_s in T.Parallel(block_S):
                                 b_shared[stage, j_s] = b[batch_idx, left + j_s, bh]
@@ -475,7 +475,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                             T.copy(
                                 a[batch_idx, left:right, bh, 0:block_S],
                                 a_shared[stage, :, :],
-                                coalesced_width=16,
+                                coalesced_width=8,
                             )
                             for j_s in T.Parallel(block_S):
                                 g_shared[stage, j_s] = g[batch_idx, left + j_s, bh]
@@ -517,7 +517,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                                     bh,
                                     bv * block_DV : (bv + 1) * block_DV,
                                 ],
-                                coalesced_width=16,
+                                coalesced_width=8,
                             )
                         T.barrier_arrive(bar_5)
 
