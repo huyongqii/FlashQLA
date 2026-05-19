@@ -186,6 +186,14 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
             T.use_swizzle(10)
             tx = T.get_thread_binding()
 
+            # Occupancy experiment knob: force 2 CTA/SM
+            # NCU shows current 1 CTA/SM × 16 warps = 25% occupancy → 90%
+            # stall_long_scoreboard. SM has 3-4× spare capacity (H scan: 4× work
+            # only +19% time). Forcing 2 CTA/SM lets ptxas auto-shrink registers.
+            _min_blocks = int(os.environ.get("FLASHQLA_MIN_BLOCKS_PER_SM", "1"))
+            if _min_blocks > 1:
+                T.annotate_min_blocks_per_sm(_min_blocks)
+
             PRODUCER_NREG = 24
             CONSUMER_S_NREG = 168
             CONSUMER_V_NREG = 160
