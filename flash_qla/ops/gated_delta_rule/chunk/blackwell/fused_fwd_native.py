@@ -399,10 +399,12 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                             T.copy(
                                 q[batch_idx, left:right, bhg, 0:DK],
                                 q_shared[stage, :, :],
+                                coalesced_width=16,
                             )
                             T.copy(
                                 k[batch_idx, left:right, bhg, 0:DK],
                                 k_shared[stage, :, :],
+                                coalesced_width=16,
                             )
                         else:
                             for j_s, j_k in T.Parallel(block_S, DK):
@@ -436,6 +438,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                                     bv * block_DV : (bv + 1) * block_DV,
                                 ],
                                 v_shared[stage, :, :],
+                                coalesced_width=16,
                             )
                             for j_s in T.Parallel(block_S):
                                 b_shared[stage, j_s] = b[batch_idx, left + j_s, bh]
@@ -472,6 +475,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                             T.copy(
                                 a[batch_idx, left:right, bh, 0:block_S],
                                 a_shared[stage, :, :],
+                                coalesced_width=16,
                             )
                             for j_s in T.Parallel(block_S):
                                 g_shared[stage, j_s] = g[batch_idx, left + j_s, bh]
@@ -513,6 +517,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                                     bh,
                                     bv * block_DV : (bv + 1) * block_DV,
                                 ],
+                                coalesced_width=16,
                             )
                         T.barrier_arrive(bar_5)
 
@@ -621,12 +626,8 @@ def fused_gdr_fwd(
     o = torch.empty_like(v)
 
     if is_cp:
-        # The CP inference path is CTA-resource limited on B200: the previous
-        # block_DV=64, 2-stage 512-thread kernel sat at one CTA/SM with ~147KB
-        # dynamic shared memory and 128 regs/thread. Use narrower DV tiles plus
-        # one shared-memory stage to target higher CTA residency.
-        block_DV = 32
-        num_stages = 1
+        block_DV = 64
+        num_stages = 2
     else:
         block_DV = _select_block_dv(real_batch_size, H)
         num_stages = 2
