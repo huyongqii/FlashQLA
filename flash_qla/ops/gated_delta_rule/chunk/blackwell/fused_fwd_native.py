@@ -194,10 +194,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
             )
 
             h_tmem = T.alloc_tmem((DK, tmem_width), dtype=accum_dtype)
-            uv_tmem = T.alloc_tmem((block_S, tmem_width), dtype=accum_dtype)
 
-            mbar_u = T.alloc_barrier(arrive_count=[1] * 8)
-            mbar_v = T.alloc_barrier(arrive_count=[1] * 8)
             mbar_h = T.alloc_barrier(arrive_count=[1] * 8)
             data_is_ready = T.alloc_barrier(arrive_count=[96] * 2)
             data_is_free = T.alloc_barrier(arrive_count=[384] * 2)
@@ -282,8 +279,6 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
 
                 for i_s in T.serial(num_iters):
                     stage = i_s % 2
-                    mbar_slot = i_s % 8
-                    mbar_phase = (i_s // 8) % 2
                     left = seq_start_idx + i_s * block_S
 
                     T.barrier_wait(data_is_ready[stage], (i_s // 2) % 2)
@@ -312,15 +307,12 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     T.barrier_arrive(bar_1)
 
                     T.barrier_wait(bar_1, i_s % 2)
-                    T.tcgen05_gemm(
+                    T.gemm(
                         k_shared[stage, :, :],
                         h_shared,
-                        uv_tmem[:, 0:block_DV],
+                        u_fragment,
                         clear_accum=True,
-                        mbar=mbar_u[mbar_slot],
                     )
-                    T.mbarrier_wait_parity(mbar_u[mbar_slot], mbar_phase)
-                    T.copy(uv_tmem[:, 0:block_DV], u_fragment)
 
                     # Fused: u_new = v_old - g_exp * u; write back to v_shared
                     # for next A@v GEMM. Replaces 3 separate Parallel passes
@@ -332,15 +324,12 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                         )
 
                     T.barrier_wait(bar_3, i_s % 2)
-                    T.tcgen05_gemm(
+                    T.gemm(
                         a_shared[stage, :, :],
                         v_shared[stage, :, :],
-                        uv_tmem[:, 0:block_DV],
+                        v_fragment,
                         clear_accum=True,
-                        mbar=mbar_v[mbar_slot],
                     )
-                    T.mbarrier_wait_parity(mbar_v[mbar_slot], mbar_phase)
-                    T.copy(uv_tmem[:, 0:block_DV], v_fragment)
 
                     # Write vd_shared first (un-scaled v), arrive bar_4 ASAP
                     # so consumer-O can start O += P @ Vd in parallel.
