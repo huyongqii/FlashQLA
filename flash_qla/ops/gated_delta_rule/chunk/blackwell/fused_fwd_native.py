@@ -195,12 +195,9 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
 
             h_tmem = T.alloc_tmem((DK, tmem_width), dtype=accum_dtype)
             uv_tmem = T.alloc_tmem((block_S, tmem_width), dtype=accum_dtype)
-            o_tmem = T.alloc_tmem((block_S, tmem_width), dtype=accum_dtype)
 
             mbar_u = T.alloc_barrier(arrive_count=[1] * 8)
             mbar_v = T.alloc_barrier(arrive_count=[1] * 8)
-            mbar_o0 = T.alloc_barrier(arrive_count=[1] * 8)
-            mbar_o1 = T.alloc_barrier(arrive_count=[1] * 8)
             mbar_h = T.alloc_barrier(arrive_count=[1] * 8)
             data_is_ready = T.alloc_barrier(arrive_count=[96] * 2)
             data_is_free = T.alloc_barrier(arrive_count=[384] * 2)
@@ -370,8 +367,6 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
 
                 for i_s in T.serial(num_iters):
                     stage = i_s % 2
-                    mbar_slot = i_s % 8
-                    mbar_phase = (i_s // 8) % 2
 
                     T.barrier_wait(data_is_ready[stage], (i_s // 2) % 2)
                     T.barrier_arrive(bar_0)
@@ -389,14 +384,14 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                         clear_accum=True,
                     )
 
-                    # ---- async issue: O = Q @ h (needs h_shared via bar_1) ----
+                    # O tile is only consumed by scalar postprocess and one
+                    # short P@Vd accumulation, so keep it in a fragment.
                     T.barrier_wait(bar_1, i_s % 2)
-                    T.tcgen05_gemm(
+                    T.gemm(
                         q_shared[stage, :, :],
                         h_shared,
-                        o_tmem[:, 0:block_DV],
+                        o_fragment,
                         clear_accum=True,
-                        mbar=mbar_o0[mbar_slot],
                     )
                     # ---- P scalar post-processing ----
                     for j_s, j_t in T.Parallel(block_S, block_S):
@@ -414,24 +409,16 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     T.copy(p_fragment, p_shared)
                     T.barrier_arrive(bar_3)
 
-                    # ---- wait O0, do its scalar post-processing ----
-                    T.mbarrier_wait_parity(mbar_o0[mbar_slot], mbar_phase)
-                    T.copy(o_tmem[:, 0:block_DV], o_fragment)
-
                     for j_s, j_v in T.Parallel(block_S, block_DV):
                         o_fragment[j_s, j_v] *= scale * g_exp_shared[j_s]
-                    T.copy(o_fragment, o_tmem[:, 0:block_DV])
 
                     T.barrier_wait(bar_4, i_s % 2)
-                    T.tcgen05_gemm(
+                    T.gemm(
                         p_shared,
                         vd_shared,
-                        o_tmem[:, 0:block_DV],
+                        o_fragment,
                         clear_accum=False,
-                        mbar=mbar_o1[mbar_slot],
                     )
-                    T.mbarrier_wait_parity(mbar_o1[mbar_slot], mbar_phase)
-                    T.copy(o_tmem[:, 0:block_DV], o_fragment)
                     T.barrier_arrive(bar_5)
 
                     T.barrier_wait(bar_5, i_s % 2)
