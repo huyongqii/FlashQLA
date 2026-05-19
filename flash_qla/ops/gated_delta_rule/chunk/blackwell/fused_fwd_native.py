@@ -251,6 +251,14 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                 T.set_max_nreg(CONSUMER_V_NREG, 1)
                 u_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
                 v_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
+                # vu_fragment holds v_new = v - g_exp * u in bf16 so that the
+                # subsequent A @ V_new GEMM can take its B operand directly
+                # from registers, breaking the v_shared SMEM RAW (write-back
+                # then re-load) that was the dominant L1TEX scoreboard stall
+                # in this warpgroup. Cost: ~16 reg/thread at block_DV=64.
+                vu_fragment = T.alloc_fragment(
+                    (block_S, block_DV), dtype=qkva_dtype
+                )
 
                 for i_s in T.serial(num_iters):
                     stage = i_s % num_stages
@@ -293,11 +301,15 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                         clear_accum=True,
                     )
 
-                    # Fused: u_new = v_old - g_exp * u; write back to v_shared
-                    # for next A@v GEMM. Replaces 3 separate Parallel passes
-                    # (3 sync points + 3 SMEM round-trips collapsed to 1).
+                    # Compute v_new = v_old - g_exp * u into a bf16 register
+                    # fragment instead of writing back to v_shared. This
+                    # eliminates the SMEM RAW (write v_shared -> read v_shared
+                    # in next GEMM) which was visible as a long L1TEX stall.
+                    # v_shared itself becomes read-only for cons-V across the
+                    # iteration; producer-V can re-fill v_shared as soon as
+                    # data_is_free fires next round.
                     for j_s, j_v in T.Parallel(block_S, block_DV):
-                        v_shared[stage, j_s, j_v] = (
+                        vu_fragment[j_s, j_v] = (
                             v_shared[stage, j_s, j_v]
                             - g_exp_shared[j_s] * u_fragment[j_s, j_v]
                         )
@@ -305,7 +317,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     T.barrier_wait(bar_3, i_s % 2)
                     T.gemm(
                         a_shared[stage, :, :],
-                        v_shared[stage, :, :],
+                        vu_fragment,
                         v_fragment,
                         clear_accum=True,
                     )
