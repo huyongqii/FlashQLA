@@ -34,7 +34,6 @@ class SeqLenConfig:
 
 
 FWD_MODEL_CONFIGS = [
-    ModelConfig("397B/122B TP4", 4, 16),
     ModelConfig("397B/122B TP2", 8, 32),
 ]
 
@@ -282,7 +281,7 @@ def main():
 
     gpu_name = torch.cuda.get_device_properties(0).name
     print(f"GPU: {gpu_name}")
-    print("Models: Qwen3.5 397B/122B TP2/TP4, d=128")
+    print("Models: Qwen3.5 397B/122B TP2, d=128")
     if visible_env:
         print(f"Env: {visible_env}")
     print(f"Config: Warmup={args.warmup}, Repeats={args.repeats}")
