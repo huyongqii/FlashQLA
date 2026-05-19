@@ -185,6 +185,9 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
             g_exp_shared = T.alloc_shared(
                 (block_S), dtype=accum_dtype, scope="shared"
             )
+            g_inv_exp_shared = T.alloc_shared(
+                (block_S), dtype=accum_dtype, scope="shared"
+            )
             b_shared = T.alloc_shared((2, block_S), dtype=accum_dtype, scope="shared")
             g_rev_exp_shared = T.alloc_shared(
                 (block_S), dtype=accum_dtype, scope="shared"
@@ -294,16 +297,13 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                         g_exp_shared[j_s] = T.exp2(
                             g_shared[stage, j_s] * 1.442695
                         )
+                        g_inv_exp_shared[j_s] = T.exp2(
+                            -g_shared[stage, j_s] * 1.442695
+                        )
                     for j_s in T.Parallel(block_S):
                         g_rev_exp_shared[j_s] = T.if_then_else(
                             left + j_s < seq_end_idx,
-                            T.exp2(
-                                (
-                                    g_shared[stage, block_S - 1]
-                                    - g_shared[stage, j_s]
-                                )
-                                * 1.442695
-                            ),
+                            g_exp_shared[block_S - 1] * g_inv_exp_shared[j_s],
                             0.0,
                         )
                     T.barrier_arrive(bar_1)
@@ -395,12 +395,8 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     # ---- P scalar post-processing ----
                     for j_s, j_t in T.Parallel(block_S, block_S):
                         if j_s >= j_t:
-                            decay_local[0] = T.exp2(
-                                (
-                                    g_shared[stage, j_s]
-                                    - g_shared[stage, j_t]
-                                )
-                                * 1.442695
+                            decay_local[0] = (
+                                g_exp_shared[j_s] * g_inv_exp_shared[j_t]
                             )
                             p_fragment[j_s, j_t] *= scale * decay_local[0]
                             a_shared[stage, j_s, j_t] *= decay_local[0]
