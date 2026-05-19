@@ -193,11 +193,9 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
             h_tmem = T.alloc_tmem((DK, tmem_width), dtype=accum_dtype)
             uv_tmem = T.alloc_tmem((block_S, tmem_width), dtype=accum_dtype)
             o_tmem = T.alloc_tmem((block_S, tmem_width), dtype=accum_dtype)
-            p_tmem = T.alloc_tmem((block_S, block_S), dtype=accum_dtype)
 
             mbar_u = T.alloc_barrier(arrive_count=[1] * 8)
             mbar_v = T.alloc_barrier(arrive_count=[1] * 8)
-            mbar_p = T.alloc_barrier(arrive_count=[1] * 8)
             mbar_o0 = T.alloc_barrier(arrive_count=[1] * 8)
             mbar_o1 = T.alloc_barrier(arrive_count=[1] * 8)
             mbar_h = T.alloc_barrier(arrive_count=[1] * 8)
@@ -372,17 +370,18 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     T.barrier_wait(data_is_ready[stage], (i_s // 2) % 2)
                     T.barrier_arrive(bar_0)
 
-                    # ---- async issue: P = Q @ K^T (depends on bar_0 only) ----
+                    # P is immediately consumed by scalar masking / decay, so
+                    # keep it in a fragment instead of round-tripping through
+                    # TMEM. TMEM is more useful for the long-lived O/H/UV
+                    # accumulators below.
                     T.barrier_wait(bar_0, i_s % 2)
-                    T.tcgen05_gemm(
+                    T.gemm(
                         q_shared[stage, :, :],
                         k_shared[stage, :, :],
-                        p_tmem,
+                        p_fragment,
                         transpose_B=True,
                         clear_accum=True,
-                        mbar=mbar_p[mbar_slot],
                     )
-                    # NOTE: do NOT wait on mbar_p yet -- let it run in background.
 
                     # ---- async issue: O = Q @ h (needs h_shared via bar_1) ----
                     T.barrier_wait(bar_1, i_s % 2)
@@ -393,12 +392,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                         clear_accum=True,
                         mbar=mbar_o0[mbar_slot],
                     )
-                    # Two TCGEN05 GEMMs are now in flight concurrently.
-
-                    # ---- wait P, do its scalar post-processing ----
-                    T.mbarrier_wait_parity(mbar_p[mbar_slot], mbar_phase)
-                    T.copy(p_tmem, p_fragment)
-
+                    # ---- P scalar post-processing ----
                     for j_s, j_t in T.Parallel(block_S, block_S):
                         if j_s >= j_t:
                             decay_local[0] = T.exp2(
