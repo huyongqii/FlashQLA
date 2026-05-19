@@ -357,94 +357,24 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     )
 
             elif tx < 256:
+                # Phase 1 sub-commit 1: cons-V is now an empty WG. Its work
+                # (g_*_shared, u, v_new in-place, vd, vn) was moved into
+                # cons-S above. We keep cons-V alive only so the existing
+                # arrive_counts of bar_1 (256), bar_5 (416), and data_is_free
+                # (384) remain valid; sub-commit 2 will delete it entirely
+                # and reduce thread count 512 -> 384.
                 if _disable_wg_reg:
                     T.disable_warp_group_reg_alloc()
                 else:
                     T.set_max_nreg(CONSUMER_V_NREG, 1)
-                u_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
-                v_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
 
                 for i_s in T.serial(num_iters):
                     stage = i_s % num_stages
                     stage_phase = (i_s // num_stages) % 2
-                    left = seq_start_idx + i_s * block_S
-
                     T.barrier_wait(data_is_ready[stage], stage_phase)
-
-                    # Drop bar_0: g_*_shared writes here only WAR against
-                    # cons-O's reads in the P-postprocess of the prev iter,
-                    # which all complete before cons-O's arrive bar_5. Since
-                    # cons-V also reaches arrive bar_5 each iter, the iter
-                    # boundary itself fences this WAR.
-                    for j_s in T.Parallel(block_S):
-                        g_exp_shared[j_s] = T.exp2(
-                            g_shared[stage, j_s] * 1.442695
-                        )
-                        g_inv_exp_shared[j_s] = T.exp2(
-                            -g_shared[stage, j_s] * 1.442695
-                        )
-                    for j_s in T.Parallel(block_S):
-                        g_rev_exp_shared[j_s] = T.if_then_else(
-                            left + j_s < seq_end_idx,
-                            T.exp2(
-                                (
-                                    g_shared[stage, block_S - 1]
-                                    - g_shared[stage, j_s]
-                                )
-                                * 1.442695
-                            ),
-                            0.0,
-                        )
                     T.barrier_arrive(bar_1)
-
-                    T.barrier_wait(bar_1, i_s % 2)
-                    T.gemm(
-                        k_shared[stage, :, :],
-                        h_shared,
-                        u_fragment,
-                        clear_accum=True,
-                    )
-
-                    # Move wait bar_3 up: it overlaps with the GEMM's commit
-                    # window. The v_shared elementwise below implicitly
-                    # waits on u_fragment, so the wait does not delay it.
-                    # cons-O now arrives bar_3 right after a_shared writes
-                    # (before T.copy(p, p_shared)), so this wait is even
-                    # more likely to be already-arrived by the time we hit it.
-                    T.barrier_wait(bar_3, i_s % 2)
-
-                    # In-place: v_new = v - g_exp * u, written back to
-                    # v_shared so the next GEMM can use it as B operand.
-                    # NOTE: this is the SMEM RAW path; Step E (fragment B)
-                    # broke correctness and was reverted.
-                    for j_s, j_v in T.Parallel(block_S, block_DV):
-                        v_shared[stage, j_s, j_v] = (
-                            v_shared[stage, j_s, j_v]
-                            - g_exp_shared[j_s] * u_fragment[j_s, j_v]
-                        )
-
-                    T.gemm(
-                        a_shared[stage, :, :],
-                        v_shared[stage, :, :],
-                        v_fragment,
-                        clear_accum=True,
-                    )
-
-                    # Write vd_shared first (un-scaled v), arrive bar_4 ASAP
-                    # so consumer-O can start O += P @ Vd in parallel.
-                    T.copy(v_fragment, vd_shared)
-                    T.barrier_arrive(bar_4)
-
-                    # Then produce vn_shared = v * g_rev_exp for consumer-S.
-                    # Fused: scale and write in one pass (was 2 passes).
-                    for j_s, j_v in T.Parallel(block_S, block_DV):
-                        vn_shared[j_s, j_v] = (
-                            v_fragment[j_s, j_v] * g_rev_exp_shared[j_s]
-                        )
                     T.barrier_arrive(bar_5)
-
                     T.barrier_wait(bar_5, i_s % 2)
-
                     T.barrier_arrive(data_is_free[stage])
 
             elif tx < 384:
