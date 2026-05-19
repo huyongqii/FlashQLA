@@ -494,6 +494,251 @@ def tilelang_prepare_h(
     return tilelang_prepare_h_kernel
 
 
+@tilelang.jit(
+    pass_configs={
+        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
+    },
+)
+def tilelang_prepare_h_cp_ht(
+    H,
+    Hg,
+    DK,
+    DV,
+    chunk_size,
+    block_DV,
+    accum_dtype,
+    qkva_dtype,
+    g_dtype,
+    b_dtype,
+    h0_dtype,
+    ht_dtype,
+    seqlen_dtype,
+    use_initial_state,
+    is_varlen,
+):
+    batch_size = T.dynamic("batch_size")
+    num_tokens = T.dynamic("num_tokens")
+    block_S = chunk_size
+    num_DV_blocks = T.ceildiv(DV, block_DV)
+
+    if is_varlen:
+        k_shape = (1, num_tokens, Hg, DK)
+        v_shape = (1, num_tokens, H, DV)
+        a_shape = (1, num_tokens, H, chunk_size)
+        g_shape = (1, num_tokens, H)
+        b_shape = (1, num_tokens, H)
+    else:
+        k_shape = (batch_size, num_tokens, Hg, DK)
+        v_shape = (batch_size, num_tokens, H, DV)
+        a_shape = (batch_size, num_tokens, H, chunk_size)
+        g_shape = (batch_size, num_tokens, H)
+        b_shape = (batch_size, num_tokens, H)
+    h0_shape = (batch_size, H, DK, DV)
+    ht_shape = (batch_size, H, DK, DV)
+
+    @T.prim_func
+    def tilelang_prepare_h_cp_ht_kernel(
+        k: T.Tensor(k_shape, dtype=qkva_dtype),
+        v: T.Tensor(v_shape, dtype=qkva_dtype),
+        a: T.Tensor(a_shape, dtype=qkva_dtype),
+        g: T.Tensor(g_shape, dtype=g_dtype),
+        b: T.Tensor(b_shape, dtype=b_dtype),
+        h0: T.Tensor(h0_shape, dtype=h0_dtype),
+        cu_seqlens: T.Tensor([batch_size + 1], dtype=seqlen_dtype),
+        num_warmup_chunks: T.Tensor([batch_size, H], dtype=seqlen_dtype),
+        ht: T.Tensor(ht_shape, dtype=ht_dtype),
+    ):
+        with T.Kernel(batch_size * H * num_DV_blocks, threads=384) as (bbhv,):
+            bbh, bv = bbhv // num_DV_blocks, bbhv % num_DV_blocks
+            bb, bh = bbh // H, bbh % H
+            bhg = bh // (H // Hg)
+
+            batch_idx = T.alloc_var("int32")
+            seq_start_idx = T.alloc_var("int32")
+            seq_end_idx = T.alloc_var("int32")
+            num_iters = T.alloc_var("int32")
+
+            batch_idx = 0 if is_varlen else bb
+            seq_start_idx = cu_seqlens[bb] if is_varlen else 0
+            seq_end_idx = cu_seqlens[bb + 1] if is_varlen else num_tokens
+            num_iters = num_warmup_chunks[bb, bh]
+            seq_start_idx = seq_end_idx - num_iters * block_S
+
+            k_shared = T.alloc_shared((block_S, DK), dtype=qkva_dtype)
+            v_shared = T.alloc_shared((block_S, block_DV), dtype=qkva_dtype)
+            a_shared = T.alloc_shared((block_S, block_S), dtype=qkva_dtype)
+            g_shared = T.alloc_shared((block_S), dtype=accum_dtype, scope="shared")
+            b_shared = T.alloc_shared((block_S), dtype=accum_dtype, scope="shared")
+            h_shared = T.alloc_shared((DK, block_DV), dtype=qkva_dtype)
+            x_shared = T.alloc_shared((block_S, DK), dtype=qkva_dtype)
+            y_shared = T.alloc_shared((block_S, block_DV), dtype=qkva_dtype)
+            g_rev_exp_shared = T.alloc_shared(
+                (block_S), dtype=accum_dtype, scope="shared"
+            )
+
+            h_fragment = T.alloc_fragment((DK, block_DV), dtype=accum_dtype)
+            x_fragment = T.alloc_fragment((block_S, DK), dtype=accum_dtype)
+            y_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
+            g_last_local_S = T.alloc_local((1), dtype=accum_dtype)
+            g_last_local_Y = T.alloc_local((1), dtype=accum_dtype)
+
+            data_loaded = T.alloc_barrier(arrive_count=384)
+            bar_1 = T.alloc_barrier(arrive_count=256)
+            bar_2 = T.alloc_barrier(arrive_count=384)
+            state_done = T.alloc_barrier(arrive_count=128)
+
+            T.use_swizzle(10)
+
+            tx = T.get_thread_binding()
+
+            CONSUMER_S_NREG = 112
+            CONSUMER_X_NREG = 112
+            CONSUMER_Y_NREG = 96
+
+            if tx < 128:
+                T.set_max_nreg(CONSUMER_S_NREG, 1)
+
+                if use_initial_state:
+                    T.copy(
+                        h0[
+                            bb,
+                            bh,
+                            0:DK,
+                            bv * block_DV : (bv + 1) * block_DV,
+                        ],
+                        h_fragment,
+                    )
+                else:
+                    T.clear(h_fragment)
+
+                for i_s in T.serial(num_iters):
+                    if i_s > 0:
+                        T.barrier_wait(state_done, (i_s - 1) % 2)
+
+                    left = seq_start_idx + i_s * block_S
+                    right = left + block_S
+                    T.copy(
+                        k[batch_idx, left:right, bhg, 0:DK],
+                        k_shared,
+                    )
+                    T.barrier_arrive(data_loaded)
+                    T.barrier_wait(data_loaded, i_s % 2)
+
+                    T.copy(h_fragment, h_shared)
+                    T.barrier_arrive(bar_1)
+
+                    T.barrier_wait(bar_1, i_s % 2)
+                    g_last_local_S[0] = T.exp2(g_shared[block_S - 1] * 1.442695)
+                    for j_k, j_v in T.Parallel(DK, block_DV):
+                        h_fragment[j_k, j_v] *= g_last_local_S[0]
+                    T.barrier_arrive(bar_2)
+
+                    T.barrier_wait(bar_2, i_s % 2)
+                    T.gemm(
+                        x_shared,
+                        y_shared,
+                        h_fragment,
+                        transpose_A=True,
+                        clear_accum=False,
+                    )
+                    T.barrier_arrive(state_done)
+
+                T.copy(
+                    h_fragment,
+                    ht[bb, bh, 0:DK, bv * block_DV : (bv + 1) * block_DV],
+                )
+
+            elif tx < 256:
+                T.set_max_nreg(CONSUMER_X_NREG, 1)
+
+                for i_s in T.serial(num_iters):
+                    if i_s > 0:
+                        T.barrier_wait(state_done, (i_s - 1) % 2)
+
+                    left = seq_start_idx + i_s * block_S
+                    right = left + block_S
+                    T.copy(
+                        a[batch_idx, left:right, bh, 0:block_S],
+                        a_shared,
+                    )
+                    if right <= seq_end_idx:
+                        for j_s in T.Parallel(block_S):
+                            b_shared[j_s] = b[batch_idx, left + j_s, bh]
+                    else:
+                        for j_s in T.Parallel(block_S):
+                            if left + j_s < seq_end_idx:
+                                b_shared[j_s] = b[batch_idx, left + j_s, bh]
+                            else:
+                                b_shared[j_s] = 0
+                    T.barrier_arrive(data_loaded)
+                    T.barrier_wait(data_loaded, i_s % 2)
+
+                    T.gemm(
+                        a_shared,
+                        k_shared,
+                        x_fragment,
+                        transpose_A=True,
+                        clear_accum=True,
+                    )
+                    for j_s, j_k in T.Parallel(block_S, DK):
+                        x_shared[j_s, j_k] = x_fragment[j_s, j_k] * -b_shared[j_s]
+                    T.barrier_arrive(bar_2)
+
+            else:
+                T.set_max_nreg(CONSUMER_Y_NREG, 1)
+
+                for i_s in T.serial(num_iters):
+                    if i_s > 0:
+                        T.barrier_wait(state_done, (i_s - 1) % 2)
+
+                    left = seq_start_idx + i_s * block_S
+                    right = left + block_S
+                    T.copy(
+                        v[
+                            batch_idx,
+                            left:right,
+                            bh,
+                            bv * block_DV : (bv + 1) * block_DV,
+                        ],
+                        v_shared,
+                    )
+                    if right <= seq_end_idx:
+                        for j_s in T.Parallel(block_S):
+                            g_shared[j_s] = g[batch_idx, left + j_s, bh]
+                    else:
+                        for j_s in T.Parallel(block_S):
+                            if left + j_s < seq_end_idx:
+                                g_shared[j_s] = g[batch_idx, left + j_s, bh]
+                            else:
+                                g_shared[j_s] = g[batch_idx, seq_end_idx - 1, bh]
+                    T.barrier_arrive(data_loaded)
+                    T.barrier_wait(data_loaded, i_s % 2)
+
+                    g_last_local_Y[0] = g_shared[block_S - 1]
+                    for j_s in T.Parallel(block_S):
+                        g_rev_exp_shared[j_s] = T.exp2(
+                            (g_last_local_Y[0] - g_shared[j_s]) * 1.442695
+                        )
+                    g_last_local_Y[0] = T.exp2(g_last_local_Y[0] * 1.442695)
+                    T.barrier_arrive(bar_1)
+
+                    T.barrier_wait(bar_1, i_s % 2)
+                    T.gemm(
+                        k_shared,
+                        h_shared,
+                        y_fragment,
+                        clear_accum=True,
+                    )
+                    for j_s, j_v in T.Parallel(block_S, block_DV):
+                        y_shared[j_s, j_v] = (
+                            y_fragment[j_s, j_v] * g_last_local_Y[0]
+                            - v_shared[j_s, j_v] * g_rev_exp_shared[j_s]
+                        )
+                    T.barrier_arrive(bar_2)
+
+    return tilelang_prepare_h_cp_ht_kernel
+
+
 def fused_gdr_h(
     k: torch.Tensor,
     v: torch.Tensor,
@@ -542,11 +787,44 @@ def fused_gdr_h(
         initial_state = torch.empty(
             (real_batch_size, H, K, V), dtype=torch.float32, device=k.device
         )
-    h = torch.empty((batch_size, num_chunks, H, K, V), dtype=k.dtype, device=k.device)
     ht_dtype = torch.bfloat16 if is_cp else torch.float32
     final_state = torch.empty(
         (real_batch_size, H, K, V), dtype=ht_dtype, device=k.device
     )
+    if is_cp and output_final_state and not output_h and not output_correction:
+        block_DV = 64
+        assert V % block_DV == 0
+        tilelang_prepare_h_cp_ht_kernel = tilelang_prepare_h_cp_ht(
+            H,
+            Hg,
+            K,
+            V,
+            chunk_size,
+            block_DV,
+            qkva_dtype=k.dtype,
+            g_dtype=g.dtype,
+            b_dtype=b.dtype,
+            h0_dtype=initial_state.dtype,
+            ht_dtype=final_state.dtype,
+            seqlen_dtype=cu_seqlens.dtype,
+            accum_dtype="float32",
+            use_initial_state=use_initial_state,
+            is_varlen=is_varlen,
+        )
+        tilelang_prepare_h_cp_ht_kernel(
+            k,
+            v,
+            a,
+            g,
+            b,
+            initial_state,
+            cu_seqlens,
+            num_warmup_chunks,
+            final_state,
+        )
+        return None, final_state, None
+
+    h = torch.empty((batch_size, num_chunks, H, K, V), dtype=k.dtype, device=k.device)
     final_correction = torch.empty(
         (real_batch_size, H, K, K), dtype=ht_dtype, device=k.device
     )
