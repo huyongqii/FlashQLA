@@ -878,7 +878,7 @@ def tilelang_prepare_h_cp_v3(
         ht: T.Tensor(ht_shape, dtype=ht_dtype),
         mt: T.Tensor(m_shape, dtype=ht_dtype),
     ):
-        with T.Kernel(batch_size * H * tiles_per_head, threads=384) as (bbht,):
+        with T.Kernel(batch_size * H * tiles_per_head, threads=512) as (bbht,):
             bbh, tile = bbht // tiles_per_head, bbht % tiles_per_head
             bb, bh = bbh // H, bbh % H
             bhg = bh // (H // Hg)
@@ -1017,7 +1017,7 @@ def tilelang_prepare_h_cp_v3(
                         T.barrier_arrive(bar_2)
                         T.barrier_arrive(iter_done)
 
-                else:
+                elif tx < 384:
                     T.set_max_nreg(96, 1)
 
                     for i_s in T.serial(num_iters):
@@ -1067,6 +1067,9 @@ def tilelang_prepare_h_cp_v3(
                         T.barrier_arrive(bar_2)
                         T.barrier_arrive(iter_done)
 
+                else:
+                    T.set_max_nreg(24, 0)
+
             else:
                 bm = tile - num_DV_blocks
                 calc_mt = T.alloc_var("bool")
@@ -1102,6 +1105,9 @@ def tilelang_prepare_h_cp_v3(
 
                 elif tx < 256:
                     T.set_max_nreg(96, 1)
+
+                else:
+                    T.set_max_nreg(24, 0)
 
                 if calc_mt:
                     if tx < 256:
