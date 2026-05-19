@@ -185,10 +185,10 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
             T.use_swizzle(10)
             tx = T.get_thread_binding()
 
-            PRODUCER_NREG = 32
-            CONSUMER_S_NREG = 160
-            CONSUMER_V_NREG = 128
-            CONSUMER_O_NREG = 128
+            PRODUCER_NREG = 24
+            CONSUMER_S_NREG = 168
+            CONSUMER_V_NREG = 160
+            CONSUMER_O_NREG = 160
 
             num_iters = T.ceildiv(seq_end_idx - seq_start_idx, block_S)
             if max_iters > 0 and num_iters > max_iters:
