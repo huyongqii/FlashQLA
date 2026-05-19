@@ -663,6 +663,15 @@ def fused_gdr_fwd(
     _override = os.environ.get("FLASHQLA_BLOCK_DV", "")
     if _override:
         block_DV = int(_override)
+    # SMEM-experiment knob: NCU shows 147 KB SMEM/block is one of the two
+    # caps that pin us to 1 block/SM. Lowering num_stages to 1 cuts the
+    # double-buffered SMEM (q_shared, k_shared, v_shared, a_shared,
+    # data_is_ready/free) roughly in half. Set FLASHQLA_NUM_STAGES=1 to
+    # test whether dropping the double-buffer pipeline is a net win when
+    # tensor-core util is already 8%.
+    _stages_override = os.environ.get("FLASHQLA_NUM_STAGES", "")
+    if _stages_override:
+        num_stages = int(_stages_override)
     if block_DV not in (32, 64, 128):
         raise ValueError(
             f"Blackwell native fwd selected invalid block_DV={block_DV}"
