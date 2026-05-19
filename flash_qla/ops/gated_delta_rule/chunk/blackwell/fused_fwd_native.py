@@ -41,6 +41,33 @@ def _select_block_dv(real_batch_size: int, num_v_heads: int) -> int:
     return 32
 
 
+def _select_tmem_width(block_DV: int) -> int:
+    """Select TMEM column width for the per-CTA accumulators.
+
+    Blackwell's `tcgen05.alloc` granularity is a power-of-two number of
+    columns with a minimum of 32. Previously this was hard-coded to 128 even
+    when `block_DV` was 32 or 64, wasting 50%~75% of the per-CTA TMEM
+    accumulator footprint and inflating alloc / dealloc / barrier latency.
+    Match the actual `[:, 0:block_DV]` slice used inside the kernel so the
+    allocation is tight (still respecting the 32-column minimum).
+    """
+    override = os.environ.get("FLASHQLA_TMEM_WIDTH", "")
+    if override:
+        return int(override)
+    if block_DV <= 32:
+        return 32
+    if block_DV <= 64:
+        return 64
+    return 128
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "")
+    if not raw:
+        return default
+    return int(raw)
+
+
 @tilelang.jit(
     pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
@@ -636,7 +663,12 @@ def fused_gdr_fwd(
         raise ValueError(
             f"Blackwell native fwd selected invalid block_DV={block_DV}"
         )
-    tmem_width = 128
+    tmem_width = _select_tmem_width(block_DV)
+    if tmem_width < block_DV:
+        raise ValueError(
+            f"Blackwell native fwd: tmem_width={tmem_width} smaller than "
+            f"block_DV={block_DV}"
+        )
     max_iters = 0
     num_threads = 512
     if cu_seqlens is None:
