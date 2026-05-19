@@ -424,6 +424,7 @@ def test_gated_delta_rule(
             "tilelang_prepare_h_kernel_kernel",
             "tilelang_prepare_h_cp_kernel_kernel",
             "tilelang_prepare_h_cp_v2_kernel_kernel",
+            "tilelang_prepare_h_cp_v3_kernel_kernel",
             "tilelang_prepare_h_cp_ht_kernel_kernel",
         )
         cp_c_kernels = (

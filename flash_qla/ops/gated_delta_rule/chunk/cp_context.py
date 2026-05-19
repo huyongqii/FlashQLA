@@ -255,8 +255,6 @@ def _prepare_cp_buffers(
         num_warmup_chunks=num_warmup_chunks,
     )
     if is_blackwell(_cc):
-        # When correction is needed, fused_gdr_h intentionally falls back to the
-        # original prepare_h kernel that computes ht and mt in one launch.
         fwd_h_kwargs["output_correction"] = needs_correction
         fwd_h_kwargs["fallback_mask"] = fallback_mask
 
