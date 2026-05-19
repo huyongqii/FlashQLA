@@ -28,10 +28,7 @@ MULTI_PROCESSOR_COUNT = torch.cuda.get_device_properties().multi_processor_count
 
 
 def _debug_cp_enabled() -> bool:
-    return (
-        os.environ.get("FLASHQLA_DEBUG_CP", "") == "1"
-        or os.environ.get("FLASHQLA_DEBUG_BLACKWELL_DISPATCH", "") == "1"
-    )
+    return os.environ.get("FLASHQLA_DEBUG_CP", "") == "1"
 
 
 def _debug_cp_log(message: str) -> None:

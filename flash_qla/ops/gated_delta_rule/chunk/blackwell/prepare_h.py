@@ -1340,10 +1340,7 @@ def fused_gdr_h(
                 debug_global_store=cp_prepare_debug_mode == "ht_global_store",
                 use_nreg=cp_prepare_debug_mode == "ht_copy_only",
             )
-            if (
-                os.environ.get("FLASHQLA_DEBUG_CP", "") == "1"
-                or os.environ.get("FLASHQLA_DEBUG_BLACKWELL_DISPATCH", "") == "1"
-            ):
+            if os.environ.get("FLASHQLA_DEBUG_CP", "") == "1":
                 print(
                     "[FlashQLA CP] prepare_h ht debug launch "
                     f"threads=384 block_DV={block_DV} H={H} K={K} V={V} "
@@ -1376,10 +1373,7 @@ def fused_gdr_h(
             debug_skip_ht=debug_skip_ht,
             debug_skip_mt=debug_skip_mt,
         )
-        if (
-            os.environ.get("FLASHQLA_DEBUG_CP", "") == "1"
-            or os.environ.get("FLASHQLA_DEBUG_BLACKWELL_DISPATCH", "") == "1"
-        ):
+        if os.environ.get("FLASHQLA_DEBUG_CP", "") == "1":
             print(
                 "[FlashQLA CP] prepare_h v3 launch "
                 f"threads=384 block_DV={block_DV} H={H} Hg={Hg} K={K} V={V} "
