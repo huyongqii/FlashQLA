@@ -303,7 +303,13 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     for j_s in T.Parallel(block_S):
                         g_rev_exp_shared[j_s] = T.if_then_else(
                             left + j_s < seq_end_idx,
-                            g_exp_shared[block_S - 1] * g_inv_exp_shared[j_s],
+                            T.exp2(
+                                (
+                                    g_shared[stage, block_S - 1]
+                                    - g_shared[stage, j_s]
+                                )
+                                * 1.442695
+                            ),
                             0.0,
                         )
                     T.barrier_arrive(bar_1)
