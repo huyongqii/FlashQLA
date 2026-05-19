@@ -270,8 +270,12 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     left = seq_start_idx + i_s * block_S
                     T.barrier_wait(data_is_ready[stage], stage_phase)
 
-                    # g_*_shared (was cons-V). Must complete before arrive
-                    # bar_1 so cons-O can read them after wait bar_1.
+                    # Sub-commit 3-C: fuse the three g_*_shared passes.
+                    # All three results are pure functions of g_shared[stage, *]
+                    # (with a single broadcast read of g_shared[stage,B-1])
+                    # so they can run in one T.Parallel(block_S) over the same
+                    # 128-thread WG. Saves two pass-level fences vs. the
+                    # original 2 separate T.Parallel blocks.
                     for j_s in T.Parallel(block_S):
                         g_exp_shared[j_s] = T.exp2(
                             g_shared[stage, j_s] * 1.442695
@@ -279,7 +283,6 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                         g_inv_exp_shared[j_s] = T.exp2(
                             -g_shared[stage, j_s] * 1.442695
                         )
-                    for j_s in T.Parallel(block_S):
                         g_rev_exp_shared[j_s] = T.if_then_else(
                             left + j_s < seq_end_idx,
                             T.exp2(
@@ -308,7 +311,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
 
                     # bar_3: cons-O signals that its a_shared rewrites
                     # (decay+b_shared, upper-triangle zero) are committed.
-                    # Move wait up so it overlaps the K^T@h commit window.
+                    # Cannot move earlier (would deadlock with bar_1).
                     T.barrier_wait(bar_3, i_s % 2)
 
                     # v_new = v - g_exp * u (in-place SMEM RAW; was cons-V).
@@ -326,14 +329,16 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                         clear_accum=True,
                     )
 
-                    # vd_shared for cons-O. Arrive bar_4 ASAP so cons-O can
-                    # start P @ Vd in parallel with our remaining work.
+                    # vd_shared store + arrive bar_4 ASAP, so cons-O can start
+                    # P @ Vd in parallel with the vn_shared compute below.
+                    # Kept separate from vn_shared on purpose: merging the two
+                    # SMEM stores would delay bar_4 by one pass and cost the
+                    # cons-S/cons-O overlap.
                     T.copy(vd_fragment, vd_shared)
                     T.barrier_arrive(bar_4)
 
-                    # vn_shared = vd * g_rev_exp (fused; was cons-V).
-                    # Goes back to SMEM because tcgen05 SS gemm requires
-                    # SMEM B operand.
+                    # vn_shared = vd * g_rev_exp; SMEM is required because
+                    # cons-S's K^T @ vn_shared is an SS gemm.
                     for j_s, j_v in T.Parallel(block_S, block_DV):
                         vn_shared[j_s, j_v] = (
                             vd_fragment[j_s, j_v] * g_rev_exp_shared[j_s]
@@ -343,6 +348,11 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     g_last_local[0] = g_exp_shared[block_S - 1]
                     for j_k, j_v in T.Parallel(DK, block_DV):
                         h_fragment[j_k, j_v] *= g_last_local[0]
+                    # bar_5 fences cons-O's cur-iter Q@H read of h_shared
+                    # against cons-S's NEXT-iter T.copy(h, h_shared). Cannot
+                    # be dropped because h_shared is unstaged: the
+                    # data_is_free[stage] chain only synchronizes the
+                    # round-robin'ed q/k/v/a buffers, not h_shared.
                     T.barrier_arrive(bar_5)
                     T.barrier_wait(bar_5, i_s % 2)
 

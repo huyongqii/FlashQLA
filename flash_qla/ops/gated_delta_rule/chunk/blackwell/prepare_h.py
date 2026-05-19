@@ -1300,7 +1300,7 @@ def fused_gdr_h(
     )
     if is_cp and output_final_state and not output_h:
         block_DV_env = os.environ.get("FLASHQLA_CP_H_BLOCK_DV", "").strip()
-        block_DV = int(block_DV_env) if block_DV_env else 32
+        block_DV = int(block_DV_env) if block_DV_env else 64
         if block_DV not in (32, 64):
             raise ValueError(
                 "FLASHQLA_CP_H_BLOCK_DV must be 32 or 64, "
