@@ -167,21 +167,33 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                 (block_S), dtype=accum_dtype, scope="shared"
             )
 
+            # Sub-commit 2: dropped cons-V WG. Total consumer threads now
+            # 256 (cons-S 128 + cons-O 128). Total CTA threads = 384.
             data_is_ready = T.alloc_barrier(arrive_count=[96] * num_stages)
-            data_is_free = T.alloc_barrier(arrive_count=[384] * num_stages)
+            data_is_free = T.alloc_barrier(arrive_count=[256] * num_stages)
             bar_o = T.alloc_barrier(arrive_count=128)
-            # bar_0: only fences cons-O's o_shared write (prev iter, completed
-            # before cons-O re-arrives bar_0 via data_is_free → data_is_ready)
-            # against prod-output's o_shared read (cur iter). cons-S and
-            # cons-V used to participate as a cross-warpgroup iter-start
-            # barrier, but their h_shared / g_*_shared WAR are already covered
-            # by bar_5 (which all of them rendezvous on at iter end). So the
-            # cons-S / cons-V seats here were pure stalls — drop them.
+            # bar_0: cons-O (128) + prod-output (32) iter-start rendezvous
+            # for o_shared WAR (prod-output reads prev iter's o_shared,
+            # cons-O writes cur iter's o_shared). cons-S / cons-V seats
+            # were already dropped earlier.
             bar_0 = T.alloc_barrier(arrive_count=160)
-            bar_1 = T.alloc_barrier(arrive_count=256)
+            # bar_1: cons-S → cons-O h_shared WAR (cons-S writes h_shared,
+            # cons-O reads it for Q@H). After sub-commit 2 only cons-S
+            # arrives (cons-V stub gone). cons-O still waits.
+            bar_1 = T.alloc_barrier(arrive_count=128)
+            # bar_3: cons-O → cons-S a_shared WAR (cons-O rewrites a with
+            # decay/b/upper-triangle-zero before cons-S's GEMM(a, v)).
             bar_3 = T.alloc_barrier(arrive_count=128)
+            # bar_4: cons-S → cons-O vd_shared (cons-S writes vd, cons-O
+            # reads it for P@Vd). Sub-commit 1 moved this arrive from
+            # cons-V into cons-S.
             bar_4 = T.alloc_barrier(arrive_count=128)
-            bar_5 = T.alloc_barrier(arrive_count=416)
+            # bar_5: iter-end rendezvous between cons-S (128) + cons-O
+            # (128) + prod-output (32). Fences cons-S's next-iter h_shared
+            # overwrite against cons-O's cur-iter Q@H read, and cons-O's
+            # cur-iter o_shared write against prod-output's prev-iter
+            # o_shared read. Sub-commit 3 may dissolve this further.
+            bar_5 = T.alloc_barrier(arrive_count=288)
 
             T.use_swizzle(10)
             tx = T.get_thread_binding()
@@ -357,27 +369,6 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     )
 
             elif tx < 256:
-                # Phase 1 sub-commit 1: cons-V is now an empty WG. Its work
-                # (g_*_shared, u, v_new in-place, vd, vn) was moved into
-                # cons-S above. We keep cons-V alive only so the existing
-                # arrive_counts of bar_1 (256), bar_5 (416), and data_is_free
-                # (384) remain valid; sub-commit 2 will delete it entirely
-                # and reduce thread count 512 -> 384.
-                if _disable_wg_reg:
-                    T.disable_warp_group_reg_alloc()
-                else:
-                    T.set_max_nreg(CONSUMER_V_NREG, 1)
-
-                for i_s in T.serial(num_iters):
-                    stage = i_s % num_stages
-                    stage_phase = (i_s // num_stages) % 2
-                    T.barrier_wait(data_is_ready[stage], stage_phase)
-                    T.barrier_arrive(bar_1)
-                    T.barrier_arrive(bar_5)
-                    T.barrier_wait(bar_5, i_s % 2)
-                    T.barrier_arrive(data_is_free[stage])
-
-            elif tx < 384:
                 if _disable_wg_reg:
                     T.disable_warp_group_reg_alloc()
                 else:
@@ -480,7 +471,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     T.disable_warp_group_reg_alloc()
                 else:
                     T.set_max_nreg(PRODUCER_NREG, 0)
-                if tx < 416:
+                if tx < 288:
                     for i_s in T.serial(num_iters):
                         stage = i_s % num_stages
                         free_phase = (i_s // num_stages + 1) % 2
@@ -514,7 +505,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
 
                         T.barrier_arrive(data_is_ready[stage])
 
-                elif tx < 448:
+                elif tx < 320:
                     for i_s in T.serial(num_iters):
                         stage = i_s % num_stages
                         free_phase = (i_s // num_stages + 1) % 2
@@ -556,7 +547,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
 
                         T.barrier_arrive(data_is_ready[stage])
 
-                elif tx < 480:
+                elif tx < 352:
                     for i_s in T.serial(num_iters):
                         stage = i_s % num_stages
                         free_phase = (i_s // num_stages + 1) % 2
@@ -741,7 +732,14 @@ def fused_gdr_fwd(
             f"Blackwell native fwd selected invalid block_DV={block_DV}"
         )
     max_iters = 0
-    num_threads = 512
+    # Sub-commit 2: cons-V WG removed. Layout:
+    #   tx <128: cons-S (full H pipeline)
+    #   tx <256: cons-O
+    #   tx <288: producer-QK (32t)
+    #   tx <320: producer-Vb (32t)
+    #   tx <352: producer-Ag (32t)
+    #   tx <384: producer-output (32t)
+    num_threads = 384
     if cu_seqlens is None:
         has_ragged_tail = num_tokens % chunk_size != 0
     else:
