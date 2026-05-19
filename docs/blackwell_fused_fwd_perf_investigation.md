@@ -1,10 +1,15 @@
 # Blackwell `fused_fwd_native` Performance Investigation
 
-> **Status**: In progress. Major win identified (`disable_warp_group_reg_alloc` → 2.8× speedup). Further headroom requires grid-level changes.
+> **Status (2026-05-20 evening update)**:
+> - Phase 1 done: cons-S/cons-V merged, cons-V WG deleted, threads 512→384, barrier counts tightened.
+> - **CP path: 1.408 → 1.275ms (-9%, speedup 0.71× → 0.75×)**.
+> - **CONS_O_NOOP path: 1.03× FLA total** (H pipeline is no longer the bottleneck).
+> - no-CP path unchanged at 0.62×; bottleneck has shifted to cons-O internals.
+> - Phase 2 plan in `blackwell_fused_fwd_phase2_plan.md`. Next step requires NCU baseline before any code change.
 >
 > **Target file**: `flash_qla/ops/gated_delta_rule/chunk/blackwell/fused_fwd_native.py`
 >
-> **Workload (all measurements)**: `B=1, Hk=8, Hv=32, T=32768, D=DV=128`, `--set profile`, no CP.
+> **Workload (all measurements)**: `B=1, Hk=8, Hv=32, T=32768, D=DV=128`, `--set profile`, no CP unless noted.
 >
 > **Hardware**: NVIDIA Blackwell (CC 10.3, 132 SMs, 228 KB SMEM/SM, 65536 register/SM, 64 warp/SM).
 

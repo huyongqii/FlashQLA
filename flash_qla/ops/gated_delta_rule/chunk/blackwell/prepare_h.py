@@ -986,14 +986,6 @@ def tilelang_prepare_h_cp_v3(
                 num_iters = num_warmup_chunks[bb, bh]
                 seq_start_idx = seq_end_idx - num_iters * block_S
 
-                h_fragment = T.alloc_fragment((DK, block_DV), dtype=accum_dtype)
-                x_fragment = T.alloc_fragment((block_S, DK), dtype=accum_dtype)
-                y_fragment = T.alloc_fragment(
-                    (block_S, block_DV), dtype=accum_dtype
-                )
-                g_last_local_S = T.alloc_local((1), dtype=accum_dtype)
-                g_last_local_Y = T.alloc_local((1), dtype=accum_dtype)
-
                 data_loaded = T.alloc_barrier(arrive_count=384)
                 bar_1 = T.alloc_barrier(arrive_count=256)
                 bar_2 = T.alloc_barrier(arrive_count=384)
@@ -1002,6 +994,9 @@ def tilelang_prepare_h_cp_v3(
                 T.use_swizzle(10)
 
                 if tx < 128:
+                    h_fragment = T.alloc_fragment((DK, block_DV), dtype=accum_dtype)
+                    g_last_local_S = T.alloc_local((1), dtype=accum_dtype)
+
                     if use_initial_state:
                         T.copy(
                             h0[
@@ -1052,6 +1047,8 @@ def tilelang_prepare_h_cp_v3(
                     )
 
                 elif tx < 256:
+                    x_fragment = T.alloc_fragment((block_S, DK), dtype=accum_dtype)
+
                     for i_s in T.serial(num_iters):
                         if i_s > 0:
                             T.barrier_wait(iter_done, (i_s - 1) % 2)
@@ -1084,6 +1081,11 @@ def tilelang_prepare_h_cp_v3(
                         T.barrier_arrive(iter_done)
 
                 else:
+                    y_fragment = T.alloc_fragment(
+                        (block_S, block_DV), dtype=accum_dtype
+                    )
+                    g_last_local_Y = T.alloc_local((1), dtype=accum_dtype)
+
                     for i_s in T.serial(num_iters):
                         if i_s > 0:
                             T.barrier_wait(iter_done, (i_s - 1) % 2)
@@ -1146,15 +1148,17 @@ def tilelang_prepare_h_cp_v3(
                 num_iters = num_warmup_chunks[bb, bh]
                 seq_start_idx = seq_end_idx - num_iters * block_S
 
-                m_fragment = T.alloc_fragment((DK, block_DV), dtype=accum_dtype)
-                x_fragment = T.alloc_fragment((block_S, DK), dtype=accum_dtype)
-                z_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
-                g_prod_M = T.alloc_local((1), dtype=accum_dtype)
-
                 data_loaded = T.alloc_barrier(arrive_count=256)
                 iter_done = T.alloc_barrier(arrive_count=256)
 
                 if tx < 128:
+                    m_fragment = T.alloc_fragment((DK, block_DV), dtype=accum_dtype)
+                    x_fragment = T.alloc_fragment((block_S, DK), dtype=accum_dtype)
+                    z_fragment = T.alloc_fragment(
+                        (block_S, block_DV), dtype=accum_dtype
+                    )
+                    g_prod_M = T.alloc_local((1), dtype=accum_dtype)
+
                     for j_k, j_v in T.Parallel(DK, block_DV):
                         if j_k == bm * block_DV + j_v:
                             m_fragment[j_k, j_v] = 1
@@ -1162,71 +1166,45 @@ def tilelang_prepare_h_cp_v3(
                             m_fragment[j_k, j_v] = 0
                     g_prod_M[0] = 0
 
-                elif tx < 256:
-                    pass
-
-                if tx < 256:
                     for i_s in T.serial(num_iters):
                         if i_s > 0:
                             T.barrier_wait(iter_done, (i_s - 1) % 2)
 
                         left = seq_start_idx + i_s * block_S
                         right = left + block_S
-                        if tx < 128:
-                            T.copy(k[batch_idx, left:right, bhg, 0:DK], k_shared)
-                        else:
-                            T.copy(
-                                a[batch_idx, left:right, bh, 0:block_S],
-                                a_shared,
-                            )
-                            if right <= seq_end_idx:
-                                for j_s in T.Parallel(block_S):
-                                    b_shared[j_s] = b[batch_idx, left + j_s, bh]
-                                    g_shared[j_s] = g[batch_idx, left + j_s, bh]
-                            else:
-                                for j_s in T.Parallel(block_S):
-                                    if left + j_s < seq_end_idx:
-                                        b_shared[j_s] = b[batch_idx, left + j_s, bh]
-                                        g_shared[j_s] = g[batch_idx, left + j_s, bh]
-                                    else:
-                                        b_shared[j_s] = 0
-                                        g_shared[j_s] = g[
-                                            batch_idx, seq_end_idx - 1, bh
-                                        ]
+                        T.copy(k[batch_idx, left:right, bhg, 0:DK], k_shared)
                         T.barrier_arrive(data_loaded)
                         T.barrier_wait(data_loaded, i_s % 2)
 
-                        if tx < 128:
-                            T.gemm(
-                                a_shared,
-                                k_shared,
-                                x_fragment,
-                                transpose_A=True,
-                                clear_accum=True,
+                        T.gemm(
+                            a_shared,
+                            k_shared,
+                            x_fragment,
+                            transpose_A=True,
+                            clear_accum=True,
+                        )
+                        for j_s, j_k in T.Parallel(block_S, DK):
+                            x_shared[j_s, j_k] = (
+                                x_fragment[j_s, j_k] * -b_shared[j_s]
                             )
-                            for j_s, j_k in T.Parallel(block_S, DK):
-                                x_shared[j_s, j_k] = (
-                                    x_fragment[j_s, j_k] * -b_shared[j_s]
-                                )
-                            g_prod_M[0] += g_shared[block_S - 1]
-                            T.copy(m_fragment, state_shared)
-                            T.gemm(
-                                k_shared,
-                                state_shared,
-                                z_fragment,
-                                clear_accum=True,
-                            )
-                            T.copy(z_fragment, rhs_shared)
-                            T.gemm(
-                                x_shared,
-                                rhs_shared,
-                                m_fragment,
-                                transpose_A=True,
-                                clear_accum=False,
-                            )
+                        g_prod_M[0] += g_shared[block_S - 1]
+                        T.copy(m_fragment, state_shared)
+                        T.gemm(
+                            k_shared,
+                            state_shared,
+                            z_fragment,
+                            clear_accum=True,
+                        )
+                        T.copy(z_fragment, rhs_shared)
+                        T.gemm(
+                            x_shared,
+                            rhs_shared,
+                            m_fragment,
+                            transpose_A=True,
+                            clear_accum=False,
+                        )
                         T.barrier_arrive(iter_done)
 
-                if tx < 128:
                     g_prod_M[0] = T.exp2(g_prod_M[0] * 1.442695)
                     for j_k, j_v in T.Parallel(DK, block_DV):
                         m_fragment[j_k, j_v] *= g_prod_M[0]
@@ -1234,6 +1212,35 @@ def tilelang_prepare_h_cp_v3(
                         m_fragment,
                         mt[bb, bh, 0:DK, bm * block_DV : (bm + 1) * block_DV],
                     )
+
+                elif tx < 256:
+                    for i_s in T.serial(num_iters):
+                        if i_s > 0:
+                            T.barrier_wait(iter_done, (i_s - 1) % 2)
+
+                        left = seq_start_idx + i_s * block_S
+                        right = left + block_S
+                        T.copy(
+                            a[batch_idx, left:right, bh, 0:block_S],
+                            a_shared,
+                        )
+                        if right <= seq_end_idx:
+                            for j_s in T.Parallel(block_S):
+                                b_shared[j_s] = b[batch_idx, left + j_s, bh]
+                                g_shared[j_s] = g[batch_idx, left + j_s, bh]
+                        else:
+                            for j_s in T.Parallel(block_S):
+                                if left + j_s < seq_end_idx:
+                                    b_shared[j_s] = b[batch_idx, left + j_s, bh]
+                                    g_shared[j_s] = g[batch_idx, left + j_s, bh]
+                                else:
+                                    b_shared[j_s] = 0
+                                    g_shared[j_s] = g[
+                                        batch_idx, seq_end_idx - 1, bh
+                                    ]
+                        T.barrier_arrive(data_loaded)
+                        T.barrier_wait(data_loaded, i_s % 2)
+                        T.barrier_arrive(iter_done)
 
     return tilelang_prepare_h_cp_v3_kernel
 

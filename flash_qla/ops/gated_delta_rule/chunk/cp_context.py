@@ -35,25 +35,15 @@ def _default_cp_max_local_chunks(
     num_chunks: list[int],
     num_v_heads: int,
 ) -> int:
-    total_chunks = sum(num_chunks)
-    max_seq_chunks = max(num_chunks)
-    base_chunks = _nearest_power_of_two(
-        math.sqrt(num_v_heads * total_chunks / MULTI_PROCESSOR_COUNT) * 3
+    # Latency model: T = a·L_cp + b·(B·H·Lc/P) / L_cp + c.
+    # Minimizing T yields L_cp* ∝ sqrt(B·H·Lc/P).  The empirical scale
+    # factor 3 keeps enough CP parallelism for fused_gdr; Blackwell profiling
+    # showed that coarser splits reduce cp-h/cp-c but slow fused_gdr more.
+    max_local_chunks = _nearest_power_of_two(
+        math.sqrt(num_v_heads * sum(num_chunks) / MULTI_PROCESSOR_COUNT) * 3
     )
-
-    if is_blackwell(_cc):
-        # SM100 fused GDR is now faster after disabling warp-group register
-        # reallocation, so the CP split should amortize prepare_h/correction
-        # more aggressively than the Hopper-tuned policy.  Keep the split
-        # count high enough for long sequences, but avoid doubling cp-h/cp-c
-        # work at 16K/32K tokens.
-        if max_seq_chunks >= 512:
-            base_chunks = max(base_chunks, 64)
-        elif max_seq_chunks >= 256:
-            base_chunks = max(base_chunks, 32)
-
     # Set min to 4 to ensure multi-stage pipelining in fused_gdr.
-    return max(base_chunks, 4)
+    return max(max_local_chunks, 4)
 
 
 def _debug_cp_enabled() -> bool:
