@@ -43,7 +43,6 @@ def _calc_cp_seqs(
     raw_cu_seqlens: torch.LongTensor,
     chunk_size: int,
     num_v_heads: int,
-    max_local_chunks_override: int = 0,
 ):
     # TODO: tilelang kernel
     device = raw_cu_seqlens.device
@@ -60,9 +59,7 @@ def _calc_cp_seqs(
     # Scaled by empirical factor (3) and aligned to the nearest power of 2 for optimal SM scheduling & memory alignment.
 
     max_local_chunks_env = os.environ.get("FLASHQLA_CP_MAX_LOCAL_CHUNKS", "").strip()
-    if max_local_chunks_override > 0:
-        max_local_chunks = max_local_chunks_override
-    elif max_local_chunks_env:
+    if max_local_chunks_env:
         max_local_chunks = int(max_local_chunks_env)
         if max_local_chunks < 1:
             raise ValueError(
@@ -139,15 +136,7 @@ def _calc_cp_seqs(
     else:
         cp_cu_seqlens, seq_map_r2c, ht_mask = None, None, None
 
-    return (
-        use_cp,
-        cp_cu_seqlens,
-        seq_map_r2c,
-        seq_map_c2r,
-        ht_mask,
-        max_local_chunks,
-        max(num_chunks),
-    )
+    return use_cp, cp_cu_seqlens, seq_map_r2c, seq_map_c2r, ht_mask
 
 
 def intra_card_cp_preprocess(
@@ -174,15 +163,7 @@ def intra_card_cp_preprocess(
             device_idx = torch.cuda.current_device()
         raw_cu_seqlens = _create_cu_seqlens(batch_size, num_tokens, device_idx)
 
-    (
-        use_cp,
-        cp_cu_seqlens,
-        seq_map_r2c,
-        seq_map_c2r,
-        ht_mask,
-        max_local_chunks,
-        max_seq_chunks,
-    ) = _calc_cp_seqs(
+    use_cp, cp_cu_seqlens, seq_map_r2c, seq_map_c2r, ht_mask = _calc_cp_seqs(
         raw_cu_seqlens,
         chunk_size,
         num_v_heads,
@@ -206,37 +187,6 @@ def intra_card_cp_preprocess(
         threshold=warmup_threshold,
     )  # [cp_batch_size, num_v_heads]
     needs_correction = bool(fallback_mask.any().item())
-
-    if is_blackwell(_cc) and not exact_cp:
-        while needs_correction and max_local_chunks < max_seq_chunks:
-            max_local_chunks = min(max_seq_chunks, max_local_chunks * 2)
-            (
-                use_cp,
-                cp_cu_seqlens,
-                seq_map_r2c,
-                seq_map_c2r,
-                ht_mask,
-                max_local_chunks,
-                max_seq_chunks,
-            ) = _calc_cp_seqs(
-                raw_cu_seqlens,
-                chunk_size,
-                num_v_heads,
-                max_local_chunks,
-            )
-            if not use_cp:
-                return raw_h0, raw_cu_seqlens, None, None
-            num_warmup_chunks, fallback_mask = get_warmup_chunks(
-                g=g,
-                cu_seqlens=cp_cu_seqlens,
-                ht_mask=ht_mask,
-                chunk_size=chunk_size,
-                threshold=warmup_threshold,
-            )
-            needs_correction = bool(fallback_mask.any().item())
-
-        if needs_correction:
-            return raw_h0, raw_cu_seqlens, None, None
 
     fwd_h_kwargs = dict(
         k=k,
