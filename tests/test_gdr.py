@@ -420,9 +420,12 @@ def test_gated_delta_rule(
             ),
             "[fwd] o": 0.0,
         }
-        if (
-            "tilelang_get_warmup_chunks_kernel_kernel" in prof_qla.keys()
-            or "tilelang_prepare_h_kernel_kernel" in prof_qla.keys()
+        cp_h_kernels = (
+            "tilelang_prepare_h_kernel_kernel",
+            "tilelang_prepare_h_cp_ht_kernel_kernel",
+        )
+        if "tilelang_get_warmup_chunks_kernel_kernel" in prof_qla.keys() or any(
+            name in prof_qla.keys() for name in cp_h_kernels
         ):
             result_fla["[fwd] cp-w"] = None
             result_fla["[fwd] cp-h"] = None
@@ -435,7 +438,7 @@ def test_gated_delta_rule(
             result_qla["[fwd] cp-h"] = _profile_value(
                 prof_qla,
                 "[fwd] FlashQLA cp-h",
-                "tilelang_prepare_h_kernel_kernel",
+                cp_h_kernels,
             )
             result_qla["[fwd] cp-c"] = _profile_value(
                 prof_qla, "[fwd] FlashQLA cp-c", "tilelang_correct_h0_kernel_kernel"
