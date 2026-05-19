@@ -183,15 +183,6 @@ def intra_card_cp_preprocess(
         threshold=warmup_threshold,
     )  # [cp_batch_size, num_v_heads]
     needs_correction = bool(fallback_mask.any().item())
-    if (
-        is_blackwell(_cc)
-        and os.environ.get("FLASHQLA_DEBUG_BLACKWELL_DISPATCH", "") == "1"
-    ):
-        print(
-            "[FlashQLA Blackwell CP] "
-            f"fallback_correction={needs_correction} "
-            f"cp_batch={fallback_mask.shape[0]} heads={fallback_mask.shape[1]}"
-        )
     fwd_h_kwargs = dict(
         k=k,
         v=v,

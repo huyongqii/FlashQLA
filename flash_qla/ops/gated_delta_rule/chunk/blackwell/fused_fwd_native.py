@@ -301,17 +301,23 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                         clear_accum=True,
                     )
 
-                    # Compute v_new = v_old - g_exp * u into a bf16 register
-                    # fragment instead of writing back to v_shared. This
-                    # eliminates the SMEM RAW (write v_shared -> read v_shared
-                    # in next GEMM) which was visible as a long L1TEX stall.
-                    # v_shared itself becomes read-only for cons-V across the
-                    # iteration; producer-V can re-fill v_shared as soon as
-                    # data_is_free fires next round.
+                    # Convert u_fragment from fp32 GEMM C-layout to bf16
+                    # GEMM B-layout via T.copy. We can't fuse the subtract
+                    # below directly using u_fragment because u_fragment's
+                    # fp32 MMA C-layout (replicate=2) and vu_fragment's bf16
+                    # MMA B-layout (replicate=1) cannot coexist in one
+                    # T.Parallel loop (TileLang layout-infer conflict).
+                    T.copy(u_fragment, vu_fragment)
+
+                    # Compute v_new = v - g_exp * u in-place into vu_fragment.
+                    # Only one fragment touched here, so layout-infer is
+                    # unambiguous. Same numerics as the prior SMEM version
+                    # since u would be narrowed to bf16 anyway before being
+                    # consumed by the A @ V_new GEMM.
                     for j_s, j_v in T.Parallel(block_S, block_DV):
                         vu_fragment[j_s, j_v] = (
                             v_shared[stage, j_s, j_v]
-                            - g_exp_shared[j_s] * u_fragment[j_s, j_v]
+                            - g_exp_shared[j_s] * vu_fragment[j_s, j_v]
                         )
 
                     T.barrier_wait(bar_3, i_s % 2)
