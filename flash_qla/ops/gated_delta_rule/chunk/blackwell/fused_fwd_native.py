@@ -213,6 +213,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                 T.set_max_nreg(CONSUMER_VO_NREG, 1)
                 x_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
                 p_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
+                v_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
                 decay_local = T.alloc_local((1), dtype=accum_dtype)
 
                 for i_s in T.serial(num_iters):
@@ -363,10 +364,10 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     T.gemm(
                         a_shared[stage, :, :],
                         v_shared[stage, :, :],
-                        p_fragment,
+                        v_fragment,
                         clear_accum=True,
                     )
-                    T.copy(p_fragment, vd_shared)
+                    T.copy(v_fragment, vd_shared)
                     T.gemm(
                         p_shared,
                         vd_shared,
@@ -397,7 +398,7 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
 
                     for j_s, j_v in T.Parallel(block_S, block_DV):
                         vn_shared[j_s, j_v] = (
-                            p_fragment[j_s, j_v] * g_rev_exp_shared[j_s]
+                            v_fragment[j_s, j_v] * g_rev_exp_shared[j_s]
                         )
                     T.barrier_arrive(vn_is_ready)
 
