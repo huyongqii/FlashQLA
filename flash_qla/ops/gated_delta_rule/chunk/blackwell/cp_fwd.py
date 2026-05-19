@@ -106,6 +106,175 @@ def get_warmup_chunks(
 
 
 @tilelang.jit()
+def tilelang_correct_h0_no_fallback(
+    H,
+    DK,
+    DV,
+    max_cp_segments,
+    res_dtype,
+    buffer_dtype,
+    seqlen_dtype,
+    use_raw_h0,
+    block_DV: int = 32,
+):
+    cp_batch_size = T.dynamic("cp_batch_size")
+    raw_batch_size = T.dynamic("raw_batch_size")
+
+    if use_raw_h0:
+
+        @T.prim_func
+        def tilelang_correct_h0_no_fallback_kernel(
+            raw_h0: T.Tensor([raw_batch_size, H, DK, DV], dtype=res_dtype),
+            ht_buffer: T.Tensor([cp_batch_size, H, DK, DV], dtype=buffer_dtype),
+            seq_map_r2c: T.Tensor([raw_batch_size + 1], dtype=seqlen_dtype),
+            cp_h0: T.Tensor([cp_batch_size, H, DK, DV], dtype=res_dtype),
+        ):
+            with T.Kernel(
+                T.ceildiv(DV, block_DV) * H * raw_batch_size, threads=128
+            ) as (bbhv,):
+                bbh, bv = (
+                    bbhv // T.ceildiv(DV, block_DV),
+                    bbhv % T.ceildiv(DV, block_DV),
+                )
+                bb, bh = bbh // H, bbh % H
+
+                seq_start_idx = seq_map_r2c[bb]
+                seq_end_idx = seq_map_r2c[bb + 1]
+                num_iters = seq_end_idx - seq_start_idx
+
+                T.copy(
+                    raw_h0[bb, bh, 0:DK, bv * block_DV : (bv + 1) * block_DV],
+                    cp_h0[
+                        seq_start_idx,
+                        bh,
+                        0:DK,
+                        bv * block_DV : (bv + 1) * block_DV,
+                    ],
+                )
+
+                for i_s in T.Pipelined(max_cp_segments - 1, num_stages=2):
+                    if i_s < num_iters - 1:
+                        T.copy(
+                            ht_buffer[
+                                seq_start_idx + i_s,
+                                bh,
+                                0:DK,
+                                bv * block_DV : (bv + 1) * block_DV,
+                            ],
+                            cp_h0[
+                                seq_start_idx + i_s + 1,
+                                bh,
+                                0:DK,
+                                bv * block_DV : (bv + 1) * block_DV,
+                            ],
+                        )
+
+    else:
+
+        @T.prim_func
+        def tilelang_correct_h0_no_fallback_kernel(
+            ht_buffer: T.Tensor([cp_batch_size, H, DK, DV], dtype=buffer_dtype),
+            seq_map_r2c: T.Tensor([raw_batch_size + 1], dtype=seqlen_dtype),
+            cp_h0: T.Tensor([cp_batch_size, H, DK, DV], dtype=res_dtype),
+        ):
+            with T.Kernel(
+                T.ceildiv(DV, block_DV) * H * raw_batch_size, threads=128
+            ) as (bbhv,):
+                bbh, bv = (
+                    bbhv // T.ceildiv(DV, block_DV),
+                    bbhv % T.ceildiv(DV, block_DV),
+                )
+                bb, bh = bbh // H, bbh % H
+
+                seq_start_idx = seq_map_r2c[bb]
+                seq_end_idx = seq_map_r2c[bb + 1]
+                num_iters = seq_end_idx - seq_start_idx
+
+                h_fragment = T.alloc_fragment((DK, block_DV), dtype=res_dtype)
+                T.clear(h_fragment)
+                T.copy(
+                    h_fragment,
+                    cp_h0[
+                        seq_start_idx,
+                        bh,
+                        0:DK,
+                        bv * block_DV : (bv + 1) * block_DV,
+                    ],
+                )
+
+                for i_s in T.Pipelined(max_cp_segments - 1, num_stages=2):
+                    if i_s < num_iters - 1:
+                        T.copy(
+                            ht_buffer[
+                                seq_start_idx + i_s,
+                                bh,
+                                0:DK,
+                                bv * block_DV : (bv + 1) * block_DV,
+                            ],
+                            cp_h0[
+                                seq_start_idx + i_s + 1,
+                                bh,
+                                0:DK,
+                                bv * block_DV : (bv + 1) * block_DV,
+                            ],
+                        )
+
+    return tilelang_correct_h0_no_fallback_kernel
+
+
+def correct_initial_states_no_fallback(
+    raw_h0: torch.Tensor
+    | None,  # [raw_batch_size, num_v_heads, k_head_dim, v_head_dim]
+    ht_buffer: torch.Tensor,  # [cp_batch_size, num_v_heads, k_head_dim, v_head_dim]
+    seq_map_r2c: torch.Tensor,  # [raw_batch_size + 1]
+):
+    cp_batch_size, num_heads, k_head_dim, v_head_dim = ht_buffer.shape
+    assert k_head_dim == v_head_dim == 128
+    max_cp_segments = max(
+        1,
+        int((seq_map_r2c[1:] - seq_map_r2c[:-1]).max().item()),
+    )
+
+    if raw_h0 is None:
+        res_dtype = torch.float32
+        use_raw_h0 = False
+    else:
+        res_dtype = raw_h0.dtype
+        use_raw_h0 = True
+
+    tilelang_correct_h0_no_fallback_kernel = tilelang_correct_h0_no_fallback(
+        H=num_heads,
+        DK=k_head_dim,
+        DV=v_head_dim,
+        max_cp_segments=max_cp_segments,
+        res_dtype=res_dtype,
+        buffer_dtype=ht_buffer.dtype,
+        seqlen_dtype=seq_map_r2c.dtype,
+        use_raw_h0=use_raw_h0,
+    )
+    cp_h0 = torch.empty(
+        (cp_batch_size, num_heads, k_head_dim, v_head_dim),
+        dtype=res_dtype,
+        device=ht_buffer.device,
+    )
+    if use_raw_h0:
+        tilelang_correct_h0_no_fallback_kernel(
+            raw_h0,
+            ht_buffer,
+            seq_map_r2c,
+            cp_h0,
+        )
+    else:
+        tilelang_correct_h0_no_fallback_kernel(
+            ht_buffer,
+            seq_map_r2c,
+            cp_h0,
+        )
+
+    return cp_h0
+
+
+@tilelang.jit()
 def tilelang_correct_h0(
     H,
     DK,

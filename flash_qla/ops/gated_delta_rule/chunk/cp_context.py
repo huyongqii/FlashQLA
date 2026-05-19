@@ -12,9 +12,15 @@ from flash_qla.utils import tensor_cache, assert_supported, is_blackwell
 _cc = assert_supported()
 if is_blackwell(_cc):
     from .blackwell.prepare_h import fused_gdr_h
-    from .blackwell.cp_fwd import correct_initial_states, get_warmup_chunks
+    from .blackwell.cp_fwd import (
+        correct_initial_states,
+        correct_initial_states_no_fallback,
+        get_warmup_chunks,
+    )
 else:
     from .hopper import get_warmup_chunks, fused_gdr_h, correct_initial_states
+
+    correct_initial_states_no_fallback = None
 
 
 MULTI_PROCESSOR_COUNT = torch.cuda.get_device_properties().multi_processor_count
@@ -176,7 +182,17 @@ def intra_card_cp_preprocess(
         chunk_size=chunk_size,
         threshold=warmup_threshold,
     )  # [cp_batch_size, num_v_heads]
-    _, ht, mt = fused_gdr_h(
+    needs_correction = bool(fallback_mask.any().item())
+    if (
+        is_blackwell(_cc)
+        and os.environ.get("FLASHQLA_DEBUG_BLACKWELL_DISPATCH", "") == "1"
+    ):
+        print(
+            "[FlashQLA Blackwell CP] "
+            f"fallback_correction={needs_correction} "
+            f"cp_batch={fallback_mask.shape[0]} heads={fallback_mask.shape[1]}"
+        )
+    fwd_h_kwargs = dict(
         k=k,
         v=v,
         a=a,
@@ -187,8 +203,18 @@ def intra_card_cp_preprocess(
         output_h=False,
         cu_seqlens=cp_cu_seqlens,
         num_warmup_chunks=num_warmup_chunks,
-    )  # [cp_batch_size, num_v_heads, k_head_dim, v_head_dim]
-    if os.environ.get("FLASHQLA_CP_CORRECT_H0_TORCH", "") == "1":
+    )
+    if is_blackwell(_cc):
+        fwd_h_kwargs["output_correction"] = needs_correction
+    _, ht, mt = fused_gdr_h(**fwd_h_kwargs)
+
+    if not needs_correction and correct_initial_states_no_fallback is not None:
+        cp_h0 = correct_initial_states_no_fallback(
+            raw_h0=raw_h0,
+            ht_buffer=ht,
+            seq_map_r2c=seq_map_r2c,
+        )
+    elif os.environ.get("FLASHQLA_CP_CORRECT_H0_TORCH", "") == "1":
         cp_h0 = _correct_initial_states_torch(
             raw_h0=raw_h0,
             ht_buffer=ht,

@@ -33,6 +33,7 @@ def tilelang_prepare_h(
     use_initial_state,
     store_final_state,
     store_h,
+    store_final_correction,
     is_varlen,
     is_cp,
     num_stages=2,
@@ -99,9 +100,12 @@ def tilelang_prepare_h(
             )
 
             calc_mt = T.alloc_var("bool")
-            calc_mt = is_cp and num_iters >= T.ceildiv(
-                seq_end_idx - seq_start_idx, block_S
-            )
+            if store_final_correction:
+                calc_mt = is_cp and num_iters >= T.ceildiv(
+                    seq_end_idx - seq_start_idx, block_S
+                )
+            else:
+                calc_mt = False
             seq_start_idx = (
                 seq_end_idx - num_iters * block_S if is_cp else seq_start_idx
             )
@@ -118,10 +122,11 @@ def tilelang_prepare_h(
             h_shared = T.alloc_shared((DK, DV), dtype=qkva_dtype)
             x_shared = T.alloc_shared((block_S, DK), dtype=qkva_dtype)
             y_shared = T.alloc_shared((block_S, DV), dtype=qkva_dtype)
-            m_shared_L = T.alloc_shared((DK, DK // 2), dtype=qkva_dtype)
-            m_shared_R = T.alloc_shared((DK, DK // 2), dtype=qkva_dtype)
-            z_shared_L = T.alloc_shared((block_S, DK // 2), dtype=qkva_dtype)
-            z_shared_R = T.alloc_shared((block_S, DK // 2), dtype=qkva_dtype)
+            if store_final_correction:
+                m_shared_L = T.alloc_shared((DK, DK // 2), dtype=qkva_dtype)
+                m_shared_R = T.alloc_shared((DK, DK // 2), dtype=qkva_dtype)
+                z_shared_L = T.alloc_shared((block_S, DK // 2), dtype=qkva_dtype)
+                z_shared_R = T.alloc_shared((block_S, DK // 2), dtype=qkva_dtype)
             g_rev_exp_shared = T.alloc_shared(
                 (block_S), dtype=accum_dtype, scope="shared"
             )
@@ -129,15 +134,17 @@ def tilelang_prepare_h(
             h_fragment = T.alloc_fragment((DK, DV), dtype=accum_dtype)
             x_fragment = T.alloc_fragment((block_S, DK), dtype=accum_dtype)
             y_fragment = T.alloc_fragment((block_S, DV), dtype=accum_dtype)
-            m_fragment_L = T.alloc_fragment((DK, DK // 2), dtype=accum_dtype)
-            m_fragment_R = T.alloc_fragment((DK, DK // 2), dtype=accum_dtype)
-            z_fragment_L = T.alloc_fragment((block_S, DK // 2), dtype=accum_dtype)
-            z_fragment_R = T.alloc_fragment((block_S, DK // 2), dtype=accum_dtype)
+            if store_final_correction:
+                m_fragment_L = T.alloc_fragment((DK, DK // 2), dtype=accum_dtype)
+                m_fragment_R = T.alloc_fragment((DK, DK // 2), dtype=accum_dtype)
+                z_fragment_L = T.alloc_fragment((block_S, DK // 2), dtype=accum_dtype)
+                z_fragment_R = T.alloc_fragment((block_S, DK // 2), dtype=accum_dtype)
             g_last_local_S = T.alloc_local((1), dtype=accum_dtype)
-            g_last_local_X = T.alloc_local((1), dtype=accum_dtype)
             g_last_local_Y = T.alloc_local((1), dtype=accum_dtype)
-            g_prod_X = T.alloc_fragment((1), dtype=accum_dtype)
-            g_prod_Y = T.alloc_fragment((1), dtype=accum_dtype)
+            if store_final_correction:
+                g_last_local_X = T.alloc_local((1), dtype=accum_dtype)
+                g_prod_X = T.alloc_fragment((1), dtype=accum_dtype)
+                g_prod_Y = T.alloc_fragment((1), dtype=accum_dtype)
 
             data_is_ready = T.alloc_barrier(
                 arrive_count=[(96 if store_h else 128)] * num_stages
@@ -147,7 +154,8 @@ def tilelang_prepare_h(
             bar_0 = T.alloc_barrier(arrive_count=(416 if store_h else 384))
             bar_1 = T.alloc_barrier(arrive_count=256)
             bar_2 = T.alloc_barrier(arrive_count=384)
-            bar_3 = T.alloc_barrier(arrive_count=128)
+            if store_final_correction:
+                bar_3 = T.alloc_barrier(arrive_count=128)
 
             T.use_swizzle(10)
 
@@ -201,7 +209,8 @@ def tilelang_prepare_h(
                         transpose_A=True,
                         clear_accum=False,
                     )
-                    T.barrier_arrive(bar_3)
+                    if store_final_correction:
+                        T.barrier_arrive(bar_3)
 
                     T.barrier_arrive(data_is_free[i_s % num_stages])
 
@@ -212,18 +221,17 @@ def tilelang_prepare_h(
             elif tx < 256:
                 T.set_max_nreg(CONSUMER_X_NREG, 1)
 
-                if calc_mt:
-                    for j_k, j_v in T.Parallel(DK, DK // 2):
-                        if j_k == j_v + DK // 2:
-                            m_fragment_R[j_k, j_v] = 1
-                        else:
-                            m_fragment_R[j_k, j_v] = 0
-                    g_prod_X[0] = 0
+                if store_final_correction:
+                    if calc_mt:
+                        for j_k, j_v in T.Parallel(DK, DK // 2):
+                            if j_k == j_v + DK // 2:
+                                m_fragment_R[j_k, j_v] = 1
+                            else:
+                                m_fragment_R[j_k, j_v] = 0
+                        g_prod_X[0] = 0
 
                 # Main Loop
                 for i_s in T.serial(num_iters):
-                    mbar_slot = i_s % 8
-                    mbar_phase = (i_s // 8) % 2
                     # [STAGE = i_s % num_stages]
                     T.barrier_wait(
                         data_is_ready[i_s % num_stages], (i_s // num_stages + 0) % 2
@@ -250,50 +258,53 @@ def tilelang_prepare_h(
                         )
                     T.barrier_arrive(bar_2)
 
-                    if calc_mt:
-                        # [STAGE = i_s % num_stages] 2
-                        g_prod_X[0] += g_shared[i_s % num_stages, block_S - 1]
-                        # S4[2] M
-                        T.copy(m_fragment_R, m_shared_R)
+                    if store_final_correction:
+                        if calc_mt:
+                            # [STAGE = i_s % num_stages] 2
+                            g_prod_X[0] += g_shared[i_s % num_stages, block_S - 1]
+                            # S4[2] M
+                            T.copy(m_fragment_R, m_shared_R)
 
-                        # [STAGE = i_s % num_stages] 3
-                        T.barrier_wait(bar_3, i_s % 2)
-                        # Z = K @ M
-                        T.gemm(
-                            k_shared[i_s % num_stages, :, :],
-                            m_shared_R,
-                            z_fragment_R,
-                            clear_accum=True,
-                        )
-                        # S4[2] Z
-                        T.copy(z_fragment_R, z_shared_R)
-                        # M += X^T @ Z
-                        T.gemm(
-                            x_shared,
-                            z_shared_R,
-                            m_fragment_R,
-                            transpose_A=True,
-                            clear_accum=False,
-                        )
+                            # [STAGE = i_s % num_stages] 3
+                            T.barrier_wait(bar_3, i_s % 2)
+                            # Z = K @ M
+                            T.gemm(
+                                k_shared[i_s % num_stages, :, :],
+                                m_shared_R,
+                                z_fragment_R,
+                                clear_accum=True,
+                            )
+                            # S4[2] Z
+                            T.copy(z_fragment_R, z_shared_R)
+                            # M += X^T @ Z
+                            T.gemm(
+                                x_shared,
+                                z_shared_R,
+                                m_fragment_R,
+                                transpose_A=True,
+                                clear_accum=False,
+                            )
 
                     T.barrier_arrive(data_is_free[i_s % num_stages])
 
-                if calc_mt:
-                    g_last_local_X[0] = T.exp2(g_prod_X[0] * 1.442695)
-                    for j_k, j_v in T.Parallel(DK, DK // 2):
-                        m_fragment_R[j_k, j_v] *= g_last_local_X[0]
-                    T.copy(m_fragment_R, mt[bb, bh, 0:DK, DK // 2 :])
+                if store_final_correction:
+                    if calc_mt:
+                        g_last_local_X[0] = T.exp2(g_prod_X[0] * 1.442695)
+                        for j_k, j_v in T.Parallel(DK, DK // 2):
+                            m_fragment_R[j_k, j_v] *= g_last_local_X[0]
+                        T.copy(m_fragment_R, mt[bb, bh, 0:DK, DK // 2 :])
 
             elif tx < 384:
                 T.set_max_nreg(CONSUMER_Y_NREG, 1)
 
-                if calc_mt:
-                    for j_k, j_v in T.Parallel(DK, DK // 2):
-                        if j_k == j_v:
-                            m_fragment_L[j_k, j_v] = 1
-                        else:
-                            m_fragment_L[j_k, j_v] = 0
-                    g_prod_Y[0] = 0
+                if store_final_correction:
+                    if calc_mt:
+                        for j_k, j_v in T.Parallel(DK, DK // 2):
+                            if j_k == j_v:
+                                m_fragment_L[j_k, j_v] = 1
+                            else:
+                                m_fragment_L[j_k, j_v] = 0
+                        g_prod_Y[0] = 0
 
                 # Main Loop
                 for i_s in T.serial(num_iters):
@@ -333,39 +344,41 @@ def tilelang_prepare_h(
                         )
                     T.barrier_arrive(bar_2)
 
-                    if calc_mt:
-                        # [STAGE = i_s % num_stages] 2
-                        g_prod_Y[0] += g_shared[i_s % num_stages, block_S - 1]
-                        # S4[2] M
-                        T.copy(m_fragment_L, m_shared_L)
+                    if store_final_correction:
+                        if calc_mt:
+                            # [STAGE = i_s % num_stages] 2
+                            g_prod_Y[0] += g_shared[i_s % num_stages, block_S - 1]
+                            # S4[2] M
+                            T.copy(m_fragment_L, m_shared_L)
 
-                        # [STAGE = i_s % num_stages] 3
-                        T.barrier_wait(bar_3, i_s % 2)
-                        # Z = K @ M
-                        T.gemm(
-                            k_shared[i_s % num_stages, :, :],
-                            m_shared_L,
-                            z_fragment_L,
-                            clear_accum=True,
-                        )
-                        # S4[2] Z
-                        T.copy(z_fragment_L, z_shared_L)
-                        # M += X^T @ Z
-                        T.gemm(
-                            x_shared,
-                            z_shared_L,
-                            m_fragment_L,
-                            transpose_A=True,
-                            clear_accum=False,
-                        )
+                            # [STAGE = i_s % num_stages] 3
+                            T.barrier_wait(bar_3, i_s % 2)
+                            # Z = K @ M
+                            T.gemm(
+                                k_shared[i_s % num_stages, :, :],
+                                m_shared_L,
+                                z_fragment_L,
+                                clear_accum=True,
+                            )
+                            # S4[2] Z
+                            T.copy(z_fragment_L, z_shared_L)
+                            # M += X^T @ Z
+                            T.gemm(
+                                x_shared,
+                                z_shared_L,
+                                m_fragment_L,
+                                transpose_A=True,
+                                clear_accum=False,
+                            )
 
                     T.barrier_arrive(data_is_free[i_s % num_stages])
 
-                if calc_mt:
-                    g_last_local_Y[0] = T.exp2(g_prod_Y[0] * 1.442695)
-                    for j_k, j_v in T.Parallel(DK, DK // 2):
-                        m_fragment_L[j_k, j_v] *= g_last_local_Y[0]
-                    T.copy(m_fragment_L, mt[bb, bh, 0:DK, : DK // 2])
+                if store_final_correction:
+                    if calc_mt:
+                        g_last_local_Y[0] = T.exp2(g_prod_Y[0] * 1.442695)
+                        for j_k, j_v in T.Parallel(DK, DK // 2):
+                            m_fragment_L[j_k, j_v] *= g_last_local_Y[0]
+                        T.copy(m_fragment_L, mt[bb, bh, 0:DK, : DK // 2])
 
             else:
                 T.set_max_nreg(PRODUCER_NREG, 0)
@@ -490,6 +503,7 @@ def fused_gdr_h(
     initial_state: torch.Tensor | None = None,
     output_final_state: bool = True,
     output_h: bool = True,
+    output_correction: bool = True,
     chunk_size: int = 64,
     cu_seqlens: torch.LongTensor | None = None,
     num_warmup_chunks: torch.LongTensor | None = None,
@@ -536,6 +550,7 @@ def fused_gdr_h(
     final_correction = torch.empty(
         (real_batch_size, H, K, K), dtype=ht_dtype, device=k.device
     )
+    num_stages = 1 if is_cp and not output_h and not output_correction else 2
 
     tilelang_prepare_h_kernel = tilelang_prepare_h(
         H,
@@ -554,8 +569,10 @@ def fused_gdr_h(
         use_initial_state=use_initial_state,
         store_final_state=output_final_state,
         store_h=output_h,
+        store_final_correction=output_correction,
         is_varlen=is_varlen,
         is_cp=is_cp,
+        num_stages=num_stages,
     )
     tilelang_prepare_h_kernel(
         k,
@@ -574,6 +591,8 @@ def fused_gdr_h(
 
     if not output_final_state:
         final_state = None
+        final_correction = None
+    if not output_correction:
         final_correction = None
     if not output_h:
         h = None
