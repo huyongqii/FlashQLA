@@ -17,42 +17,72 @@ _PASS_CONFIGS = {
 
 def _alloc_inversion_buffers(block_S, accum_dtype, qkva_dtype):
     """Allocate the shared / fragment buffers used by the 64x64 lower-tri
-    inversion. Returns a dict for both kernels to consume.
+    inversion. Returns a tuple in the order expected by
+    ``_invert_64x64_lower_tri``: ``(a64_fragment, a16i_row, a16i_sum,
+    a16i_shared, a16o_shared, a16o_fragment, a32i0_shared, a32i1_shared,
+    a32o_shared, a32o_fragment, a64_shared)``.
+
+    A tuple (rather than a dict) keeps the buffers as plain TileLang IR
+    handles so they can be passed straight into a ``@T.macro`` -- a dict
+    would force a Python ``__getitem__`` inside the macro body, which the
+    AST parser cannot lower.
     """
-    bufs = dict(
-        a64_fragment=T.alloc_fragment((block_S, block_S), dtype=accum_dtype),
-        a16i_row=T.alloc_fragment((4, 16), dtype=accum_dtype),
-        a16i_sum=T.alloc_fragment((4, 16), dtype=accum_dtype),
-        a16i_shared=T.alloc_shared((4, 17, 16), dtype=accum_dtype),
-        a16o_shared=T.alloc_shared((2, 17, 16), dtype=accum_dtype),
-        a16o_fragment=T.alloc_fragment((2, 16, 16), dtype=accum_dtype),
-        a32i0_shared=T.alloc_shared((32, 32), dtype=accum_dtype),
-        a32i1_shared=T.alloc_shared((32, 32), dtype=accum_dtype),
-        a32o_shared=T.alloc_shared((32, 32), dtype=accum_dtype),
-        a32o_fragment=T.alloc_fragment((32, 32), dtype=accum_dtype),
-        a64_shared=T.alloc_shared((block_S, block_S), dtype=qkva_dtype),
-    )
+    a64_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
+    a16i_row = T.alloc_fragment((4, 16), dtype=accum_dtype)
+    a16i_sum = T.alloc_fragment((4, 16), dtype=accum_dtype)
+    a16i_shared = T.alloc_shared((4, 17, 16), dtype=accum_dtype)
+    a16o_shared = T.alloc_shared((2, 17, 16), dtype=accum_dtype)
+    a16o_fragment = T.alloc_fragment((2, 16, 16), dtype=accum_dtype)
+    a32i0_shared = T.alloc_shared((32, 32), dtype=accum_dtype)
+    a32i1_shared = T.alloc_shared((32, 32), dtype=accum_dtype)
+    a32o_shared = T.alloc_shared((32, 32), dtype=accum_dtype)
+    a32o_fragment = T.alloc_fragment((32, 32), dtype=accum_dtype)
+    a64_shared = T.alloc_shared((block_S, block_S), dtype=qkva_dtype)
     T.annotate_layout(
         {
-            bufs["a16i_shared"]: tilelang.layout.make_linear_layout(
-                bufs["a16i_shared"]
-            ),
-            bufs["a16o_shared"]: tilelang.layout.make_linear_layout(
-                bufs["a16o_shared"]
-            ),
+            a16i_shared: tilelang.layout.make_linear_layout(a16i_shared),
+            a16o_shared: tilelang.layout.make_linear_layout(a16o_shared),
         }
     )
-    return bufs
+    return (
+        a64_fragment,
+        a16i_row,
+        a16i_sum,
+        a16i_shared,
+        a16o_shared,
+        a16o_fragment,
+        a32i0_shared,
+        a32i1_shared,
+        a32o_shared,
+        a32o_fragment,
+        a64_shared,
+    )
 
 
-def _invert_64x64_lower_tri(block_S, bufs):
+@T.macro
+def _invert_64x64_lower_tri(
+    block_S,
+    a64_fragment,
+    a16i_row,
+    a16i_sum,
+    a16i_shared,
+    a16o_shared,
+    a16o_fragment,
+    a32i0_shared,
+    a32i1_shared,
+    a32o_shared,
+    a32o_fragment,
+    a64_shared,
+):
     """Given ``a64_fragment`` holding ``I + StrictLower(beta * K @ K^T)``,
     compute its inverse and write it into ``a64_shared``.
 
-    All scratch buffers are taken from ``bufs`` (allocated by the caller so
-    the layout annotations are visible at prim_func scope). This is a plain
-    Python helper that emits TileLang IR inline at the call site -- no
-    ``@T.macro`` is needed because it never introduces new allocations.
+    All scratch buffers must be allocated by the caller (so the layout
+    annotations are visible at prim_func scope). This is a ``@T.macro`` so
+    that TileLang's AST-level parser can recognise the
+    ``for x, y in T.Parallel(...)`` constructs inside; using a plain Python
+    function would let those expressions be evaluated eagerly and fail with
+    ``'ForFrame' object is not iterable``.
 
     Algorithm:
       1. Split A into a 2x2 block matrix of 32x32 tiles. Each diagonal 32x32
@@ -64,17 +94,6 @@ def _invert_64x64_lower_tri(block_S, bufs):
          block (``a32o_shared``) into the final 64x64 inverse stored in
          ``a64_shared``.
     """
-    a64_fragment = bufs["a64_fragment"]
-    a16i_row = bufs["a16i_row"]
-    a16i_sum = bufs["a16i_sum"]
-    a16i_shared = bufs["a16i_shared"]
-    a16o_shared = bufs["a16o_shared"]
-    a16o_fragment = bufs["a16o_fragment"]
-    a32i0_shared = bufs["a32i0_shared"]
-    a32i1_shared = bufs["a32i1_shared"]
-    a32o_shared = bufs["a32o_shared"]
-    a32o_fragment = bufs["a32o_fragment"]
-    a64_shared = bufs["a64_shared"]
 
     # Scatter A into the per-block staging buffers.
     #   - lower-left 32x32  -> a32o_shared (negated)
@@ -212,9 +231,19 @@ def tilelang_kkt_solve(
         b_shared = T.alloc_shared((block_S), dtype=accum_dtype, scope="shared")
         a64_tmem = T.alloc_tmem((block_S, block_S), dtype=accum_dtype)
 
-        bufs = _alloc_inversion_buffers(block_S, accum_dtype, qkva_dtype)
-        a64_fragment = bufs["a64_fragment"]
-        a64_shared = bufs["a64_shared"]
+        (
+            a64_fragment,
+            a16i_row,
+            a16i_sum,
+            a16i_shared,
+            a16o_shared,
+            a16o_fragment,
+            a32i0_shared,
+            a32i1_shared,
+            a32o_shared,
+            a32o_fragment,
+            a64_shared,
+        ) = _alloc_inversion_buffers(block_S, accum_dtype, qkva_dtype)
 
         # ``data_is_ready`` is published by the K-load producer warp once
         # both ``k_shared`` and ``b_shared`` are populated, so the consumer
@@ -255,7 +284,20 @@ def tilelang_kkt_solve(
                 elif j_s == j_t:
                     a64_fragment[j_s, j_t] = 1
 
-            _invert_64x64_lower_tri(block_S, bufs)
+            _invert_64x64_lower_tri(
+                block_S,
+                a64_fragment,
+                a16i_row,
+                a16i_sum,
+                a16i_shared,
+                a16o_shared,
+                a16o_fragment,
+                a32i0_shared,
+                a32i1_shared,
+                a32o_shared,
+                a32o_fragment,
+                a64_shared,
+            )
 
             T.barrier_arrive(a_is_ready)
 
@@ -367,9 +409,19 @@ def tilelang_kkt_solve_fixed_fast(
             b_shared = T.alloc_shared((block_S), dtype=accum_dtype, scope="shared")
             a64_tmem = T.alloc_tmem((block_S, block_S), dtype=accum_dtype)
 
-            bufs = _alloc_inversion_buffers(block_S, accum_dtype, qkva_dtype)
-            a64_fragment = bufs["a64_fragment"]
-            a64_shared = bufs["a64_shared"]
+            (
+                a64_fragment,
+                a16i_row,
+                a16i_sum,
+                a16i_shared,
+                a16o_shared,
+                a16o_fragment,
+                a32i0_shared,
+                a32i1_shared,
+                a32o_shared,
+                a32o_fragment,
+                a64_shared,
+            ) = _alloc_inversion_buffers(block_S, accum_dtype, qkva_dtype)
 
             mma_mbar = T.alloc_barrier(arrive_count=1)
 
@@ -409,7 +461,20 @@ def tilelang_kkt_solve_fixed_fast(
                 elif j_s == j_t:
                     a64_fragment[j_s, j_t] = 1
 
-            _invert_64x64_lower_tri(block_S, bufs)
+            _invert_64x64_lower_tri(
+                block_S,
+                a64_fragment,
+                a16i_row,
+                a16i_sum,
+                a16i_shared,
+                a16o_shared,
+                a16o_fragment,
+                a32i0_shared,
+                a32i1_shared,
+                a32o_shared,
+                a32o_fragment,
+                a64_shared,
+            )
 
             if right <= num_tokens:
                 T.copy(a64_shared, a[bb, left:right, bh, 0:block_S])
