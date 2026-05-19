@@ -293,6 +293,14 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                         clear_accum=True,
                     )
 
+                    # Move wait bar_3 up: it overlaps with the GEMM's commit
+                    # window. The v_shared elementwise below implicitly
+                    # waits on u_fragment, so the wait does not delay it.
+                    # cons-O now arrives bar_3 right after a_shared writes
+                    # (before T.copy(p, p_shared)), so this wait is even
+                    # more likely to be already-arrived by the time we hit it.
+                    T.barrier_wait(bar_3, i_s % 2)
+
                     # In-place: v_new = v - g_exp * u, written back to
                     # v_shared so the next GEMM can use it as B operand.
                     # NOTE: this is the SMEM RAW path; Step E (fragment B)
@@ -303,7 +311,6 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                             - g_exp_shared[j_s] * u_fragment[j_s, j_v]
                         )
 
-                    T.barrier_wait(bar_3, i_s % 2)
                     T.gemm(
                         a_shared[stage, :, :],
                         v_shared[stage, :, :],
@@ -379,8 +386,14 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                             p_fragment[j_s, j_t] = 0
                             a_shared[stage, j_s, j_t] = 0
 
-                    T.copy(p_fragment, p_shared)
+                    # arrive bar_3 ASAP: cons-V only needs a_shared's writes
+                    # (done above), it does NOT read p_shared. Releasing
+                    # bar_3 before the T.copy(p, p_shared) below lets cons-V
+                    # start its big GEMM(a, v, v_fragment) overlapped with
+                    # the SMEM store + elementwise here.
                     T.barrier_arrive(bar_3)
+
+                    T.copy(p_fragment, p_shared)
 
                     for j_s, j_v in T.Parallel(block_S, block_DV):
                         o_fragment[j_s, j_v] *= scale * g_exp_shared[j_s]
