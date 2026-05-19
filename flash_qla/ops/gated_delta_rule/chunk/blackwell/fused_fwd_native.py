@@ -374,23 +374,17 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                         clear_accum=True,
                     )
                     # ---- P scalar post-processing ----
-                    # PERF EXPERIMENT 3: comment out the heaviest elementwise
-                    # block in the kernel — 64x64 = 4096 iters with TWO
-                    # SMEM writes to a_shared per (j_s, j_t). If perf jumps
-                    # materially, this elementwise block is the bottleneck
-                    # and we should fuse the two writes / lift to fragment.
-                    # Result is intentionally wrong.
-                    # for j_s, j_t in T.Parallel(block_S, block_S):
-                    #     if j_s >= j_t:
-                    #         decay_local[0] = (
-                    #             g_exp_shared[j_s] * g_inv_exp_shared[j_t]
-                    #         )
-                    #         p_fragment[j_s, j_t] *= scale * decay_local[0]
-                    #         a_shared[stage, j_s, j_t] *= decay_local[0]
-                    #         a_shared[stage, j_s, j_t] *= b_shared[stage, j_t]
-                    #     else:
-                    #         p_fragment[j_s, j_t] = 0
-                    #         a_shared[stage, j_s, j_t] = 0
+                    for j_s, j_t in T.Parallel(block_S, block_S):
+                        if j_s >= j_t:
+                            decay_local[0] = (
+                                g_exp_shared[j_s] * g_inv_exp_shared[j_t]
+                            )
+                            p_fragment[j_s, j_t] *= scale * decay_local[0]
+                            a_shared[stage, j_s, j_t] *= decay_local[0]
+                            a_shared[stage, j_s, j_t] *= b_shared[stage, j_t]
+                        else:
+                            p_fragment[j_s, j_t] = 0
+                            a_shared[stage, j_s, j_t] = 0
 
                     # arrive bar_3 ASAP: cons-V only needs a_shared's writes
                     # (done above), it does NOT read p_shared. Releasing
@@ -543,17 +537,24 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
 
                         T.barrier_arrive(bar_0)
                         T.barrier_wait(bar_0, i_s % 2)
-                        if i_s > 0 and store_o:
-                            T.copy(
-                                o_shared,
-                                o[
-                                    batch_idx,
-                                    left:right,
-                                    bh,
-                                    bv * block_DV : (bv + 1) * block_DV,
-                                ],
-                                coalesced_width=8,
-                            )
+                        # PERF EXPERIMENT 4: skip the per-chunk HBM store of
+                        # o_shared. cons-O's wait bar_5 (which gates the
+                        # next iter) is currently held back by this 16KB
+                        # HBM write. If gdr time drops materially with this
+                        # store removed, the per-chunk HBM store-back is
+                        # the real critical path. Result is intentionally
+                        # wrong.
+                        # if i_s > 0 and store_o:
+                        #     T.copy(
+                        #         o_shared,
+                        #         o[
+                        #             batch_idx,
+                        #             left:right,
+                        #             bh,
+                        #             bv * block_DV : (bv + 1) * block_DV,
+                        #         ],
+                        #         coalesced_width=8,
+                        #     )
                         T.barrier_arrive(bar_5)
 
                     seq_split_idx = seq_start_idx + (num_iters - 1) * block_S

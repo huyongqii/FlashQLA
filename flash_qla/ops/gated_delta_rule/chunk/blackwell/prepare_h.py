@@ -841,6 +841,11 @@ def tilelang_prepare_h_cp_v3(
     is_varlen,
     debug_skip_ht=False,
     debug_skip_mt=False,
+    debug_ht_copy_only=False,
+    debug_ht_load_only=False,
+    debug_ht_x_only=False,
+    debug_ht_y_only=False,
+    debug_ht_no_final=False,
 ):
     batch_size = T.dynamic("batch_size")
     num_tokens = T.dynamic("num_tokens")
@@ -937,7 +942,95 @@ def tilelang_prepare_h_cp_v3(
 
                 T.use_swizzle(10)
 
-                if tx < 128:
+                if debug_ht_copy_only:
+                    if tx < 128:
+                        T.set_max_nreg(112, 1)
+                        T.clear(h_fragment)
+                        T.copy(
+                            h_fragment,
+                            ht[bb, bh, 0:DK, bv * block_DV : (bv + 1) * block_DV],
+                        )
+                    elif tx < 256:
+                        T.set_max_nreg(112, 1)
+                    else:
+                        T.set_max_nreg(96, 1)
+
+                elif debug_ht_load_only:
+                    if tx < 128:
+                        T.set_max_nreg(112, 1)
+                        T.clear(h_fragment)
+
+                        for i_s in T.serial(num_iters):
+                            if i_s > 0:
+                                T.barrier_wait(iter_done, (i_s - 1) % 2)
+
+                            left = seq_start_idx + i_s * block_S
+                            right = left + block_S
+                            T.copy(k[batch_idx, left:right, bhg, 0:DK], k_shared)
+                            T.barrier_arrive(data_loaded)
+                            T.barrier_wait(data_loaded, i_s % 2)
+                            T.barrier_arrive(iter_done)
+
+                        T.copy(
+                            h_fragment,
+                            ht[bb, bh, 0:DK, bv * block_DV : (bv + 1) * block_DV],
+                        )
+
+                    elif tx < 256:
+                        T.set_max_nreg(112, 1)
+
+                        for i_s in T.serial(num_iters):
+                            if i_s > 0:
+                                T.barrier_wait(iter_done, (i_s - 1) % 2)
+
+                            left = seq_start_idx + i_s * block_S
+                            right = left + block_S
+                            T.copy(a[batch_idx, left:right, bh, 0:block_S], a_shared)
+                            if right <= seq_end_idx:
+                                for j_s in T.Parallel(block_S):
+                                    b_shared[j_s] = b[batch_idx, left + j_s, bh]
+                            else:
+                                for j_s in T.Parallel(block_S):
+                                    if left + j_s < seq_end_idx:
+                                        b_shared[j_s] = b[batch_idx, left + j_s, bh]
+                                    else:
+                                        b_shared[j_s] = 0
+                            T.barrier_arrive(data_loaded)
+                            T.barrier_wait(data_loaded, i_s % 2)
+                            T.barrier_arrive(iter_done)
+
+                    else:
+                        T.set_max_nreg(96, 1)
+
+                        for i_s in T.serial(num_iters):
+                            if i_s > 0:
+                                T.barrier_wait(iter_done, (i_s - 1) % 2)
+
+                            left = seq_start_idx + i_s * block_S
+                            right = left + block_S
+                            T.copy(
+                                v[
+                                    batch_idx,
+                                    left:right,
+                                    bh,
+                                    bv * block_DV : (bv + 1) * block_DV,
+                                ],
+                                v_shared,
+                            )
+                            if right <= seq_end_idx:
+                                for j_s in T.Parallel(block_S):
+                                    g_shared[j_s] = g[batch_idx, left + j_s, bh]
+                            else:
+                                for j_s in T.Parallel(block_S):
+                                    if left + j_s < seq_end_idx:
+                                        g_shared[j_s] = g[batch_idx, left + j_s, bh]
+                                    else:
+                                        g_shared[j_s] = g[batch_idx, seq_end_idx - 1, bh]
+                            T.barrier_arrive(data_loaded)
+                            T.barrier_wait(data_loaded, i_s % 2)
+                            T.barrier_arrive(iter_done)
+
+                elif tx < 128:
                     T.set_max_nreg(112, 1)
 
                     if use_initial_state:
@@ -963,25 +1056,32 @@ def tilelang_prepare_h_cp_v3(
                         T.barrier_arrive(data_loaded)
                         T.barrier_wait(data_loaded, i_s % 2)
 
-                        T.copy(h_fragment, h_shared)
-                        T.barrier_arrive(bar_1)
+                        if not debug_ht_x_only:
+                            T.copy(h_fragment, h_shared)
+                            T.barrier_arrive(bar_1)
 
-                        T.barrier_wait(bar_1, i_s % 2)
-                        g_last_local_S[0] = T.exp2(
-                            g_shared[block_S - 1] * 1.442695
-                        )
-                        for j_k, j_v in T.Parallel(DK, block_DV):
-                            h_fragment[j_k, j_v] *= g_last_local_S[0]
-                        T.barrier_arrive(bar_2)
+                            T.barrier_wait(bar_1, i_s % 2)
+                            g_last_local_S[0] = T.exp2(
+                                g_shared[block_S - 1] * 1.442695
+                            )
+                            for j_k, j_v in T.Parallel(DK, block_DV):
+                                h_fragment[j_k, j_v] *= g_last_local_S[0]
+                            if not debug_ht_y_only:
+                                T.barrier_arrive(bar_2)
 
-                        T.barrier_wait(bar_2, i_s % 2)
-                        T.gemm(
-                            x_shared,
-                            y_shared,
-                            h_fragment,
-                            transpose_A=True,
-                            clear_accum=False,
-                        )
+                        if not (
+                            debug_ht_x_only
+                            or debug_ht_y_only
+                            or debug_ht_no_final
+                        ):
+                            T.barrier_wait(bar_2, i_s % 2)
+                            T.gemm(
+                                x_shared,
+                                y_shared,
+                                h_fragment,
+                                transpose_A=True,
+                                clear_accum=False,
+                            )
                         T.barrier_arrive(iter_done)
 
                     T.copy(
@@ -1011,18 +1111,20 @@ def tilelang_prepare_h_cp_v3(
                         T.barrier_arrive(data_loaded)
                         T.barrier_wait(data_loaded, i_s % 2)
 
-                        T.gemm(
-                            a_shared,
-                            k_shared,
-                            x_fragment,
-                            transpose_A=True,
-                            clear_accum=True,
-                        )
-                        for j_s, j_k in T.Parallel(block_S, DK):
-                            x_shared[j_s, j_k] = (
-                                x_fragment[j_s, j_k] * -b_shared[j_s]
+                        if not debug_ht_y_only:
+                            T.gemm(
+                                a_shared,
+                                k_shared,
+                                x_fragment,
+                                transpose_A=True,
+                                clear_accum=True,
                             )
-                        T.barrier_arrive(bar_2)
+                            for j_s, j_k in T.Parallel(block_S, DK):
+                                x_shared[j_s, j_k] = (
+                                    x_fragment[j_s, j_k] * -b_shared[j_s]
+                                )
+                            if not debug_ht_x_only:
+                                T.barrier_arrive(bar_2)
                         T.barrier_arrive(iter_done)
 
                 else:
@@ -1055,24 +1157,26 @@ def tilelang_prepare_h_cp_v3(
                         T.barrier_arrive(data_loaded)
                         T.barrier_wait(data_loaded, i_s % 2)
 
-                        g_last_local_Y[0] = g_shared[block_S - 1]
-                        for j_s in T.Parallel(block_S):
-                            g_rev_exp_shared[j_s] = T.exp2(
-                                (g_last_local_Y[0] - g_shared[j_s]) * 1.442695
+                        if not debug_ht_x_only:
+                            g_last_local_Y[0] = g_shared[block_S - 1]
+                            for j_s in T.Parallel(block_S):
+                                g_rev_exp_shared[j_s] = T.exp2(
+                                    (g_last_local_Y[0] - g_shared[j_s]) * 1.442695
+                                )
+                            g_last_local_Y[0] = T.exp2(
+                                g_last_local_Y[0] * 1.442695
                             )
-                        g_last_local_Y[0] = T.exp2(
-                            g_last_local_Y[0] * 1.442695
-                        )
-                        T.barrier_arrive(bar_1)
+                            T.barrier_arrive(bar_1)
 
-                        T.barrier_wait(bar_1, i_s % 2)
-                        T.gemm(k_shared, h_shared, y_fragment, clear_accum=True)
-                        for j_s, j_v in T.Parallel(block_S, block_DV):
-                            y_shared[j_s, j_v] = (
-                                y_fragment[j_s, j_v] * g_last_local_Y[0]
-                                - v_shared[j_s, j_v] * g_rev_exp_shared[j_s]
-                            )
-                        T.barrier_arrive(bar_2)
+                            T.barrier_wait(bar_1, i_s % 2)
+                            T.gemm(k_shared, h_shared, y_fragment, clear_accum=True)
+                            for j_s, j_v in T.Parallel(block_S, block_DV):
+                                y_shared[j_s, j_v] = (
+                                    y_fragment[j_s, j_v] * g_last_local_Y[0]
+                                    - v_shared[j_s, j_v] * g_rev_exp_shared[j_s]
+                                )
+                            if not debug_ht_y_only:
+                                T.barrier_arrive(bar_2)
                         T.barrier_arrive(iter_done)
 
             else:
@@ -1254,13 +1358,31 @@ def fused_gdr_h(
         cp_prepare_debug_mode = os.environ.get(
             "FLASHQLA_CP_PREPARE_DEBUG_MODE", ""
         ).strip().lower()
-        if cp_prepare_debug_mode not in ("", "ht_only", "mt_only"):
+        valid_prepare_debug_modes = (
+            "",
+            "ht_only",
+            "mt_only",
+            "ht_copy_only",
+            "ht_load_only",
+            "ht_x_only",
+            "ht_y_only",
+            "ht_no_final",
+        )
+        if cp_prepare_debug_mode not in valid_prepare_debug_modes:
             raise ValueError(
-                "FLASHQLA_CP_PREPARE_DEBUG_MODE must be empty, ht_only, or mt_only; "
+                "FLASHQLA_CP_PREPARE_DEBUG_MODE must be one of "
+                f"{valid_prepare_debug_modes}; "
                 f"got {cp_prepare_debug_mode!r}"
             )
         debug_skip_ht = cp_prepare_debug_mode == "mt_only"
-        debug_skip_mt = cp_prepare_debug_mode == "ht_only"
+        debug_skip_mt = cp_prepare_debug_mode.startswith("ht_") or (
+            cp_prepare_debug_mode == "ht_only"
+        )
+        debug_ht_copy_only = cp_prepare_debug_mode == "ht_copy_only"
+        debug_ht_load_only = cp_prepare_debug_mode == "ht_load_only"
+        debug_ht_x_only = cp_prepare_debug_mode == "ht_x_only"
+        debug_ht_y_only = cp_prepare_debug_mode == "ht_y_only"
+        debug_ht_no_final = cp_prepare_debug_mode == "ht_no_final"
         if debug_skip_ht and not output_correction:
             raise RuntimeError("mt_only prepare debug mode requires output_correction=True")
         final_correction = torch.empty(
@@ -1287,6 +1409,11 @@ def fused_gdr_h(
             is_varlen=is_varlen,
             debug_skip_ht=debug_skip_ht,
             debug_skip_mt=debug_skip_mt,
+            debug_ht_copy_only=debug_ht_copy_only,
+            debug_ht_load_only=debug_ht_load_only,
+            debug_ht_x_only=debug_ht_x_only,
+            debug_ht_y_only=debug_ht_y_only,
+            debug_ht_no_final=debug_ht_no_final,
         )
         if (
             os.environ.get("FLASHQLA_DEBUG_CP", "") == "1"
