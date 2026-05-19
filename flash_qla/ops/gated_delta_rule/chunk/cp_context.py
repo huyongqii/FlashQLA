@@ -11,7 +11,7 @@ from flash_qla.utils import tensor_cache, assert_supported, is_blackwell
 
 _cc = assert_supported()
 if is_blackwell(_cc):
-    from .blackwell.prepare_h import fused_gdr_h
+    from .blackwell.prepare_h import fused_gdr_h, prepare_cp_correction
     from .blackwell.cp_fwd import (
         correct_initial_states,
         correct_initial_states_no_fallback,
@@ -196,8 +196,21 @@ def intra_card_cp_preprocess(
         num_warmup_chunks=num_warmup_chunks,
     )
     if is_blackwell(_cc):
-        fwd_h_kwargs["output_correction"] = needs_correction
+        # Blackwell CP inference uses a split path: keep the common ht
+        # preparation kernel thin, and materialize the expensive correction
+        # matrix only for fallback segments/heads.
+        fwd_h_kwargs["output_correction"] = False
     _, ht, mt = fused_gdr_h(**fwd_h_kwargs)
+    if is_blackwell(_cc) and needs_correction:
+        mt = prepare_cp_correction(
+            k=k,
+            a=a,
+            g=g,
+            b=b,
+            cu_seqlens=cp_cu_seqlens,
+            num_warmup_chunks=num_warmup_chunks,
+            fallback_mask=fallback_mask,
+        )
 
     if not needs_correction and correct_initial_states_no_fallback is not None:
         cp_h0 = correct_initial_states_no_fallback(
