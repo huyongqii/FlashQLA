@@ -112,7 +112,7 @@ Open the report and record the following table in this file under §3:
 - SM throughput 15%, HBM 37%
 - → Kernel is **SMEM-subsystem-bound**.
 
-**This decisively favours Candidate B first** (RS-gemm deletes `p_shared`, removing one full round-trip from the long-scoreboard hot path). Candidate D (swizzle) is the second move on the same root cause. Candidate A is on hold.
+**Update (2026-05-20 evening)**: Candidate B was attempted and **failed at compile time** — tcgen05 on SM100 mandates different fragment layouts for MMA accumulator vs MMA input-A, so the `p_shared` round-trip cannot be eliminated in registers (see §3 STATUS box). **The remaining direct lever is Candidate D (swizzle).** Candidate A is on hold.
 
 The previous session committed sub-commit 3-A and 3-B without NCU evidence; both turned out to be wrong. **Do not skip step 3.**
 
@@ -154,6 +154,23 @@ T.gemm(q_shared[stage,:,:], h_shared[i_s % 2], o_fragment, clear_accum=True)
 ---
 
 ## 3. Candidate B: cons-O P uses RS-gemm (delete `p_shared`)
+
+> **STATUS (2026-05-20 evening attempt): DEAD — hardware-blocked on SM100.**
+>
+> Implementation tried: replace `T.copy(p_fragment, p_shared)` with an in-register `T.copy(p_fragment, p_cast_fragment)` (bf16 downcast), then call `T.gemm(p_cast_fragment, vd_shared, o_fragment)` as RS gemm.
+>
+> Result: TileLang `LayoutInference` pass errors out with:
+> ```
+> tvm.error.InternalError: Layout infer conflict between p_fragment and p_cast_fragment in T.Parallel loop:
+>   loop Fragment([64, 64] -> [64], replicate: 2, ...)
+>   fragment Fragment([64, 64] -> [32], replicate: 1, ...)
+> ```
+>
+> **Root cause**: tcgen05 on SM100 mandates *different* fragment layouts for the **MMA-output accumulator** (replicate=2) and the **MMA-input A operand** (replicate=1). The two layouts are not directly convertible in registers — the layout swizzle requires a SMEM round-trip. This is exactly why `p_shared` exists in the first place.
+>
+> **Conclusion**: B is unimplementable on SM100 with the current tcgen05 protocol. The `p_shared` round-trip is forced by hardware, not by the kernel author. Reverted before any commit; baseline is unchanged.
+>
+> **Pivot**: D (swizzle) is now the remaining direct lever on the Long-Scoreboard 49.6% bottleneck.
 
 ### Hypothesis
 Currently:

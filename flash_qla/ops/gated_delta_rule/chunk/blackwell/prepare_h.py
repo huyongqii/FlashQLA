@@ -883,6 +883,7 @@ def tilelang_prepare_h_cp_v3(
     DV,
     chunk_size,
     block_DV,
+    mt_block_DV,
     accum_dtype,
     qkva_dtype,
     g_dtype,
@@ -905,7 +906,7 @@ def tilelang_prepare_h_cp_v3(
     num_tokens = T.dynamic("num_tokens")
     block_S = chunk_size
     num_DV_blocks = T.ceildiv(DV, block_DV)
-    num_M_blocks = T.ceildiv(DK, block_DV)
+    num_M_blocks = T.ceildiv(DK, mt_block_DV)
     active_DV_blocks = 0 if debug_skip_ht else num_DV_blocks
     active_M_blocks = (
         num_M_blocks
@@ -1152,15 +1153,15 @@ def tilelang_prepare_h_cp_v3(
                 iter_done = T.alloc_barrier(arrive_count=256)
 
                 if tx < 128:
-                    m_fragment = T.alloc_fragment((DK, block_DV), dtype=accum_dtype)
+                    m_fragment = T.alloc_fragment((DK, mt_block_DV), dtype=accum_dtype)
                     x_fragment = T.alloc_fragment((block_S, DK), dtype=accum_dtype)
                     z_fragment = T.alloc_fragment(
-                        (block_S, block_DV), dtype=accum_dtype
+                        (block_S, mt_block_DV), dtype=accum_dtype
                     )
                     g_prod_M = T.alloc_local((1), dtype=accum_dtype)
 
-                    for j_k, j_v in T.Parallel(DK, block_DV):
-                        if j_k == bm * block_DV + j_v:
+                    for j_k, j_v in T.Parallel(DK, mt_block_DV):
+                        if j_k == bm * mt_block_DV + j_v:
                             m_fragment[j_k, j_v] = 1
                         else:
                             m_fragment[j_k, j_v] = 0
@@ -1186,19 +1187,19 @@ def tilelang_prepare_h_cp_v3(
                         for j_s, j_k in T.Parallel(block_S, DK):
                             x_shared[j_s, j_k] = (
                                 x_fragment[j_s, j_k] * -b_shared[j_s]
-                            )
+                        )
                         g_prod_M[0] += g_shared[block_S - 1]
-                        T.copy(m_fragment, state_shared)
+                        T.copy(m_fragment, state_shared[0:DK, 0:mt_block_DV])
                         T.gemm(
                             k_shared,
-                            state_shared,
+                            state_shared[0:DK, 0:mt_block_DV],
                             z_fragment,
                             clear_accum=True,
                         )
-                        T.copy(z_fragment, rhs_shared)
+                        T.copy(z_fragment, rhs_shared[0:block_S, 0:mt_block_DV])
                         T.gemm(
                             x_shared,
-                            rhs_shared,
+                            rhs_shared[0:block_S, 0:mt_block_DV],
                             m_fragment,
                             transpose_A=True,
                             clear_accum=False,
@@ -1206,11 +1207,16 @@ def tilelang_prepare_h_cp_v3(
                         T.barrier_arrive(iter_done)
 
                     g_prod_M[0] = T.exp2(g_prod_M[0] * 1.442695)
-                    for j_k, j_v in T.Parallel(DK, block_DV):
+                    for j_k, j_v in T.Parallel(DK, mt_block_DV):
                         m_fragment[j_k, j_v] *= g_prod_M[0]
                     T.copy(
                         m_fragment,
-                        mt[bb, bh, 0:DK, bm * block_DV : (bm + 1) * block_DV],
+                        mt[
+                            bb,
+                            bh,
+                            0:DK,
+                            bm * mt_block_DV : (bm + 1) * mt_block_DV,
+                        ],
                     )
 
                 elif tx < 256:
@@ -1314,6 +1320,19 @@ def fused_gdr_h(
                 f"got {block_DV}"
             )
         assert V % block_DV == 0
+        mt_block_DV_env = os.environ.get("FLASHQLA_CP_H_MT_BLOCK_DV", "").strip()
+        mt_block_DV = int(mt_block_DV_env) if mt_block_DV_env else min(block_DV, 32)
+        if mt_block_DV not in (32, 64):
+            raise ValueError(
+                "FLASHQLA_CP_H_MT_BLOCK_DV must be 32 or 64, "
+                f"got {mt_block_DV}"
+            )
+        if mt_block_DV > block_DV:
+            raise ValueError(
+                "FLASHQLA_CP_H_MT_BLOCK_DV must be <= FLASHQLA_CP_H_BLOCK_DV, "
+                f"got mt_block_DV={mt_block_DV}, block_DV={block_DV}"
+            )
+        assert K % mt_block_DV == 0
         min_blocks_per_sm = int(
             os.environ.get("FLASHQLA_CP_H_MIN_BLOCKS_PER_SM", "1")
         )
@@ -1369,7 +1388,8 @@ def fused_gdr_h(
             if os.environ.get("FLASHQLA_DEBUG_CP", "") == "1":
                 print(
                     "[FlashQLA CP] prepare_h ht debug launch "
-                    f"threads=384 block_DV={block_DV} H={H} K={K} V={V} "
+                    f"threads=384 block_DV={block_DV} mt_block_DV={mt_block_DV} "
+                    f"H={H} K={K} V={V} "
                     f"real_batch={real_batch_size} "
                     f"debug_mode={cp_prepare_debug_mode} ht_dtype={final_state.dtype}",
                     flush=True,
@@ -1420,6 +1440,7 @@ def fused_gdr_h(
             V,
             chunk_size,
             block_DV,
+            mt_block_DV,
             qkva_dtype=k.dtype,
             g_dtype=g.dtype,
             b_dtype=b.dtype,
@@ -1439,7 +1460,8 @@ def fused_gdr_h(
         if os.environ.get("FLASHQLA_DEBUG_CP", "") == "1":
             print(
                 "[FlashQLA CP] prepare_h v3 launch "
-                f"threads=384 block_DV={block_DV} H={H} Hg={Hg} K={K} V={V} "
+                f"threads=384 block_DV={block_DV} mt_block_DV={mt_block_DV} "
+                f"H={H} Hg={Hg} K={K} V={V} "
                 f"batch={batch_size} real_batch={real_batch_size} "
                 f"is_varlen={is_varlen} output_correction={output_correction} "
                 f"use_fallback_mask={use_fallback_mask} "
