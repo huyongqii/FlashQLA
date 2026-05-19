@@ -226,24 +226,13 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     T.barrier_arrive(bar_5)
 
                     T.barrier_wait(bar_5, i_s % 2)
-                    # PERF EXPERIMENT: comment out the H-update GEMM to see
-                    # the upper bound. cons-S currently does:
-                    #   wait bar_5 (until cons-V's vn_shared ready)
-                    #   gemm(K^T, vn, h_fragment, accum=True)
-                    # This GEMM is the ONLY work cons-S does that depends on
-                    # the late-iter vn_shared. If commenting it out makes the
-                    # kernel materially faster, then this GEMM is on the
-                    # critical path and we should pipeline H (use prev-iter
-                    # vn). If perf is unchanged, then 4-WG sync chain is the
-                    # real bottleneck. Result is intentionally wrong; only
-                    # measure timing, not correctness.
-                    # T.gemm(
-                    #     k_shared[stage, :, :],
-                    #     vn_shared,
-                    #     h_fragment,
-                    #     transpose_A=True,
-                    #     clear_accum=False,
-                    # )
+                    T.gemm(
+                        k_shared[stage, :, :],
+                        vn_shared,
+                        h_fragment,
+                        transpose_A=True,
+                        clear_accum=False,
+                    )
 
                     T.barrier_arrive(data_is_free[stage])
 
@@ -378,12 +367,18 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     # O tile is only consumed by scalar postprocess and one
                     # short P@Vd accumulation, so keep it in a fragment.
                     T.barrier_wait(bar_1, i_s % 2)
-                    T.gemm(
-                        q_shared[stage, :, :],
-                        h_shared,
-                        o_fragment,
-                        clear_accum=True,
-                    )
+                    # PERF EXPERIMENT 2: comment out cons-O's Q@H GEMM. This
+                    # is the largest GEMM in the iter (M=64, N=128, K=128).
+                    # If kernel materially speeds up, cons-O is the
+                    # bottleneck; if not, the bottleneck is elsewhere
+                    # (cons-V or memory). Result is intentionally wrong.
+                    T.clear(o_fragment)
+                    # T.gemm(
+                    #     q_shared[stage, :, :],
+                    #     h_shared,
+                    #     o_fragment,
+                    #     clear_accum=True,
+                    # )
                     # ---- P scalar post-processing ----
                     for j_s, j_t in T.Parallel(block_S, block_S):
                         if j_s >= j_t:
