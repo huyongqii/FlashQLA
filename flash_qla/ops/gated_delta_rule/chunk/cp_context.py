@@ -11,7 +11,7 @@ from flash_qla.utils import tensor_cache, assert_supported, is_blackwell
 
 _cc = assert_supported()
 if is_blackwell(_cc):
-    from .blackwell.prepare_h import fused_gdr_h, prepare_cp_correction
+    from .blackwell.prepare_h import fused_gdr_h
     from .blackwell.cp_fwd import (
         correct_initial_states,
         correct_initial_states_no_fallback,
@@ -43,6 +43,7 @@ def _calc_cp_seqs(
     raw_cu_seqlens: torch.LongTensor,
     chunk_size: int,
     num_v_heads: int,
+    max_local_chunks_override: int = 0,
 ):
     # TODO: tilelang kernel
     device = raw_cu_seqlens.device
@@ -59,7 +60,9 @@ def _calc_cp_seqs(
     # Scaled by empirical factor (3) and aligned to the nearest power of 2 for optimal SM scheduling & memory alignment.
 
     max_local_chunks_env = os.environ.get("FLASHQLA_CP_MAX_LOCAL_CHUNKS", "").strip()
-    if max_local_chunks_env:
+    if max_local_chunks_override > 0:
+        max_local_chunks = max_local_chunks_override
+    elif max_local_chunks_env:
         max_local_chunks = int(max_local_chunks_env)
         if max_local_chunks < 1:
             raise ValueError(
@@ -79,10 +82,12 @@ def _calc_cp_seqs(
     seq_map_c2r = []
     seq_map_r2c = [0]
     max_local_tokens = max_local_chunks * chunk_size
+    did_split = False
     for i, c in enumerate(num_chunks):
         s = raw_cu_seqlens[i]
         e = raw_cu_seqlens[i + 1]
         if c > max_local_chunks:
+            did_split = True
             while s < e:
                 cp_cu_seqlens.append(s)
                 ht_mask.append(False)
@@ -118,6 +123,7 @@ def _calc_cp_seqs(
         use_cp = False
     elif _cp_env == "1":
         use_cp = True
+    use_cp = use_cp and did_split
 
     if use_cp:
         cp_cu_seqlens = torch.tensor(
@@ -133,7 +139,15 @@ def _calc_cp_seqs(
     else:
         cp_cu_seqlens, seq_map_r2c, ht_mask = None, None, None
 
-    return use_cp, cp_cu_seqlens, seq_map_r2c, seq_map_c2r, ht_mask
+    return (
+        use_cp,
+        cp_cu_seqlens,
+        seq_map_r2c,
+        seq_map_c2r,
+        ht_mask,
+        max_local_chunks,
+        max(num_chunks),
+    )
 
 
 def intra_card_cp_preprocess(
@@ -160,7 +174,15 @@ def intra_card_cp_preprocess(
             device_idx = torch.cuda.current_device()
         raw_cu_seqlens = _create_cu_seqlens(batch_size, num_tokens, device_idx)
 
-    use_cp, cp_cu_seqlens, seq_map_r2c, seq_map_c2r, ht_mask = _calc_cp_seqs(
+    (
+        use_cp,
+        cp_cu_seqlens,
+        seq_map_r2c,
+        seq_map_c2r,
+        ht_mask,
+        max_local_chunks,
+        max_seq_chunks,
+    ) = _calc_cp_seqs(
         raw_cu_seqlens,
         chunk_size,
         num_v_heads,
@@ -172,7 +194,8 @@ def intra_card_cp_preprocess(
     threshold_env = os.environ.get("FLASHQLA_CP_WARMUP_THRESHOLD", "").strip()
     if threshold_env:
         warmup_threshold = float(threshold_env)
-    if os.environ.get("FLASHQLA_CP_EXACT", "") == "1":
+    exact_cp = os.environ.get("FLASHQLA_CP_EXACT", "") == "1"
+    if exact_cp:
         warmup_threshold = float("-inf")
 
     num_warmup_chunks, fallback_mask = get_warmup_chunks(
@@ -183,6 +206,38 @@ def intra_card_cp_preprocess(
         threshold=warmup_threshold,
     )  # [cp_batch_size, num_v_heads]
     needs_correction = bool(fallback_mask.any().item())
+
+    if is_blackwell(_cc) and not exact_cp:
+        while needs_correction and max_local_chunks < max_seq_chunks:
+            max_local_chunks = min(max_seq_chunks, max_local_chunks * 2)
+            (
+                use_cp,
+                cp_cu_seqlens,
+                seq_map_r2c,
+                seq_map_c2r,
+                ht_mask,
+                max_local_chunks,
+                max_seq_chunks,
+            ) = _calc_cp_seqs(
+                raw_cu_seqlens,
+                chunk_size,
+                num_v_heads,
+                max_local_chunks,
+            )
+            if not use_cp:
+                return raw_h0, raw_cu_seqlens, None, None
+            num_warmup_chunks, fallback_mask = get_warmup_chunks(
+                g=g,
+                cu_seqlens=cp_cu_seqlens,
+                ht_mask=ht_mask,
+                chunk_size=chunk_size,
+                threshold=warmup_threshold,
+            )
+            needs_correction = bool(fallback_mask.any().item())
+
+        if needs_correction:
+            return raw_h0, raw_cu_seqlens, None, None
+
     fwd_h_kwargs = dict(
         k=k,
         v=v,
@@ -196,21 +251,9 @@ def intra_card_cp_preprocess(
         num_warmup_chunks=num_warmup_chunks,
     )
     if is_blackwell(_cc):
-        # Blackwell CP inference uses a split path: keep the common ht
-        # preparation kernel thin, and materialize the expensive correction
-        # matrix only for fallback segments/heads.
-        fwd_h_kwargs["output_correction"] = False
+        fwd_h_kwargs["output_correction"] = needs_correction
+        fwd_h_kwargs["fallback_mask"] = fallback_mask
     _, ht, mt = fused_gdr_h(**fwd_h_kwargs)
-    if is_blackwell(_cc) and needs_correction:
-        mt = prepare_cp_correction(
-            k=k,
-            a=a,
-            g=g,
-            b=b,
-            cu_seqlens=cp_cu_seqlens,
-            num_warmup_chunks=num_warmup_chunks,
-            fallback_mask=fallback_mask,
-        )
 
     if not needs_correction and correct_initial_states_no_fallback is not None:
         cp_h0 = correct_initial_states_no_fallback(
