@@ -162,9 +162,8 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
             pg_fragment = T.alloc_fragment((block_S, tmem_width), dtype=qkva_dtype)
             g_last_local = T.alloc_local((1), dtype=accum_dtype)
 
-            # Keep TMEM allocations reusable. Blackwell TCGEN05 accepts wider
-            # output tiles than this kernel stores; expose the width so exact
-            # TMEM can be tested without changing the default benchmark path.
+            # Keep TMEM allocations on TCGEN05-legal widths; some 64-wide
+            # logical tiles are padded to the 128-wide Blackwell MMA atom.
             h_tmem = T.alloc_tmem((DK, tmem_width), dtype=accum_dtype)
             tmp_tmem = T.alloc_tmem((block_S, tmem_width), dtype=accum_dtype)
             p_tmem = T.alloc_tmem((block_S, block_S), dtype=accum_dtype)
