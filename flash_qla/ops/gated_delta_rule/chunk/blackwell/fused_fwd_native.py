@@ -36,7 +36,9 @@ def _select_block_dv(real_batch_size: int, num_v_heads: int) -> int:
         return 128
     if grid_size * 2 >= target_num_ctas:
         return 64
-    return 64
+    # Match Hopper's under-filled-grid split: more CTAs and a smaller value
+    # fragment keep the 512-thread TCGEN05 path under ptxas register pressure.
+    return 32
 
 
 @tilelang.jit(
