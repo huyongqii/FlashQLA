@@ -846,6 +846,9 @@ def tilelang_prepare_h_cp_v3(
     debug_ht_x_only=False,
     debug_ht_y_only=False,
     debug_ht_no_final=False,
+    debug_ht_empty=False,
+    debug_ht_global_store=False,
+    debug_ht_copy_no_nreg=False,
 ):
     batch_size = T.dynamic("batch_size")
     num_tokens = T.dynamic("num_tokens")
@@ -908,7 +911,23 @@ def tilelang_prepare_h_cp_v3(
             num_iters = num_warmup_chunks[bb, bh]
             seq_start_idx = seq_end_idx - num_iters * block_S
 
-            if tile < active_DV_blocks:
+            if debug_ht_empty:
+                # Launch the exact 384-thread ht tile grid but emit no body.
+                # This isolates CTA shape/codegen from fragment/copy/nreg issues.
+                if tx < 128:
+                    pass
+
+            elif debug_ht_global_store:
+                # Store directly to global without fragment allocation or setmaxnreg.
+                # If this passes but ht_copy_only fails, the culprit is fragment copy
+                # or warpgroup register allocation rather than the 384-thread grid.
+                if tile < active_DV_blocks:
+                    bv = tile
+                    if tx < 128:
+                        for j_k, j_v in T.Parallel(DK, block_DV):
+                            ht[bb, bh, j_k, bv * block_DV + j_v] = 0
+
+            elif tile < active_DV_blocks:
                 bv = tile
 
                 k_shared = T.alloc_shared((block_S, DK), dtype=qkva_dtype)
@@ -944,16 +963,19 @@ def tilelang_prepare_h_cp_v3(
 
                 if debug_ht_copy_only:
                     if tx < 128:
-                        T.set_max_nreg(112, 1)
+                        if not debug_ht_copy_no_nreg:
+                            T.set_max_nreg(112, 1)
                         T.clear(h_fragment)
                         T.copy(
                             h_fragment,
                             ht[bb, bh, 0:DK, bv * block_DV : (bv + 1) * block_DV],
                         )
                     elif tx < 256:
-                        T.set_max_nreg(112, 1)
+                        if not debug_ht_copy_no_nreg:
+                            T.set_max_nreg(112, 1)
                     else:
-                        T.set_max_nreg(96, 1)
+                        if not debug_ht_copy_no_nreg:
+                            T.set_max_nreg(96, 1)
 
                 elif debug_ht_load_only:
                     if tx < 128:
@@ -1367,6 +1389,9 @@ def fused_gdr_h(
             "ht_x_only",
             "ht_y_only",
             "ht_no_final",
+            "ht_empty",
+            "ht_global_store",
+            "ht_copy_no_nreg",
         )
         if cp_prepare_debug_mode not in valid_prepare_debug_modes:
             raise ValueError(
@@ -1383,6 +1408,9 @@ def fused_gdr_h(
         debug_ht_x_only = cp_prepare_debug_mode == "ht_x_only"
         debug_ht_y_only = cp_prepare_debug_mode == "ht_y_only"
         debug_ht_no_final = cp_prepare_debug_mode == "ht_no_final"
+        debug_ht_empty = cp_prepare_debug_mode == "ht_empty"
+        debug_ht_global_store = cp_prepare_debug_mode == "ht_global_store"
+        debug_ht_copy_no_nreg = cp_prepare_debug_mode == "ht_copy_no_nreg"
         if debug_skip_ht and not output_correction:
             raise RuntimeError("mt_only prepare debug mode requires output_correction=True")
         final_correction = torch.empty(
@@ -1414,6 +1442,9 @@ def fused_gdr_h(
             debug_ht_x_only=debug_ht_x_only,
             debug_ht_y_only=debug_ht_y_only,
             debug_ht_no_final=debug_ht_no_final,
+            debug_ht_empty=debug_ht_empty,
+            debug_ht_global_store=debug_ht_global_store,
+            debug_ht_copy_no_nreg=debug_ht_copy_no_nreg,
         )
         if (
             os.environ.get("FLASHQLA_DEBUG_CP", "") == "1"
