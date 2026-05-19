@@ -367,30 +367,30 @@ def tilelang_fused_chunk_gdr_fwd_blackwell_ag(
                     # O tile is only consumed by scalar postprocess and one
                     # short P@Vd accumulation, so keep it in a fragment.
                     T.barrier_wait(bar_1, i_s % 2)
-                    # PERF EXPERIMENT 2: comment out cons-O's Q@H GEMM. This
-                    # is the largest GEMM in the iter (M=64, N=128, K=128).
-                    # If kernel materially speeds up, cons-O is the
-                    # bottleneck; if not, the bottleneck is elsewhere
-                    # (cons-V or memory). Result is intentionally wrong.
-                    T.clear(o_fragment)
-                    # T.gemm(
-                    #     q_shared[stage, :, :],
-                    #     h_shared,
-                    #     o_fragment,
-                    #     clear_accum=True,
-                    # )
+                    T.gemm(
+                        q_shared[stage, :, :],
+                        h_shared,
+                        o_fragment,
+                        clear_accum=True,
+                    )
                     # ---- P scalar post-processing ----
-                    for j_s, j_t in T.Parallel(block_S, block_S):
-                        if j_s >= j_t:
-                            decay_local[0] = (
-                                g_exp_shared[j_s] * g_inv_exp_shared[j_t]
-                            )
-                            p_fragment[j_s, j_t] *= scale * decay_local[0]
-                            a_shared[stage, j_s, j_t] *= decay_local[0]
-                            a_shared[stage, j_s, j_t] *= b_shared[stage, j_t]
-                        else:
-                            p_fragment[j_s, j_t] = 0
-                            a_shared[stage, j_s, j_t] = 0
+                    # PERF EXPERIMENT 3: comment out the heaviest elementwise
+                    # block in the kernel — 64x64 = 4096 iters with TWO
+                    # SMEM writes to a_shared per (j_s, j_t). If perf jumps
+                    # materially, this elementwise block is the bottleneck
+                    # and we should fuse the two writes / lift to fragment.
+                    # Result is intentionally wrong.
+                    # for j_s, j_t in T.Parallel(block_S, block_S):
+                    #     if j_s >= j_t:
+                    #         decay_local[0] = (
+                    #             g_exp_shared[j_s] * g_inv_exp_shared[j_t]
+                    #         )
+                    #         p_fragment[j_s, j_t] *= scale * decay_local[0]
+                    #         a_shared[stage, j_s, j_t] *= decay_local[0]
+                    #         a_shared[stage, j_s, j_t] *= b_shared[stage, j_t]
+                    #     else:
+                    #         p_fragment[j_s, j_t] = 0
+                    #         a_shared[stage, j_s, j_t] = 0
 
                     # arrive bar_3 ASAP: cons-V only needs a_shared's writes
                     # (done above), it does NOT read p_shared. Releasing
